@@ -10,6 +10,14 @@ import sys
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+# ── Pre-mock hardware SDKs so imports don't fail ─────────────────────────
+# The real packages (xarm, cv2, pyrealsense2) are only installed on the
+# robot.  Injecting stubs into sys.modules *before* any driver import
+# prevents ModuleNotFoundError during test collection.
+for _mod_name in ("xarm", "xarm.wrapper", "xarm.core",
+                  "cv2", "pyrealsense2"):
+    sys.modules.setdefault(_mod_name, MagicMock())
+
 import pytest
 
 # Ensure xarm_service root is on the path

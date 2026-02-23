@@ -45,7 +45,9 @@ def mock_config_service():
 @pytest.fixture
 def mqtt_client(mock_config_service):
     """Create UnifiedMQTTClient instance for testing."""
-    with patch('app.services.mqtt_client_service.mqtt_client') as mock_mqtt_module:
+    with patch('app.services.mqtt_client_service.mqtt_client') as mock_mqtt_module, \
+         patch('app.services.mqtt_client_service.MQTT_CONNECTION_WAIT_TIMEOUT_SECONDS', 0.0), \
+         patch('app.services.mqtt_client_service.MQTT_CONNECTION_CHECK_INTERVAL_SECONDS', 0.01):
         # Mock paho.mqtt.client module
         mock_client_class = Mock()
         mock_client_instance = Mock()

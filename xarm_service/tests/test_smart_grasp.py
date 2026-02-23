@@ -173,7 +173,17 @@ class TestGraspVerifier:
 
 # ── DepthService helpers ───────────────────────────────────────────────────
 
-cv2 = pytest.importorskip("cv2", reason="opencv not installed")
+# cv2 may be a MagicMock injected by conftest (no real OpenCV on CI).
+# DepthService tests require real cv2 functions (findContours, morphologyEx).
+from unittest.mock import MagicMock as _MagicMock
+_cv2_mod = sys.modules.get("cv2")
+_cv2_is_real = _cv2_mod is not None and not isinstance(_cv2_mod, _MagicMock)
+
+if _cv2_is_real:
+    cv2 = _cv2_mod  # type: ignore[assignment]
+
+
+@pytest.mark.skipif(not _cv2_is_real, reason="cv2 is mocked – real OpenCV required")
 
 
 class TestDepthServiceHelpers:

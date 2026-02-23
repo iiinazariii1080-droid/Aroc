@@ -19,7 +19,10 @@ def test_robot_positions_save_calls_db(test_client):
     # Patch DB writer to avoid touching real DB in test
     with patch("routes.robot_positions.save_robot_position") as mock_save:
         mock_save.return_value = True
-        resp = test_client.post("/robot_positions/save", json={"name": "Pose1", "params": {"x": 1}})
+        resp = test_client.post("/robot_positions/save", json={
+            "name": "Pose1",
+            "params": {"location": {"x_m": 1.0, "y_m": 2.0}},
+        })
         assert resp.status_code == 201
         data = resp.json()
         assert data["status"] == "ok"

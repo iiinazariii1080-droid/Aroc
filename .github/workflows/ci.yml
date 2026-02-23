@@ -39,7 +39,6 @@ jobs:
 
       - name: Run ruff check
         run: ruff check ${{ matrix.service }}
-        continue-on-error: true  # non-blocking until codebase is fully clean
 
   # ── Unit tests ─────────────────────────────────────────────────────────
   test:
@@ -103,7 +102,10 @@ jobs:
               -m "not hardware and not simulator" \
               --timeout=30 \
               -q --tb=short \
-              --junitxml=test-results-${{ matrix.service }}.xml
+              --junitxml=test-results-${{ matrix.service }}.xml \
+              --cov="${{ matrix.service }}" \
+              --cov-report=term-missing:skip-covered \
+              --cov-fail-under=60
           else
             echo "No tests directory found for ${{ matrix.service }}"
           fi

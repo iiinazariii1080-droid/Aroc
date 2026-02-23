@@ -77,11 +77,18 @@
     maxVoxels: 400000,
     pendingShot: false,
     pendingShotColor: false,
+    pendingClearFrame: false,
     persistStatus: "",
     persistenceLoaded: false,
     shotChunks: [],
     shotSeq: 0,
   };
+
+  const BLACK_RGB_THRESHOLD = 12;
+
+  function isNearBlackRgb(r8, g8, b8) {
+    return r8 <= BLACK_RGB_THRESHOLD && g8 <= BLACK_RGB_THRESHOLD && b8 <= BLACK_RGB_THRESHOLD;
+  }
 
   // ─────────────────────────────────────────────────
   // §1  Axes helper — ROS convention rendered in Three.js space
@@ -369,9 +376,10 @@
     const mat = new THREE.PointsMaterial({
       size: rec.livePointSize_wu || overlay.pointSize_wu || 0.06,
       vertexColors: true,
-      transparent: true,
-      opacity: overlay.opacity == null ? 0.9 : overlay.opacity,
-      depthWrite: false,
+      transparent: false,
+      opacity: 1.0,
+      depthTest: true,
+      depthWrite: true,
       sizeAttenuation: true,
     });
     const points = new THREE.Points(geo, mat);
@@ -391,9 +399,10 @@
     const mat = new THREE.PointsMaterial({
       size: rec.mapPointSize_wu || 0.04,
       vertexColors: true,
-      transparent: true,
-      opacity: rec.mapOpacity == null ? 0.9 : rec.mapOpacity,
-      depthWrite: false,
+      transparent: false,
+      opacity: 1.0,
+      depthTest: true,
+      depthWrite: true,
       sizeAttenuation: true,
     });
     const points = new THREE.Points(geo, mat);
@@ -646,7 +655,11 @@
     clearBtn.type = "button";
     clearBtn.textContent = "Clear";
     clearBtn.style.cssText = "flex:1;border:1px solid #4b5563;background:#111827;color:#e5e7eb;border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;";
-    clearBtn.addEventListener("click", clearRecordedMap);
+    clearBtn.addEventListener("click", () => {
+      depthState.pendingClearFrame = true;
+      if (!depthState.recording) depthState.status = "clear-frame";
+      updateCloudControlPanel();
+    });
 
     const shotBtn = document.createElement("button");
     shotBtn.type = "button";
@@ -831,9 +844,16 @@
             ? Math.max(0, Math.min(colorHeight - 1, Math.round((srcV / (logicalHeight - 1)) * (colorHeight - 1))))
             : 0;
           const ci = (cv * colorWidth + cu) * 3;
-          colors[i3 + 0] = colorRaw[ci + 0] / 255;
-          colors[i3 + 1] = colorRaw[ci + 1] / 255;
-          colors[i3 + 2] = colorRaw[ci + 2] / 255;
+          const r8 = colorRaw[ci + 0];
+          const g8 = colorRaw[ci + 1];
+          const b8 = colorRaw[ci + 2];
+          if (isNearBlackRgb(r8, g8, b8)) {
+            continue;
+          } else {
+            colors[i3 + 0] = r8 / 255;
+            colors[i3 + 1] = g8 / 255;
+            colors[i3 + 2] = b8 / 255;
+          }
         } else {
           // Uniform single colour for depth-only shots (configurable in scene-config)
           const uniColor = overlay.depthShotColor || [0.45, 0.75, 0.95];
@@ -862,6 +882,16 @@
     depthState.frameWidth = frame.width;
     depthState.frameHeight = frame.height;
     depthState.livePointsCount = frame.count;
+  }
+
+  function clearLiveGeometry() {
+    if (!depthState.liveGeometry) return;
+    depthState.liveGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3));
+    depthState.liveGeometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(0), 3));
+    depthState.liveGeometry.computeBoundingSphere();
+    depthState.frameWidth = 0;
+    depthState.frameHeight = 0;
+    depthState.livePointsCount = 0;
   }
 
   function rebuildMapGeometryFromVoxelMap() {
@@ -1007,10 +1037,64 @@
     updateCloudControlPanel();
   }
 
+  function clearFrameRegion(frame, cameraWorldMatrix) {
+    if (!frame || !frame.count) return;
+    const minDistanceM = Math.max(0, Number((CFG.DEPTH_OVERLAY || {}).minDistanceM) || 0.10);
+    let tanXMax = 0;
+    let tanYMax = 0;
+    for (let i = 0; i < frame.count; i++) {
+      const i3 = i * 3;
+      const x = frame.positions[i3 + 0] / CFG.WORLD.SCALE_FACTOR;
+      const y = frame.positions[i3 + 1] / CFG.WORLD.SCALE_FACTOR;
+      const z = frame.positions[i3 + 2] / CFG.WORLD.SCALE_FACTOR;
+      const dist = -z;
+      if (dist <= minDistanceM) continue;
+      tanXMax = Math.max(tanXMax, Math.abs(x) / Math.max(1e-6, dist));
+      tanYMax = Math.max(tanYMax, Math.abs(y) / Math.max(1e-6, dist));
+    }
+    if (tanXMax <= 0 || tanYMax <= 0) return;
+
+    const invCamera = (cameraWorldMatrix || cameraMountRef.matrixWorld).clone().invert();
+    const p = new THREE.Vector3();
+    const keysToDelete = new Set();
+    for (const [key, entry] of depthState.voxelMap.entries()) {
+      p.set(entry.x, entry.y, entry.z).applyMatrix4(invCamera);
+      const xM = p.x / CFG.WORLD.SCALE_FACTOR;
+      const yM = p.y / CFG.WORLD.SCALE_FACTOR;
+      const zM = p.z / CFG.WORLD.SCALE_FACTOR;
+      const dist = -zM;
+      if (dist <= minDistanceM) continue;
+      const tx = Math.abs(xM) / Math.max(1e-6, dist);
+      const ty = Math.abs(yM) / Math.max(1e-6, dist);
+      if (tx <= tanXMax && ty <= tanYMax) {
+        keysToDelete.add(key);
+      }
+    }
+
+    let removed = 0;
+    for (const key of keysToDelete) {
+      if (depthState.voxelMap.delete(key)) removed += 1;
+    }
+    if (keysToDelete.size > 0) {
+      for (const chunk of depthState.shotChunks) {
+        for (const key of keysToDelete) chunk.points.delete(key);
+      }
+      depthState.shotChunks = depthState.shotChunks.filter(chunk => chunk.points.size > 0);
+    }
+
+    if (removed > 0) {
+      depthState.persistStatus = `Clear frame: removed ${removed} voxels`;
+    }
+    rebuildMapGeometryFromVoxelMap();
+    updateCloudControlPanel();
+    updateDepthDebugPanel();
+  }
+
   async function updateDepthOverlay(nowMs) {
     if (!depthState.enabled || !cameraMountRef || !depthState.livePoints) return;
-    const wantsCapture = depthState.recording || depthState.pendingShot || depthState.pendingShotColor;
+    const wantsCapture = depthState.recording || depthState.pendingShot || depthState.pendingShotColor || depthState.pendingClearFrame;
     if (!wantsCapture) {
+      clearLiveGeometry();
       if (depthState.status !== "paused") {
         depthState.status = "paused";
         updateDepthDebugPanel();
@@ -1029,10 +1113,24 @@
     try {
       const consumeShot = depthState.pendingShot;
       const consumeColorShot = depthState.pendingShotColor;
+      const consumeClearFrame = depthState.pendingClearFrame;
       depthState.pendingShot = false;
       depthState.pendingShotColor = false;
+      depthState.pendingClearFrame = false;
       cameraMountRef.updateWorldMatrix(true, false);
       const cameraWorldSnapshot = cameraMountRef.matrixWorld.clone();
+
+      if (consumeClearFrame) {
+        const json = await fetchDepthFrameJson();
+        const { raw, width, height } = toDepthPayload(json);
+        const frame = buildDepthFrame(raw, width, height);
+        clearLiveGeometry();
+        clearFrameRegion(frame, cameraWorldSnapshot);
+        depthState.status = "clear-frame";
+        updateCloudControlPanel();
+        updateDepthDebugPanel();
+        return;
+      }
 
       // Shot         → depth only, uniform colour (depthShotColor)
       // Shot Color   → native depth geometry + RGB colours from frame_color_overlay
@@ -1268,6 +1366,7 @@
         depthState.recording = false;
         depthState.pendingShot = false;
         depthState.pendingShotColor = false;
+        depthState.pendingClearFrame = false;
         depthState.panelEnabled = false;
         depthState.status = "paused";
         depthState.controlsEnabled = true;
@@ -1337,6 +1436,7 @@
     depthState.maxVoxels = 400000;
     depthState.pendingShot = false;
     depthState.pendingShotColor = false;
+    depthState.pendingClearFrame = false;
     depthState.persistStatus = "";
     depthState.persistenceLoaded = false;
     depthState.shotChunks.length = 0;

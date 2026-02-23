@@ -49,6 +49,9 @@ def _docker(args):
     return subprocess.run(["docker", *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
 
 
+_SERVICE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
 @pytest.mark.skipif(os.getenv("CI") is None and _docker(["version"]).returncode != 0, reason="Docker not available")
 def test_container_build_run_health_and_rate_limit():
     image_tag = f"robot-service-test:{uuid.uuid4().hex[:8]}"
@@ -60,8 +63,8 @@ def test_container_build_run_health_and_rate_limit():
     }
 
     try:
-        # Build image
-        build = _docker(["build", "-t", image_tag, "."])
+        # Build image (use service directory as build context)
+        build = _docker(["build", "-t", image_tag, _SERVICE_DIR])
         assert build.returncode == 0, f"docker build failed: {build.stderr}"
 
         # Run container

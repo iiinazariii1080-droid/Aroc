@@ -99,10 +99,12 @@ class TestCheckWebrtcConnection:
     @patch("telemetry.WEBSOCKET_AVAILABLE", True)
     @patch("telemetry._ws_check_interval", return_value=0)
     @patch("telemetry._get_janus_endpoints", return_value=("ws://a:8188", "ws://b:8188"))
-    @patch("telemetry.websocket.create_connection")
-    def test_connection_success(self, mock_create, mock_endpoints, mock_interval):
+    @patch("telemetry.websocket", create=True)
+    def test_connection_success(self, mock_ws, mock_endpoints, mock_interval):
+        mock_ws.WebSocketTimeoutException = type("WebSocketTimeoutException", (Exception,), {})
+        mock_ws.WebSocketConnectionClosedException = type("WebSocketConnectionClosedException", (Exception,), {})
         mock_conn = MagicMock()
-        mock_create.return_value = mock_conn
+        mock_ws.create_connection.return_value = mock_conn
         telemetry.webrtc_last_check = 0  # force check
         result = telemetry.check_webrtc_connection()
         assert result is True
@@ -111,8 +113,11 @@ class TestCheckWebrtcConnection:
     @patch("telemetry.WEBSOCKET_AVAILABLE", True)
     @patch("telemetry._ws_check_interval", return_value=0)
     @patch("telemetry._get_janus_endpoints", return_value=("ws://a:8188", "ws://b:8188"))
-    @patch("telemetry.websocket.create_connection", side_effect=Exception("refused"))
-    def test_connection_failure(self, mock_create, mock_endpoints, mock_interval):
+    @patch("telemetry.websocket", create=True)
+    def test_connection_failure(self, mock_ws, mock_endpoints, mock_interval):
+        mock_ws.WebSocketTimeoutException = type("WebSocketTimeoutException", (Exception,), {})
+        mock_ws.WebSocketConnectionClosedException = type("WebSocketConnectionClosedException", (Exception,), {})
+        mock_ws.create_connection.side_effect = Exception("refused")
         telemetry.webrtc_last_check = 0
         result = telemetry.check_webrtc_connection()
         assert result is False

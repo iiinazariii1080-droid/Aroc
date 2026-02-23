@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arm 3D Viewer v2</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0f1116; }
+    canvas#arm3d-canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    #arm3d-status {
+      position: absolute;
+      bottom: 8px;
+      left: 8px;
+      color: #556;
+      font: 11px/1.3 monospace;
+      pointer-events: none;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="arm3d-canvas"></canvas>
+  <div id="arm3d-status">arm3d v2: loading...</div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

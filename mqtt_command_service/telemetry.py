@@ -34,6 +34,7 @@ try:
     import websocket
     WEBSOCKET_AVAILABLE = True
 except ImportError:
+    websocket = None  # type: ignore[assignment]
     WEBSOCKET_AVAILABLE = False
 
 try:

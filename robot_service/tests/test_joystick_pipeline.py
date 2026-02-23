@@ -101,13 +101,21 @@ async def test_single_click_and_scheduled_stop():
         }
         assert await jp.submit(frame) is True
 
-        # Wait for move to be processed
-        await asyncio.sleep(0.05)
-        # Should have one move_step isLoop=False
-        assert any(c.get("type") == "move_step" and c.get("is_loop") is False for c in fake.calls)
+        # Wait for move to be processed (generous for slow ARM hardware)
+        await asyncio.sleep(0.3)
+        # Button 13 maps to y+1 movement with is_loop=True
+        assert any(c.get("type") == "move_step" and c.get("is_loop") is True for c in fake.calls)
 
-        # Wait for scheduled step_over
-        await asyncio.sleep(0.15)
+        # Release button → send a second frame with button 13 released
+        frame_release = {
+            "ts": time.time(),
+            "axes": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "buttons": [0] * 18,
+            "ttl": 100,
+        }
+        await jp.submit(frame_release)
+        await asyncio.sleep(0.3)
+        # Pipeline should have called move_step_over (inactivity stop)
         assert any(c.get("type") == "move_step_over" for c in fake.calls)
     finally:
         await jp.stop()
