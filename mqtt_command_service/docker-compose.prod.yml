@@ -1,0 +1,70 @@
+services:
+  mqtt_command_service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mqtt_command_service
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Path to configuration DB
+      - CONFIG_DB_PATH=/app/data/config.db
+      # API configuration (can be overridden in .env)
+      - API_ENABLED=${API_ENABLED:-true}
+      - API_PORT=${API_PORT:-7900}
+      - API_HOST=${API_HOST:-0.0.0.0}
+      # Certificate storage
+      - CERT_STORAGE_DIR=/app/certs
+      # Logging
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - JSON_LOGS=${JSON_LOGS:-false}
+    volumes:
+      # Configuration database (persistent)
+      - ./data:/app/data
+      # Certificates (if TLS is used)
+      - ./certs:/app/certs
+      # Logs (optional)
+      - ./logs:/app/logs
+    ports:
+      # API port (only if API_ENABLED=true)
+      - "${API_PORT:-7900}:${API_PORT:-7900}"
+    networks:
+      - default
+    # Health check
+    healthcheck:
+      test: ["CMD", "python3", "healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # Security hardening
+    user: "appuser"
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
+
+networks:
+  default:
+    driver: bridge
+

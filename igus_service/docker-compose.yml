@@ -1,0 +1,28 @@
+services:
+  igus_service:
+    build: .
+    container_name: igus_service
+    network_mode: host
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_HOST: 0.0.0.0
+      SERVICE_PORT: "8101"
+      # Real drive endpoint
+      IGUS_MOTOR_IP: ${IGUS_MOTOR_IP:-192.168.1.230}
+      IGUS_MOTOR_PORT: ${IGUS_MOTOR_PORT:-502}
+      DRYVE_UNIT_ID: ${DRYVE_UNIT_ID:-0}
+      # Real motor — strict TID matching
+      DRYVE_ALLOW_TID_MISMATCH: ${DRYVE_ALLOW_TID_MISMATCH:-0}
+    # network_mode: host — ports section not needed, service listens on host 8101 directly
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:8101/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

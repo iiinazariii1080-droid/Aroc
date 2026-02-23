@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>RealSense Viewer</title>
+  <script src="/api/v1/__CAM_TYPE__/janus.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/gamepaddriver.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/webrtc-adapter@8.2.3/out/adapter.js"></script>
+  <!-- Clean-architecture player scripts (no bundler; namespace-based) -->
+  <script src="/api/v1/__CAM_TYPE__/player/ns.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/config.js"></script>
+
+  <script src="/api/v1/__CAM_TYPE__/player/core/player_state.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/core/codes.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/core/domain_events.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/core/connection_policy.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/core/state_machine_canonical.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/core/invariants.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/core/fail_closed.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/core/backoff.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/core/recovery_policy.js"></script>
+
+  <script src="/api/v1/__CAM_TYPE__/player/ports/clock_port.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/ports/logger_port.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/ports/streaming_port.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/ports/video_port.js"></script>
+
+  <script src="/api/v1/__CAM_TYPE__/player/adapters/clock.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/adapters/logger.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/adapters/janus_session_manager.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/adapters/dom_ui_adapter.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/adapters/janus_streaming_adapter.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/adapters/janus_textroom_adapter.js"></script>
+
+  <script src="/api/v1/__CAM_TYPE__/player/app/stats_service.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/app/joystick_service.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/app/recovery_map.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/app/reconnect_coordinator.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/app/timer_coordinator.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/app/watchdog_service.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/app/player_controller.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/bootstrap.js"></script>
+  <style>
+    :root {
+      /* ── Color System (Apple HIG dark palette) ── */
+      --clr-bg: #000;
+      --clr-surface: rgba(28, 28, 30, 0.72);
+      --clr-surface-hover: rgba(44, 44, 46, 0.82);
+      --clr-surface-active: rgba(58, 58, 60, 0.88);
+      --clr-text: rgba(255, 255, 255, 0.92);
+      --clr-text-secondary: rgba(255, 255, 255, 0.55);
+
+      /* ── State Palette ── */
+      --clr-idle: #8e8e93;
+      --clr-connecting: #0a84ff;
+      --clr-playing: #30d158;
+      --clr-reconnecting: #ff9f0a;
+      --clr-error: #ff453a;
+
+      /* ── Layout Tokens ── */
+      --inset: 12px;
+      --gap: 8px;
+      --radius: 8px;
+      --radius-pill: 20px;
+
+      /* ── Typography ── */
+      --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+      --font-mono: 'SF Mono', ui-monospace, 'Menlo', 'Cascadia Code', 'Consolas', monospace;
+      --text-xs: 11px;
+      --text-sm: 12px;
+      --text-md: 13px;
+      --line-height: 1.35;
+
+      /* ── Motion ── */
+      --duration: 200ms;
+      --ease: cubic-bezier(0.25, 0.46, 0.45, 0.94);
+
+      /* ── Touch (Apple HIG minimum) ── */
+      --touch-min: 44px;
+
+      /* ── Video ── */
+      --video-fit: cover;      /* cover = fill viewport (crop edges); contain = full undistorted frame */
+      --video-rotation: 180deg;
+
+      color-scheme: dark;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%; width: 100%;
+      background: var(--clr-bg);
+      overflow: hidden;
+      font-family: var(--font-ui);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* ── Video ── */
+    video {
+      position: fixed; inset: 0;
+      width: 100vw; height: 100vh;
+      object-fit: var(--video-fit);
+      transform: rotate(var(--video-rotation));
+      background: var(--clr-bg);
+    }
+
+    /* ── Controls Bar ── */
+    .controls {
+      position: fixed;
+      top: var(--inset); left: var(--inset);
+      z-index: 10;
+      display: flex;
+      gap: var(--gap);
+    }
+
+    .controls button {
+      appearance: none;
+      border: 1px solid transparent;
+      background: var(--clr-surface);
+      color: var(--clr-text);
+      font: 600 var(--text-sm) / 1 var(--font-ui);
+      padding: 0 16px;
+      min-height: var(--touch-min);
+      min-width: var(--touch-min);
+      border-radius: var(--radius);
+      cursor: pointer;
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      transition:
+        background var(--duration) var(--ease),
+        border-color var(--duration) var(--ease),
+        transform 120ms var(--ease),
+        opacity var(--duration) var(--ease);
+      user-select: none;
+      -webkit-user-select: none;
+      white-space: nowrap;
+    }
+
+    .controls button:hover  { background: var(--clr-surface-hover); }
+    .controls button:active { background: var(--clr-surface-active); transform: scale(0.96); }
+    .controls button:focus-visible { outline: 2px solid var(--clr-connecting); outline-offset: 2px; }
+
+    /* Retry — elevated urgency */
+    .controls button[data-mode="retry"] {
+      background: rgba(255, 69, 58, 0.2);
+      color: var(--clr-error);
+      border-color: rgba(255, 69, 58, 0.4);
+    }
+    .controls button[data-mode="retry"]:hover {
+      background: rgba(255, 69, 58, 0.32);
+    }
+
+    /* ── Status Pill ── */
+    #statusPill {
+      position: fixed;
+      top: var(--inset); right: var(--inset);
+      z-index: 9999;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      background: var(--clr-surface);
+      color: var(--clr-text);
+      padding: 0 14px;
+      height: 32px;
+      border-radius: var(--radius-pill);
+      font: 500 var(--text-sm) / 1 var(--font-mono);
+      letter-spacing: 0.02em;
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      pointer-events: none;
+      border: 1px solid transparent;
+      transition:
+        background var(--duration) var(--ease),
+        color var(--duration) var(--ease),
+        border-color var(--duration) var(--ease),
+        box-shadow var(--duration) var(--ease);
+    }
+
+    /* State indicator dot */
+    #statusPill::before {
+      content: '';
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--clr-idle);
+      transition: background var(--duration) var(--ease), box-shadow var(--duration) var(--ease);
+    }
+
+    #statusPill[data-state="IDLE"]::before       { background: var(--clr-idle); }
+
+    #statusPill[data-state="CONNECTING"]::before  {
+      background: var(--clr-connecting);
+      box-shadow: 0 0 6px var(--clr-connecting);
+      animation: state-pulse 1.8s ease-in-out infinite;
+    }
+
+    #statusPill[data-state="PLAYING"]::before {
+      background: var(--clr-playing);
+      box-shadow: 0 0 4px rgba(48, 209, 88, 0.4);
+    }
+
+    #statusPill[data-state="RECONNECTING"]::before {
+      background: var(--clr-reconnecting);
+      box-shadow: 0 0 6px var(--clr-reconnecting);
+      animation: state-pulse 1.4s ease-in-out infinite;
+    }
+
+    #statusPill[data-state="ERROR"]::before {
+      background: var(--clr-error);
+      box-shadow: 0 0 8px rgba(255, 69, 58, 0.6);
+    }
+    #statusPill[data-state="ERROR"] {
+      background: rgba(255, 69, 58, 0.12);
+      border-color: rgba(255, 69, 58, 0.3);
+    }
+
+    @keyframes state-pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.35; }
+    }
+
+    /* ── Info Panels ── */
+    #statsBox,
+    #debugPanel {
+      position: fixed;
+      z-index: 20;
+      background: var(--clr-surface);
+      color: var(--clr-text);
+      padding: 10px 12px;
+      border-radius: var(--radius);
+      font: var(--text-xs) / var(--line-height) var(--font-mono);
+      max-width: 50vw;
+      max-height: 35vh;
+      overflow: auto;
+      white-space: pre;
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      pointer-events: none;
+      display: none;
+    }
+
+    #statsBox    { bottom: var(--inset); left: var(--inset); color: var(--clr-playing); }
+    #debugPanel  { bottom: var(--inset); right: var(--inset); color: var(--clr-text-secondary); }
+
+    /* ── Reduced Motion ── */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+  <link rel="icon" href="/favicon.ico">
+</head>
+<body
+  data-prefer-stream-id="1305"
+  data-stream-name="RealSense RGB"
+  data-api-prefix="/api/v1/__CAM_TYPE__"
+  data-autoplay="1"
+  data-debug-panel="0"
+  data-auto-restart="local"
+  data-joystick-mode="always"
+  data-no-frame-threshold-ms="5000"
+  data-track-mute-ms="3000"
+  data-watchdog-interval-ms="2000"
+  data-connect-settle-ms="3000"
+  data-client-config-path="/api/v1/__CAM_TYPE__/client-config"
+>
+  <div id="statusPill" role="status" aria-live="polite"></div>
+  <pre id="debugPanel" aria-hidden="true"></pre>
+
+  <div class="controls" role="toolbar" aria-label="Player controls">
+    <button id="playBtn" type="button" aria-label="Play">Play</button>
+    <button id="statsBtn" type="button" aria-label="Toggle statistics">Show stats</button>
+  </div>
+
+  <pre id="statsBox" aria-label="Stream statistics"></pre>
+  <video id="video" autoplay playsinline muted></video>
+
+
+
+</body>
+</html>

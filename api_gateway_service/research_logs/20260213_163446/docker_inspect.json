@@ -1,0 +1,303 @@
+[
+    {
+        "Id": "f5e68c2443c284c8eae52412443741f244dcf1ffaca6b06f23d9c5c0a65a2c7d",
+        "Created": "2026-02-13T15:16:35.590020104Z",
+        "Path": "sh",
+        "Args": [
+            "-c",
+            "gunicorn main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT} --workers ${WEB_CONCURRENCY:-1} --timeout 30 --graceful-timeout 15"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 1610206,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-02-13T15:16:46.591458147Z",
+            "FinishedAt": "0001-01-01T00:00:00Z",
+            "Health": {
+                "Status": "healthy",
+                "FailingStreak": 0,
+                "Log": [
+                    {
+                        "Start": "2026-02-13T16:32:23.791886014+01:00",
+                        "End": "2026-02-13T16:32:23.846678463+01:00",
+                        "ExitCode": 0,
+                        "Output": "{\"status\":\"ready\",\"services_configured\":6}"
+                    },
+                    {
+                        "Start": "2026-02-13T16:32:53.847959852+01:00",
+                        "End": "2026-02-13T16:32:53.907942282+01:00",
+                        "ExitCode": 0,
+                        "Output": "{\"status\":\"ready\",\"services_configured\":6}"
+                    },
+                    {
+                        "Start": "2026-02-13T16:33:23.909356401+01:00",
+                        "End": "2026-02-13T16:33:23.971254986+01:00",
+                        "ExitCode": 0,
+                        "Output": "{\"status\":\"ready\",\"services_configured\":6}"
+                    },
+                    {
+                        "Start": "2026-02-13T16:33:53.97215714+01:00",
+                        "End": "2026-02-13T16:33:54.03228644+01:00",
+                        "ExitCode": 0,
+                        "Output": "{\"status\":\"ready\",\"services_configured\":6}"
+                    },
+                    {
+                        "Start": "2026-02-13T16:34:24.03382085+01:00",
+                        "End": "2026-02-13T16:34:24.141612129+01:00",
+                        "ExitCode": 0,
+                        "Output": "{\"status\":\"ready\",\"services_configured\":6}"
+                    }
+                ]
+            }
+        },
+        "Image": "sha256:4d1d2de9acd286deaa1b9ab12fc513215ea98005d4d1c9375ec8c8f8a3fd9378",
+        "ResolvConfPath": "/var/lib/docker/containers/f5e68c2443c284c8eae52412443741f244dcf1ffaca6b06f23d9c5c0a65a2c7d/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/f5e68c2443c284c8eae52412443741f244dcf1ffaca6b06f23d9c5c0a65a2c7d/hostname",
+        "HostsPath": "/var/lib/docker/containers/f5e68c2443c284c8eae52412443741f244dcf1ffaca6b06f23d9c5c0a65a2c7d/hosts",
+        "LogPath": "/var/lib/docker/containers/f5e68c2443c284c8eae52412443741f244dcf1ffaca6b06f23d9c5c0a65a2c7d/f5e68c2443c284c8eae52412443741f244dcf1ffaca6b06f23d9c5c0a65a2c7d-json.log",
+        "Name": "/api_gateway",
+        "RestartCount": 0,
+        "Driver": "overlay2",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "docker-default",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": null,
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {}
+            },
+            "NetworkMode": "api_gateway_service_default",
+            "PortBindings": {
+                "8201/tcp": [
+                    {
+                        "HostIp": "",
+                        "HostPort": "8201"
+                    }
+                ]
+            },
+            "RestartPolicy": {
+                "Name": "unless-stopped",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "private",
+            "Dns": null,
+            "DnsOptions": null,
+            "DnsSearch": null,
+            "ExtraHosts": [],
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": null,
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 0,
+            "NanoCpus": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": null,
+            "BlkioDeviceReadBps": null,
+            "BlkioDeviceWriteBps": null,
+            "BlkioDeviceReadIOps": null,
+            "BlkioDeviceWriteIOps": null,
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": null,
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 0,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": null,
+            "Ulimits": null,
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/asound",
+                "/proc/acpi",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/sys/firmware",
+                "/sys/devices/virtual/powercap"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "GraphDriver": {
+            "Data": {
+                "ID": "f5e68c2443c284c8eae52412443741f244dcf1ffaca6b06f23d9c5c0a65a2c7d",
+                "LowerDir": "/var/lib/docker/overlay2/2f8faa826cd508b5a6ce8d65800bf11b97a9c4738c5ee5a4760ba9f8add54f1a-init/diff:/var/lib/docker/overlay2/7hqbkvlp6njmdv7qizuznodfx/diff:/var/lib/docker/overlay2/hkanc3umt5woxbg6xavpghzwl/diff:/var/lib/docker/overlay2/inz4zuv6ck179tys10zyredh8/diff:/var/lib/docker/overlay2/sltsnqplmet8j422yahbcsfx0/diff:/var/lib/docker/overlay2/mglhzcqw42q1dd9b2xp9m8dut/diff:/var/lib/docker/overlay2/sw96kl0y0q92g56lekj3czgzc/diff:/var/lib/docker/overlay2/41aaa1206d03cb605bbf8f3821d1b70ecf15b0cef2b567ec75c409acb801e6c0/diff:/var/lib/docker/overlay2/77767a814b7914f2b8486e7aaa68b7c5c431f0f91e9c056646c8015e8b8d7085/diff:/var/lib/docker/overlay2/95788ceb33eded15cdc8c3c65ac02b060e145b07c81f28873c5d762942535f02/diff:/var/lib/docker/overlay2/ff0e33ed5795ff801274b12e5ccb54cc178e91dcb88be8e8c59fb15eef227527/diff",
+                "MergedDir": "/var/lib/docker/overlay2/2f8faa826cd508b5a6ce8d65800bf11b97a9c4738c5ee5a4760ba9f8add54f1a/merged",
+                "UpperDir": "/var/lib/docker/overlay2/2f8faa826cd508b5a6ce8d65800bf11b97a9c4738c5ee5a4760ba9f8add54f1a/diff",
+                "WorkDir": "/var/lib/docker/overlay2/2f8faa826cd508b5a6ce8d65800bf11b97a9c4738c5ee5a4760ba9f8add54f1a/work"
+            },
+            "Name": "overlay2"
+        },
+        "Mounts": [],
+        "Config": {
+            "Hostname": "f5e68c2443c2",
+            "Domainname": "",
+            "User": "appuser",
+            "AttachStdin": false,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "ExposedPorts": {
+                "8201/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "WEB_CONCURRENCY=1",
+                "UVICORN_WORKERS=1",
+                "PORT=8201",
+                "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "LANG=C.UTF-8",
+                "GPG_KEY=A035C8C19219BA821ECEA86B64E628F8D684696D",
+                "PYTHON_VERSION=3.11.14",
+                "PYTHON_SHA256=8d3ed8ec5c88c1c95f5e558612a725450d2452813ddad5e58fdb1a53b1209b78",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "PYTHONUNBUFFERED=1",
+                "PIP_NO_CACHE_DIR=1",
+                "PIP_DISABLE_PIP_VERSION_CHECK=1",
+                "PYTHONPATH=/app"
+            ],
+            "Cmd": [
+                "sh",
+                "-c",
+                "gunicorn main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:${PORT} --workers ${WEB_CONCURRENCY:-1} --timeout 30 --graceful-timeout 15"
+            ],
+            "Healthcheck": {
+                "Test": [
+                    "CMD",
+                    "curl",
+                    "-fsS",
+                    "http://127.0.0.1:8201/readyz"
+                ],
+                "Interval": 30000000000,
+                "Timeout": 5000000000,
+                "StartPeriod": 10000000000,
+                "Retries": 3
+            },
+            "Image": "api-gateway:latest",
+            "Volumes": null,
+            "WorkingDir": "/app",
+            "Entrypoint": null,
+            "OnBuild": null,
+            "Labels": {
+                "com.docker.compose.config-hash": "4492b21102d93cbd3f451e5f51aa30c9a45c7a6913d7cae1c11129928e3ba8e0",
+                "com.docker.compose.container-number": "1",
+                "com.docker.compose.depends_on": "",
+                "com.docker.compose.image": "sha256:4d1d2de9acd286deaa1b9ab12fc513215ea98005d4d1c9375ec8c8f8a3fd9378",
+                "com.docker.compose.oneoff": "False",
+                "com.docker.compose.project": "api_gateway_service",
+                "com.docker.compose.project.config_files": "/home/boris/robot/api_gateway_service/docker-compose.yml",
+                "com.docker.compose.project.working_dir": "/home/boris/robot/api_gateway_service",
+                "com.docker.compose.replace": "api_gateway",
+                "com.docker.compose.service": "api_gateway",
+                "com.docker.compose.version": "2.39.4"
+            }
+        },
+        "NetworkSettings": {
+            "Bridge": "",
+            "SandboxID": "c3d9f4a0b8ebedba5d309210dac9a602817fe6754b7e4fa99ee5d6795cc607c2",
+            "SandboxKey": "/var/run/docker/netns/c3d9f4a0b8eb",
+            "Ports": {
+                "8201/tcp": [
+                    {
+                        "HostIp": "0.0.0.0",
+                        "HostPort": "8201"
+                    },
+                    {
+                        "HostIp": "::",
+                        "HostPort": "8201"
+                    }
+                ]
+            },
+            "HairpinMode": false,
+            "LinkLocalIPv6Address": "",
+            "LinkLocalIPv6PrefixLen": 0,
+            "SecondaryIPAddresses": null,
+            "SecondaryIPv6Addresses": null,
+            "EndpointID": "",
+            "Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "IPAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "MacAddress": "",
+            "Networks": {
+                "api_gateway_service_default": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": [
+                        "api_gateway",
+                        "api_gateway"
+                    ],
+                    "MacAddress": "72:f9:a1:9f:cb:87",
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "87fc4aad1dd300f193ad4a041b6efa324001dbe38ce11259bedab76553c91e8c",
+                    "EndpointID": "5641b9b366621c78c15d973bcdf85387280d52357bda8318963ab820b009f2fe",
+                    "Gateway": "172.26.0.1",
+                    "IPAddress": "172.26.0.2",
+                    "IPPrefixLen": 16,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": [
+                        "api_gateway",
+                        "f5e68c2443c2"
+                    ]
+                }
+            }
+        }
+    }
+]

@@ -1,0 +1,14 @@
+stateDiagram-v2
+  [*] --> DISCONNECTED
+  DISCONNECTED --> CONNECTING: start
+  CONNECTING --> CONNECTED: open ok
+  CONNECTED --> FAULTED: error_code != 0
+  FAULTED --> RECOVERING: recover_faults cmd
+  RECOVERING --> CONNECTED: clean ok
+
+  CONNECTED --> MOTION_DISABLED: motion_enabled=false
+  MOTION_DISABLED --> MOTION_ENABLED: enable_motion cmd
+  MOTION_ENABLED --> BUSY: command running
+  BUSY --> MOTION_ENABLED: command done
+  BUSY --> CANCELED: cancel
+  CANCELED --> MOTION_ENABLED

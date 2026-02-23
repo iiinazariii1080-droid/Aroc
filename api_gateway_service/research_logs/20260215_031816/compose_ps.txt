@@ -1,0 +1,2 @@
+NAME          IMAGE                COMMAND                  SERVICE       CREATED          STATUS                    PORTS
+api_gateway   api-gateway:latest   "sh -c 'gunicorn mai…"   api_gateway   54 seconds ago   Up 29 seconds (healthy)   0.0.0.0:8201->8201/tcp, [::]:8201->8201/tcp

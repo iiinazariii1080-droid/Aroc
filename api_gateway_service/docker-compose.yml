@@ -1,0 +1,36 @@
+services:
+  api_gateway:
+    container_name: api_gateway
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: api-gateway:latest
+    environment:
+      PORT: 8201
+      WEB_CONCURRENCY: 1
+      UVICORN_WORKERS: 1
+      READINESS_CHECK_SERVICES: 0
+      READINESS_CHECK_AUTH: 0
+      SERVICE_SYMOVO_CONCURRENCY: 5
+      # Connection pooling: reuse connections to reduce TIME-WAIT flood
+      HTTP_MAX_CONNECTIONS: 50
+      HTTP_MAX_KEEPALIVE_CONNECTIONS: 40
+      HTTP_KEEPALIVE_EXPIRY: 120
+      # Camera pool (depth_camera polled ~3/sec by frontend)
+      CAM_MAX_CONNECTIONS: 30
+      CAM_MAX_KEEPALIVE: 25
+    ports:
+      - "8201:8201"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8201/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+

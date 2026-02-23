@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: robot-service
+  labels:
+    app: robot-service
+spec:
+  selector:
+    app: robot-service
+  ports:
+    - name: http
+      port: 8110
+      targetPort: 8110
+      protocol: TCP
+  type: ClusterIP
+
+

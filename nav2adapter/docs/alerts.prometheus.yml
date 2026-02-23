@@ -1,0 +1,152 @@
+groups:
+  - name: nav2adapter-reliability
+    rules:
+      - alert: Nav2AdapterReliabilityDegraded
+        expr: nav2adapter_reliability_degraded == 1
+        for: 2m
+        labels:
+          severity: warning
+          service: nav2adapter
+        annotations:
+          summary: "Nav2Adapter reliability degraded"
+          description: "Reliability thresholds exceeded. Check /ops/reliabilityz reasons and runbook."
+
+      - alert: Nav2AdapterMqttEventFailureRateHighWarning
+        expr: nav2adapter_reliability_rate_per_sec{name="mqtt.publish.event.failure"} > 0.01
+        for: 3m
+        labels:
+          severity: warning
+          service: nav2adapter
+        annotations:
+          summary: "MQTT event failure rate high (warning)"
+          description: "mqtt.publish.event.failure rate is above 0.01/s for 3m."
+
+      - alert: Nav2AdapterMqttEventFailureRateHighCritical
+        expr: nav2adapter_reliability_rate_per_sec{name="mqtt.publish.event.failure"} > 0.05
+        for: 1m
+        labels:
+          severity: critical
+          service: nav2adapter
+        annotations:
+          summary: "MQTT event failure rate high (critical)"
+          description: "mqtt.publish.event.failure rate is above 0.05/s for 1m."
+
+      - alert: Nav2AdapterEventBusDropRateHighWarning
+        expr: nav2adapter_reliability_rate_per_sec{name="eventbus.publish.drop_oldest"} > 0.01
+        for: 3m
+        labels:
+          severity: warning
+          service: nav2adapter
+        annotations:
+          summary: "EventBus drop rate high (warning)"
+          description: "eventbus.publish.drop_oldest rate is above 0.01/s for 3m."
+
+      - alert: Nav2AdapterEventBusDropRateHighCritical
+        expr: nav2adapter_reliability_rate_per_sec{name="eventbus.publish.drop_oldest"} > 0.05
+        for: 1m
+        labels:
+          severity: critical
+          service: nav2adapter
+        annotations:
+          summary: "EventBus drop rate high (critical)"
+          description: "eventbus.publish.drop_oldest rate is above 0.05/s for 1m."
+
+      - alert: Nav2AdapterPersistenceDropRateHighWarning
+        expr: nav2adapter_reliability_rate_per_sec{name="persistence.enqueue.drop_queue_full"} > 0.005
+        for: 3m
+        labels:
+          severity: warning
+          service: nav2adapter
+        annotations:
+          summary: "Persistence queue drop rate high (warning)"
+          description: "persistence.enqueue.drop_queue_full rate is above 0.005/s for 3m."
+
+      - alert: Nav2AdapterPersistenceDropRateHighCritical
+        expr: nav2adapter_reliability_rate_per_sec{name="persistence.enqueue.drop_queue_full"} > 0.02
+        for: 1m
+        labels:
+          severity: critical
+          service: nav2adapter
+        annotations:
+          summary: "Persistence queue drop rate high (critical)"
+          description: "persistence.enqueue.drop_queue_full rate is above 0.02/s for 1m."
+
+      - alert: Nav2AdapterMqttEventLatencyHighWarning
+        expr: nav2adapter_reliability_duration_avg_ms{name="mqtt.publish.event.latency_s"} > 1500
+        for: 5m
+        labels:
+          severity: warning
+          service: nav2adapter
+        annotations:
+          summary: "MQTT event latency high (warning)"
+          description: "Average MQTT event latency is above 1500 ms for 5m."
+
+      - alert: Nav2AdapterMqttEventLatencyHighCritical
+        expr: nav2adapter_reliability_duration_avg_ms{name="mqtt.publish.event.latency_s"} > 3000
+        for: 2m
+        labels:
+          severity: critical
+          service: nav2adapter
+        annotations:
+          summary: "MQTT event latency high (critical)"
+          description: "Average MQTT event latency is above 3000 ms for 2m."
+
+      - alert: Nav2AdapterSymovoLongpollLatencyHighWarning
+        expr: |
+          nav2adapter_reliability_duration_avg_ms{name="symovo.transport_wait_for_changes.latency_s"} > 35000
+          or
+          nav2adapter_reliability_duration_avg_ms{name="symovo.amr_wait_for_changes.latency_s"} > 35000
+        for: 5m
+        labels:
+          severity: warning
+          service: nav2adapter
+        annotations:
+          summary: "Symovo long-poll latency high (warning)"
+          description: "Average long-poll latency is above 35000 ms for 5m."
+
+      - alert: Nav2AdapterSymovoLongpollLatencyHighCritical
+        expr: |
+          nav2adapter_reliability_duration_avg_ms{name="symovo.transport_wait_for_changes.latency_s"} > 50000
+          or
+          nav2adapter_reliability_duration_avg_ms{name="symovo.amr_wait_for_changes.latency_s"} > 50000
+        for: 2m
+        labels:
+          severity: critical
+          service: nav2adapter
+        annotations:
+          summary: "Symovo long-poll latency high (critical)"
+          description: "Average long-poll latency is above 50000 ms for 2m."
+
+      - alert: Nav2AdapterPersistenceLatencyHighWarning
+        expr: |
+          nav2adapter_reliability_duration_avg_ms{name="persistence.writer.upsert.latency_s"} > 250
+          or
+          nav2adapter_reliability_duration_avg_ms{name="persistence.writer.upsert_session.latency_s"} > 250
+          or
+          nav2adapter_reliability_duration_avg_ms{name="persistence.writer.delete.latency_s"} > 250
+          or
+          nav2adapter_reliability_duration_avg_ms{name="persistence.writer.delete_session.latency_s"} > 250
+        for: 5m
+        labels:
+          severity: warning
+          service: nav2adapter
+        annotations:
+          summary: "Persistence write latency high (warning)"
+          description: "Average persistence write latency is above 250 ms for 5m."
+
+      - alert: Nav2AdapterPersistenceLatencyHighCritical
+        expr: |
+          nav2adapter_reliability_duration_avg_ms{name="persistence.writer.upsert.latency_s"} > 500
+          or
+          nav2adapter_reliability_duration_avg_ms{name="persistence.writer.upsert_session.latency_s"} > 500
+          or
+          nav2adapter_reliability_duration_avg_ms{name="persistence.writer.delete.latency_s"} > 500
+          or
+          nav2adapter_reliability_duration_avg_ms{name="persistence.writer.delete_session.latency_s"} > 500
+        for: 2m
+        labels:
+          severity: critical
+          service: nav2adapter
+        annotations:
+          summary: "Persistence write latency high (critical)"
+          description: "Average persistence write latency is above 500 ms for 2m."

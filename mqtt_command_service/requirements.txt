@@ -1,0 +1,15 @@
+requests~=2.32
+paho-mqtt~=2.1
+python-dotenv~=1.2
+fastapi~=0.128
+uvicorn~=0.40
+python-multipart~=0.0.22
+python-dateutil~=2.9
+slowapi~=0.1.9
+cryptography~=46.0
+prometheus-client~=0.24
+
+# Optional dependencies for telemetry service
+websocket-client~=1.9  # For WebRTC connection checking
+psutil~=7.2  # For system metrics (CPU, RAM, Disk, Uptime)
+

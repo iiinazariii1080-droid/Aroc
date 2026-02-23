@@ -1,0 +1,18 @@
+flowchart LR
+  subgraph API[FastAPI / API Layer]
+    R[Routes] --> CS[CommandService]
+    H[Health endpoints] --> RG[ReadinessGate]
+  end
+
+  subgraph APP[Application Layer]
+    CS -->|validate + policy + idempotency| Q[(Command Queue)]
+  end
+
+  subgraph EXEC[Robot Execution Layer]
+    Q --> A[RobotActor (single owner)]
+    A -->|run_in_threadpool| SDK[XArmAPI SDK]
+    CB[SDK callbacks] --> SS[StateStore]
+    A --> SS
+  end
+
+  RG --> SS

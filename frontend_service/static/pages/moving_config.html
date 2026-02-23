@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Manipulator Auto Moving Trajectory Setup</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: 'Helvetica Neue', Arial, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      background-color: #f0f2f5;
+      text-align: center;
+      padding: 20px;
+    }
+    .container {
+      width: 90%;
+      max-width: 600px;
+      background-color: #fff;
+      padding: 20px 30px;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    h1 {
+      margin-bottom: 25px;
+      color: #333;
+    }
+    .movement-block {
+      border: 1px solid #e0e0e0;
+      padding: 15px;
+      margin-bottom: 20px;
+      border-radius: 6px;
+      text-align: left;
+    }
+    .block-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+    }
+    .block-header h2 {
+      margin: 0;
+      font-size: 18px;
+      color: #333;
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 500;
+      color: #555;
+    }
+    .input-row {
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+    }
+    label {
+      width: 120px;
+      text-align: right;
+      margin-right: 10px;
+      font-weight: 500;
+      color: #555;
+    }
+    input[type="number"],
+    input[type="checkbox"] {
+      padding: 5px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    input[type="checkbox"] {
+      width: auto;
+      margin: 0;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 16px;
+      border: none;
+      border-radius: 4px;
+      background-color: #007bff;
+      color: #fff;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+    button:hover {
+      background-color: #0056b3;
+    }
+    #result {
+      margin-top: 20px;
+      padding: 15px;
+      background-color: #e9ecef;
+      border-radius: 6px;
+      font-family: monospace;
+      white-space: pre-wrap;
+      text-align: left;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Manipulator Movement Setup</h1>
+    
+    <!-- Prefix Block -->
+    <div class="movement-block">
+      <div class="block-header">
+        <h2>Prefix</h2>
+        <div class="checkbox-row">
+          <label for="prefixActive">Active</label>
+          <input type="checkbox" id="prefixActive" />
+        </div>
+      </div>
+      <div class="input-row">
+        <label for="prefixPosX">Position X:</label>
+        <input type="number" id="prefixPosX" value="0" />
+      </div>
+      <div class="input-row">
+        <label for="prefixPosY">Position Y:</label>
+        <input type="number" id="prefixPosY" value="0" />
+      </div>
+      <div class="input-row">
+        <label for="prefixPosZ">Position Z:</label>
+        <input type="number" id="prefixPosZ" value="0" />
+      </div>
+    </div>
+    
+    <!-- Gripper Grab Block -->
+    <div class="movement-block">
+        <div class="block-header">
+          <h2>Gripper Enable</h2>
+          <div class="checkbox-row">
+            <label for="gripperActive">Activate</label>
+            <input type="checkbox" id="gripperActive" />
+          </div>
+        </div>
+      </div>
+
+    <!-- Base Move Block (Disabled) -->
+    <div class="movement-block">
+      <div class="block-header">
+        <h2>Base Move</h2>
+        <div class="checkbox-row">
+          <label for="baseMoveActive">Active</label>
+          <input type="checkbox" id="baseMoveActive" checked />
+
+        </div>
+      </div>
+      <div class="input-row">
+        <label for="baseMovePosX">Position X (Camera offset):</label>
+        <input type="number" id="baseMovePosX" value="-30" />
+      </div>
+      <div class="input-row">
+        <label for="baseMovePosY">Position Y (Camera offset):</label>
+        <input type="number" id="baseMovePosY" value="50" />
+      </div>
+      <div class="input-row">
+        <label for="baseMovePosZ">Position Z (Camera offset):</label>
+        <input type="text" id="baseMovePosZ" value="5 + Depth Value" />
+      </div>
+    </div>
+
+    
+    <!-- Postfix Block -->
+    <div class="movement-block">
+      <div class="block-header">
+        <h2>Postfix</h2>
+        <div class="checkbox-row">
+          <label for="postfixActive">Active</label>
+          <input type="checkbox" id="postfixActive" />
+        </div>
+      </div>
+      <div class="input-row">
+        <label for="postfixPosX">Position X:</label>
+        <input type="number" id="postfixPosX" value="0" />
+      </div>
+      <div class="input-row">
+        <label for="postfixPosY">Position Y:</label>
+        <input type="number" id="postfixPosY" value="0" />
+      </div>
+      <div class="input-row">
+        <label for="postfixPosZ">Position Z:</label>
+        <input type="number" id="postfixPosZ" value="0" />
+      </div>
+    </div>
+    
+    <!-- Return to Start Block -->
+    <div class="movement-block">
+      <div class="block-header">
+        <h2>Return to Start</h2>
+        <div class="checkbox-row">
+          <label for="returnActive">Activate</label>
+          <input type="checkbox" id="returnActive" />
+        </div>
+      </div>
+    </div>
+    
+    <!-- Button to Save Trajectory -->
+    <button id="generateButton">Save Trajectory</button>
+  </div>
+  
+  <script>
+    // При загрузке страницы запрашиваем данные с сервера
+    document.addEventListener('DOMContentLoaded', () => {
+      fetch('/api/v1/robot/autotake_config/trajectory')
+        .then(response => response.json())
+        .then(data => {
+          // Ожидается, что сервер вернет объект с ключами: prefix, baseMove, postfix, gripper, return
+          if (data.prefix) {
+            document.getElementById('prefixActive').checked = data.prefix.active;
+            document.getElementById('prefixPosX').value = data.prefix.posX;
+            document.getElementById('prefixPosY').value = data.prefix.posY;
+            document.getElementById('prefixPosZ').value = data.prefix.posZ;
+          }
+          // Base Move блок отключен, но значения всё равно загружаются для отображения
+          if (data.baseMove) {
+            document.getElementById('baseMoveActive').checked = data.baseMove.active;
+            document.getElementById('baseMovePosX').value = data.baseMove.posX;
+            document.getElementById('baseMovePosY').value = data.baseMove.posY;
+            document.getElementById('baseMovePosZ').value = data.baseMove.posZ;
+          }
+          if (data.postfix) {
+            document.getElementById('postfixActive').checked = data.postfix.active;
+            document.getElementById('postfixPosX').value = data.postfix.posX;
+            document.getElementById('postfixPosY').value = data.postfix.posY;
+            document.getElementById('postfixPosZ').value = data.postfix.posZ;
+          }
+          if (data.gripper) {
+            document.getElementById('gripperActive').checked = data.gripper.active;
+          }
+          if (data.return) {
+            document.getElementById('returnActive').checked = data.return.active;
+          }
+        })
+        .catch(error => {
+          console.error('Error fetching trajectory data:', error);
+        });
+    });
+    
+    // При клике по кнопке собираем данные формы и отправляем их на сервер
+    document.getElementById('generateButton').addEventListener('click', () => {
+      const trajectoryData = {
+        prefix: {
+          active: document.getElementById('prefixActive').checked,
+          posX: parseFloat(document.getElementById('prefixPosX').value),
+          posY: parseFloat(document.getElementById('prefixPosY').value),
+          posZ: parseFloat(document.getElementById('prefixPosZ').value),
+        },
+        baseMove: {
+          active: document.getElementById('baseMoveActive').checked,
+          posX: parseFloat(document.getElementById('baseMovePosX').value),
+          posY: parseFloat(document.getElementById('baseMovePosY').value),
+          posZ: parseFloat(document.getElementById('baseMovePosZ').value),
+        },
+        postfix: {
+          active: document.getElementById('postfixActive').checked,
+          posX: parseFloat(document.getElementById('postfixPosX').value),
+          posY: parseFloat(document.getElementById('postfixPosY').value),
+          posZ: parseFloat(document.getElementById('postfixPosZ').value),
+        },
+        gripper: {
+          active: document.getElementById('gripperActive').checked
+        },
+        return: {
+          active: document.getElementById('returnActive').checked
+        }
+      };
+      
+      fetch('/api/v1/robot/autotake_config/trajectory', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(trajectoryData)
+      })
+      .then(response => response.json())
+      .then(result => {
+        console.log('Trajectory data saved:', result);
+      })
+      .catch(error => {
+        console.error('Error saving trajectory data:', error);
+      });
+    });
+  </script>
+</body>
+</html>

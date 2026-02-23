@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AGV Test Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;min-height:100vh;color:#e2e8f0}
+.top-bar{background:#1e293b;padding:10px 20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;border-bottom:1px solid #334155;position:sticky;top:0;z-index:100}
+.top-bar h1{font-size:18px;color:#94a3b8;text-transform:uppercase;letter-spacing:1px}
+.badges{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+.b{padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;font-family:monospace}
+.b.ok{background:#064e3b;color:#6ee7b7}.b.err{background:#7f1d1d;color:#fca5a5}.b.warn{background:#78350f;color:#fcd34d}.b.info{background:#1e3a5f;color:#7dd3fc}
+.top-right{display:flex;align-items:center;gap:12px;font-size:12px;color:#94a3b8}
+.dot{width:9px;height:9px;border-radius:50%;background:#475569;display:inline-block;animation:pulse 2s infinite}
+.dot.on{background:#10b981}.dot.off{background:#ef4444}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.main{padding:12px;display:grid;grid-template-columns:repeat(12,1fr);gap:12px;max-width:1900px;margin:0 auto}
+.c{background:#1e293b;border-radius:4px;padding:12px;border:1px solid #334155}
+.c h3{color:#94a3b8;font-size:12px;margin-bottom:8px;padding-bottom:5px;border-bottom:1px solid #334155;display:flex;justify-content:space-between;align-items:center;text-transform:uppercase;letter-spacing:0.5px}
+.c h3 .sub{font-size:10px;font-weight:400;color:#64748b}
+.s12{grid-column:span 12}.s8{grid-column:span 8}.s6{grid-column:span 6}.s4{grid-column:span 4}.s3{grid-column:span 3}
+.mg{display:grid;gap:6px}.mg.c2{grid-template-columns:repeat(2,1fr)}.mg.c3{grid-template-columns:repeat(3,1fr)}.mg.c4{grid-template-columns:repeat(4,1fr)}.mg.c6{grid-template-columns:repeat(6,1fr)}
+.mi{text-align:center;padding:4px 0}.ml{font-size:9px;color:#64748b;margin-bottom:1px}.mv{font-size:15px;font-weight:600;color:#e2e8f0;font-family:monospace}.mv.sm{font-size:12px}.mv.xs{font-size:11px}
+.bbar{width:100%;height:20px;background:#0f172a;border-radius:2px;overflow:hidden;border:1px solid #334155}
+.bfill{height:100%;transition:width .5s;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff}
+.bfill.hi{background:#059669}.bfill.mid{background:#d97706}.bfill.lo{background:#dc2626}
+.sb{display:inline-block;padding:2px 8px;border-radius:2px;font-size:11px;font-weight:600;text-transform:uppercase;font-family:monospace}
+.sb.idle{background:#334155;color:#94a3b8}.sb.navigating{background:#1e3a5f;color:#7dd3fc}.sb.arrived{background:#064e3b;color:#6ee7b7}.sb.error{background:#7f1d1d;color:#fca5a5}
+.pbar{width:100%;height:14px;background:#0f172a;border-radius:2px;overflow:hidden;margin:4px 0}
+.pfill{height:100%;background:#3b82f6;transition:width .3s;display:flex;align-items:center;justify-content:center;color:#fff;font-size:9px;font-weight:600}
+.fg{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:2px}
+.fi{font-size:9px;font-family:monospace;padding:2px 4px;border-radius:2px}
+.fi.on{background:#064e3b;color:#6ee7b7}.fi.off{background:#1e293b;color:#475569}.fi.danger{background:#7f1d1d;color:#fca5a5}
+.hr{display:flex;gap:5px;align-items:center;margin-bottom:2px;font-size:10px;font-family:monospace}
+.hd{width:6px;height:6px;border-radius:50%;flex-shrink:0}.hd.ok{background:#10b981}.hd.fail{background:#ef4444}.hd.unk{background:#475569}
+.log{max-height:260px;overflow-y:auto;font-family:'Courier New',monospace;font-size:9px}
+.le{padding:4px 5px;margin-bottom:3px;border-radius:3px;border-left:3px solid #475569;background:#0f172a}
+.le.ack{border-left-color:#3b82f6}.le.state{border-left-color:#10b981}.le.result{border-left-color:#f59e0b}.le.error{border-left-color:#ef4444}.le.system{border-left-color:#8b5cf6}.le.ok{border-left-color:#10b981}.le.err{border-left-color:#ef4444}
+.btn{padding:5px 12px;border:none;border-radius:3px;font-size:11px;font-weight:600;cursor:pointer;transition:all .15s;text-transform:uppercase;letter-spacing:0.3px}
+.btn-p{background:#3b82f6;color:#fff}.btn-p:hover{background:#2563eb}
+.btn-s{background:#334155;color:#e2e8f0}.btn-s:hover{background:#475569}
+.btn-d{background:#dc2626;color:#fff}.btn:disabled{opacity:.4;cursor:not-allowed}
+.cg{display:flex;gap:4px;flex-wrap:wrap}
+.dpad{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;max-width:140px;margin:0 auto}
+.dpad .btn{padding:8px;font-size:14px}
+.teleop-status{font-size:10px;font-family:monospace;padding:3px 6px;border-radius:2px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center}
+.teleop-status.active{background:#064e3b;color:#6ee7b7}
+.teleop-status.inactive{background:#1e293b;color:#64748b;border:1px solid #334155}
+.key-indicator{display:inline-flex;gap:3px;margin:3px 0}
+.key-box{width:28px;height:28px;display:flex;align-items:center;justify-content:center;border:1px solid #334155;border-radius:2px;font-size:11px;font-weight:700;font-family:monospace;color:#475569;background:#0f172a;transition:all .1s;user-select:none}
+.key-box.pressed{background:#3b82f6;color:#fff;border-color:#3b82f6}
+.teleop-params{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin:6px 0;font-size:10px;font-family:monospace}
+.teleop-params label{color:#64748b}
+.teleop-params input{width:100%;background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:3px 5px;border-radius:2px;font-size:11px;font-family:monospace;text-align:center}
+.teleop-live{font-size:9px;font-family:monospace;color:#64748b;line-height:1.6;margin-top:4px;padding-top:4px;border-top:1px solid #334155}
+select,input[type=number]{background:#0f172a;border:1px solid #334155;color:#e2e8f0;padding:5px 8px;border-radius:5px;font-size:12px;width:100%}
+.ch-item{display:flex;justify-content:space-between;align-items:center;padding:4px 6px;border-radius:4px;margin-bottom:2px;background:#0f172a;font-size:11px}
+.rt{width:100%;font-size:9px;font-family:monospace;border-collapse:collapse}
+.rt th{text-align:left;color:#64748b;padding:1px 3px;border-bottom:1px solid #334155}
+.rt td{padding:1px 3px;border-bottom:1px solid rgba(51,65,85,.5)}
+.err-msg{background:#7f1d1d;color:#fca5a5;padding:4px 6px;border-radius:4px;margin-top:4px;font-size:11px}
+.empty{text-align:center;padding:14px;color:#475569;font-size:11px}
+.cs{font-size:9px;color:#64748b;font-family:monospace;line-height:1.5}
+@media(max-width:1200px){.s12,.s8,.s6,.s4,.s3{grid-column:span 12}}
+@media(min-width:1201px) and (max-width:1500px){.s3{grid-column:span 4}.s8{grid-column:span 8}}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:#0f172a}::-webkit-scrollbar-thumb{background:#334155;border-radius:2px}
+</style>
+</head>
+<body>
+
+<div class="top-bar">
+ <div>
+  <h1>AGV Dashboard</h1>
+  <div class="badges">
+   <span class="b info" id="bRobot">robot: ?</span>
+   <span class="b warn" id="bState">state: ?</span>
+   <span class="b info" id="bOnline">online: ?</span>
+  </div>
+ </div>
+ <div class="top-right">
+  <span>API: <b id="apiLat">—</b></span>
+  <span>SSE: <b id="sseLabel">closed</b> <span class="dot" id="sseDot"></span></span>
+ </div>
+</div>
+
+<div class="main">
+
+ <div class="c s3">
+  <h3>Battery &amp; State</h3>
+  <div class="bbar"><div class="bfill hi" id="battFill" style="width:0%">—</div></div>
+  <div class="mg c3" style="margin-top:6px">
+   <div class="mi"><div class="ml">State</div><div class="mv xs" id="agvState">—</div></div>
+   <div class="mi"><div class="ml">Charging</div><div class="mv xs" id="chargingVal">—</div></div>
+   <div class="mi"><div class="ml">Drive</div><div class="mv xs" id="driveReady">—</div></div>
+  </div>
+ </div>
+
+ <div class="c s3">
+  <h3>Navigation</h3>
+  <div><span class="sb idle" id="navStatus">IDLE</span></div>
+  <div class="pbar"><div class="pfill" id="progressFill" style="width:0%">0%</div></div>
+  <div class="mg c2">
+   <div class="mi"><div class="ml">ETA</div><div class="mv xs" id="navEta">—</div></div>
+   <div class="mi"><div class="ml">Goal</div><div class="mv xs" id="goalId">-</div></div>
+  </div>
+  <div id="errMsg" style="display:none" class="err-msg"></div>
+ </div>
+
+ <div class="c s3">
+  <h3>Position &amp; Velocity</h3>
+  <div class="mg c3">
+   <div class="mi"><div class="ml">X (m)</div><div class="mv sm" id="posX">0.00</div></div>
+   <div class="mi"><div class="ml">Y (m)</div><div class="mv sm" id="posY">0.00</div></div>
+   <div class="mi"><div class="ml">θ (°)</div><div class="mv sm" id="posTheta">0.0</div></div>
+  </div>
+  <div class="mg c3" style="margin-top:4px">
+   <div class="mi"><div class="ml">Vx m/s</div><div class="mv xs" id="velX">0.000</div></div>
+   <div class="mi"><div class="ml">Vy m/s</div><div class="mv xs" id="velY">0.000</div></div>
+   <div class="mi"><div class="ml">ω °/s</div><div class="mv xs" id="velOmega">0.0</div></div>
+  </div>
+ </div>
+
+ <div class="c s3">
+  <h3>Health</h3>
+  <div>
+   <div class="hr"><div class="hd unk" id="dotH"></div>/healthz — <b id="valH">?</b></div>
+   <div class="hr"><div class="hd unk" id="dotL"></div>/livez — <b id="valL">?</b></div>
+   <div class="hr"><div class="hd unk" id="dotR"></div>/readyz — <b id="valR">?</b></div>
+  </div>
+  <div style="margin-top:6px;border-top:1px solid #334155;padding-top:4px">
+   <div class="cs">
+    reconn: <b id="sseReconn">0</b> · events: <b id="sseEvtCnt">0</b><br>
+    last: <b id="sseLastEvt">—</b><br>
+    polls: <b id="pollCnt">0</b> · errors: <b id="pollErr">0</b>
+   </div>
+  </div>
+ </div>
+
+ <div class="c s4">
+  <h3>Teleop Control <span class="sub">WASD + buttons</span></h3>
+  <div class="teleop-status inactive" id="teleopStatus">
+   <span>Drive: <b id="curDriveMode">OFF</b></span>
+   <span id="teleopStateLabel">INACTIVE</span>
+   <button class="btn btn-p" style="font-size:9px;padding:2px 8px" onclick="toggleTeleop()" id="teleopToggle">Enable</button>
+  </div>
+  <div style="display:flex;gap:12px;align-items:flex-start">
+   <div>
+    <div style="display:flex;justify-content:center">
+     <div class="key-indicator">
+      <div class="key-box" id="keyW">W</div>
+     </div>
+    </div>
+    <div class="key-indicator" style="justify-content:center;display:flex">
+     <div class="key-box" id="keyA">A</div>
+     <div class="key-box" id="keyS">S</div>
+     <div class="key-box" id="keyD">D</div>
+    </div>
+    <div class="dpad" style="margin-top:6px">
+     <div></div><button class="btn btn-p" onmousedown="teleopKeyDown('w')" onmouseup="teleopKeyUp('w')" onmouseleave="teleopKeyUp('w')">FWD</button><div></div>
+     <button class="btn btn-p" onmousedown="teleopKeyDown('a')" onmouseup="teleopKeyUp('a')" onmouseleave="teleopKeyUp('a')">LEFT</button>
+     <button class="btn btn-d" onclick="teleopStop()">STOP</button>
+     <button class="btn btn-p" onmousedown="teleopKeyDown('d')" onmouseup="teleopKeyUp('d')" onmouseleave="teleopKeyUp('d')">RIGHT</button>
+     <div></div><button class="btn btn-p" onmousedown="teleopKeyDown('s')" onmouseup="teleopKeyUp('s')" onmouseleave="teleopKeyUp('s')">REV</button><div></div>
+    </div>
+   </div>
+   <div style="flex:1">
+    <div class="teleop-params">
+     <div><label>Linear m/s</label><input type="number" id="telLinear" value="0.1" min="0.01" max="1.0" step="0.01"></div>
+     <div><label>Angular rad/s</label><input type="number" id="telAngular" value="0.5" min="0.01" max="2.0" step="0.01"></div>
+     <div><label>Duration s</label><input type="number" id="telDuration" value="0.25" min="0.05" max="2.0" step="0.05"></div>
+    </div>
+    <div style="display:flex;gap:4px;margin-top:4px">
+     <button class="btn btn-s" style="font-size:9px;flex:1" onclick="loadTeleopConfig()">Load Config</button>
+     <button class="btn btn-s" style="font-size:9px;flex:1" onclick="saveTeleopConfig()">Save Config</button>
+    </div>
+    <div class="teleop-live">
+     TX: <b id="telTxSpeed">0</b> m/s, <b id="telTxAngular">0</b> rad/s<br>
+     cmds: <b id="telCmdCnt">0</b> · interval: <b id="telInterval">—</b>
+    </div>
+   </div>
+  </div>
+ </div>
+
+ <div class="c s4">
+  <h3>Charging</h3>
+  <div>
+   <div style="font-size:11px;color:#64748b;margin-bottom:3px;display:flex;justify-content:space-between">
+    <span>Charging stations</span>
+    <button class="btn btn-s" style="font-size:9px;padding:1px 6px" onclick="refreshCharging()">Refresh</button>
+   </div>
+   <div id="chargingList" style="max-height:120px;overflow-y:auto"><div class="empty">Loading…</div></div>
+  </div>
+ </div>
+
+ <div class="c s4">
+  <h3>Positions <span class="sub" id="posCnt"></span>
+   <button class="btn btn-s" style="font-size:9px;padding:1px 6px" onclick="togglePosForm()">+ Add</button>
+  </h3>
+  <div style="display:flex;gap:4px;margin-bottom:6px">
+   <select id="posSelect" style="flex:1"><option value="">Loading…</option></select>
+   <button class="btn btn-p" onclick="sendNavigate()" id="navBtn">Go</button>
+   <button class="btn btn-s" style="font-size:9px;padding:2px 6px" onclick="editSelectedPos()" id="posEditBtn" title="Edit selected">Edit</button>
+   <button class="btn btn-d" style="font-size:9px;padding:2px 6px" onclick="deleteSelectedPos()" id="posDelBtn" title="Delete selected">Del</button>
+   <button class="btn btn-d" onclick="sendCancel()" id="cancelBtn" disabled>Cancel</button>
+  </div>
+  <div id="posForm" style="display:none;border:1px solid #334155;border-radius:4px;padding:8px;margin-bottom:6px;background:#0f172a">
+   <input type="hidden" id="posEditId" value="">
+   <div style="margin-bottom:4px"><label style="font-size:9px;color:#64748b">Name *</label><input type="text" id="posName" placeholder="e.g. dock_A" style="width:100%;background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:3px 5px;border-radius:2px;font-size:11px"></div>
+   <div style="margin-bottom:4px"><label style="font-size:9px;color:#64748b">Description</label><input type="text" id="posDesc" placeholder="optional" style="width:100%;background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:3px 5px;border-radius:2px;font-size:11px"></div>
+   <div style="margin-bottom:4px"><label style="font-size:9px;color:#64748b">Params JSON</label><textarea id="posParams" rows="2" placeholder='{}' style="width:100%;background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:3px 5px;border-radius:2px;font-size:10px;font-family:monospace;resize:vertical"></textarea></div>
+   <div style="display:flex;gap:4px">
+    <button class="btn btn-p" style="font-size:10px;flex:1" onclick="savePosition()">Save</button>
+    <button class="btn btn-s" style="font-size:10px" onclick="captureCurrentPos()">Capture XYθ</button>
+    <button class="btn btn-s" style="font-size:10px" onclick="closePosForm()">Cancel</button>
+   </div>
+  </div>
+ </div>
+
+ <div class="c s12">
+  <h3>State Flags <span class="sub" id="flagsCnt"></span>
+   <span style="margin-left:auto;display:flex;gap:4px">
+    <button class="btn btn-d" style="font-size:10px;padding:3px 10px" onclick="resetSafety('/safety/reset_software_fuse','Software fuse')" id="resetFuseBtn" title="Reset sfuse_blown flag (high motor current)">Reset Fuse</button>
+    <button class="btn btn-d" style="font-size:10px;padding:3px 10px" onclick="resetSafety('/safety/reset_emergency_stop','Emergency stop')" id="resetEstopBtn" title="Reset emergency stop">Reset E-Stop</button>
+   </span>
+  </h3>
+  <div class="fg" id="flagsGrid"><div class="fi off">Loading…</div></div>
+ </div>
+
+ <div class="c s4">
+  <h3>SSE Events <button class="btn btn-s" style="font-size:9px;padding:1px 6px" onclick="clearEvLog()">Clear</button></h3>
+  <div class="log" id="evLog"><div class="empty">Waiting…</div></div>
+ </div>
+
+ <div class="c s4">
+  <h3>Request Log <button class="btn btn-s" style="font-size:9px;padding:1px 6px" onclick="clearReqLog()">Clear</button></h3>
+  <div class="log" id="reqLog"><div class="empty">No requests</div></div>
+ </div>
+
+ <div class="c s4">
+  <h3>Reliability <span class="sub" id="relUptime"></span></h3>
+  <div class="mg c2" style="margin-bottom:6px">
+   <div class="mi"><div class="ml">Degraded</div><div class="mv xs" id="relDeg">?</div></div>
+   <div class="mi"><div class="ml">Reasons</div><div class="mv xs" id="relReasons" style="font-size:9px;word-break:break-all">—</div></div>
+  </div>
+  <div style="max-height:160px;overflow-y:auto">
+   <table class="rt" id="relTbl"><tr><th>Counter</th><th>Val</th><th>Rate/s</th></tr></table>
+  </div>
+ </div>
+
+</div>
+
+<script>
+const SERVICE_PREFIX = window.location.pathname.replace(/(\/static)?\/[^\/]*\.html$/, '');
+const API_V1 = SERVICE_PREFIX + '/api/v1';
+const SYMOVO = SERVICE_PREFIX;
+
+let ROBOT_ID = null, API_BASE = null, MOVE_URL = null;
+let eventSource = null, currentGoalId = null;
+let sseEventsCount = 0, sseReconnectCount = 0, pollCount = 0, pollErrors = 0;
+
+function $(id) { return document.getElementById(id); }
+function clearEvLog() { $('evLog').innerHTML = '<div class="empty">Cleared</div>'; }
+function clearReqLog() { $('reqLog').innerHTML = '<div class="empty">Cleared</div>'; }
+
+/* ========== UI Helpers ========== */
+
+function appendLog(logId, cls, title, data, max) {
+    const log = $(logId);
+    if (log.querySelector('.empty')) log.innerHTML = '';
+    const el = document.createElement('div');
+    el.className = 'le ' + cls;
+    el.innerHTML = '<span style="color:#64748b;font-size:8px">' + new Date().toLocaleTimeString() + '</span> <b>' + title + '</b><div style="color:#94a3b8;white-space:pre-wrap">' + JSON.stringify(data,null,2) + '</div>';
+    log.insertBefore(el, log.firstChild);
+    while (log.children.length > max) log.removeChild(log.lastChild);
+}
+
+function updateBattery(pct) {
+    const v = Math.max(0, Math.min(100, pct));
+    $('battFill').style.width = v+'%';
+    $('battFill').textContent = v.toFixed(1)+'%';
+    $('battFill').className = 'bfill '+(v > 50 ? 'hi' : v > 20 ? 'mid' : 'lo');
+}
+
+function updateNav(st) {
+    $('navStatus').textContent = st.status.toUpperCase();
+    $('navStatus').className = 'sb ' + st.status;
+    $('progressFill').style.width = st.progress_percent+'%';
+    $('progressFill').textContent = st.progress_percent+'%';
+    $('goalId').textContent = st.goal_id || '-';
+    $('navEta').textContent = st.eta_seconds != null ? st.eta_seconds+'s' : '—';
+    if (st.error_reason) { $('errMsg').style.display='block'; $('errMsg').textContent='Error: '+st.error_reason; }
+    else { $('errMsg').style.display='none'; }
+    $('cancelBtn').disabled = !st.goal_id || st.status === 'idle';
+    currentGoalId = st.goal_id;
+}
+
+function updateFlags(flags) {
+    const g = $('flagsGrid');
+    if (!flags || typeof flags !== 'object') { g.innerHTML = '<div class="fi off">No data</div>'; return; }
+    const danger = new Set(['emergency_stop_reset_request','safety_relais_reset_request','ina_init_error','bno_init_error','sfuse_blown','odom_timeout','imu_timeout','imu_odom_discrepancy','laser_timeout','backend_error','tmc_motor_enable_error','shutdown_request']);
+    const entries = Object.entries(flags);
+    $('flagsCnt').textContent = '(' + entries.filter(function(e){return e[1]===true}).length + '/' + entries.length + ' on)';
+    g.innerHTML = entries.map(function(e) {
+        var k = e[0], v = e[1];
+        var c = 'off';
+        if (v === true) c = danger.has(k) ? 'danger' : 'on';
+        return '<div class="fi ' + c + '">' + (v===true?'●':'○') + ' ' + k + '</div>';
+    }).join('');
+}
+
+function setHD(id, ok) { $(id).className = 'hd '+(ok===true?'ok':ok===false?'fail':'unk'); }
+
+function addEvent(type, data) {
+    sseEventsCount++;
+    $('sseEvtCnt').textContent = sseEventsCount;
+    $('sseLastEvt').textContent = new Date().toLocaleTimeString();
+    var cls = type.includes('error')?'error':type.startsWith('ack')?'ack':type.startsWith('state')?'state':type.startsWith('result')?'result':'system';
+    appendLog('evLog', cls, type, data, 50);
+}
+
+function logReq(method, url, status, data) {
+    appendLog('reqLog', status < 300 ? 'ok' : 'err', method + ' ' + url + ' → ' + status, data, 40);
+}
+
+/* ========== Data Fetching ========== */
+async function fetchRobots() {
+    var r = await fetch(API_V1+'/robots');
+    var j = await r.json();
+    ROBOT_ID = j.robots && j.robots[0] ? j.robots[0].id : null;
+    API_BASE = API_V1+'/robots/'+encodeURIComponent(ROBOT_ID);
+    MOVE_URL = API_BASE+'/move/speed';
+    $('bRobot').textContent = 'robot: '+(ROBOT_ID||'?');
+}
+
+async function pollSymovo() {
+    try {
+        var t0 = performance.now();
+        var r = await fetch(SYMOVO+'/status');
+        var lat = (performance.now()-t0).toFixed(0);
+        pollCount++; $('apiLat').textContent=lat+'ms'; $('pollCnt').textContent=pollCount;
+        if (!r.ok) { pollErrors++; $('pollErr').textContent=pollErrors; return; }
+        var d = await r.json();
+
+        if (d.battery_level_percent != null) updateBattery(d.battery_level_percent);
+        $('agvState').textContent = d.state||'—';
+        $('bState').textContent = 'state: '+(d.state||'?');
+        $('bOnline').textContent = 'online: '+(d.online===true?'yes':d.online===false?'no':'?');
+        $('bOnline').className = 'b '+(d.online===true?'ok':d.online===false?'err':'info');
+
+        var chg = d.state_flags && d.state_flags.charging_connector;
+        $('chargingVal').textContent = chg===true?'YES':chg===false?'No':'—';
+        var dr = d.state_flags && d.state_flags.drive_ready;
+        $('driveReady').textContent = dr===true?'✓':'✗';
+        $('driveReady').style.color = dr===true?'#10b981':dr===false?'#ef4444':'';
+        $('curDriveMode').textContent = dr===true?'ON':'OFF';
+        $('curDriveMode').style.color = dr===true?'#10b981':'#ef4444';
+
+        if (d.velocity) {
+            $('velX').textContent = (d.velocity.vx_m_s||0).toFixed(3);
+            $('velY').textContent = (d.velocity.vy_m_s||0).toFixed(3);
+            $('velOmega').textContent = (d.velocity.omega_deg_s||0).toFixed(1);
+        }
+        if (d.pose) {
+            if (d.pose.x_m!=null) $('posX').textContent = d.pose.x_m.toFixed(3);
+            if (d.pose.y_m!=null) $('posY').textContent = d.pose.y_m.toFixed(3);
+            if (d.pose.theta_deg!=null) $('posTheta').textContent = d.pose.theta_deg.toFixed(1);
+        }
+        updateFlags(d.state_flags);
+    } catch(e) { pollErrors++; $('pollErr').textContent=pollErrors; }
+}
+
+async function pollNav() {
+    if (!API_BASE) return;
+    try { var r = await fetch(API_BASE+'/status/navigation'); if (r.ok) updateNav(await r.json()); } catch(e) {}
+}
+
+async function pollHealth() {
+    var checks = [
+        {url:SYMOVO+'/healthz',dot:'dotH',val:'valH'},
+        {url:SYMOVO+'/livez',dot:'dotL',val:'valL'},
+        {url:SYMOVO+'/readyz',dot:'dotR',val:'valR'},
+    ];
+    for (var i=0; i<checks.length; i++) {
+        var c = checks[i];
+        try {
+            var r = await fetch(c.url);
+            var j = await r.json().catch(function(){return {}});
+            setHD(c.dot, r.ok); $(c.val).textContent = r.ok?(j.status||'ok'):r.status;
+        } catch(e) { setHD(c.dot, false); $(c.val).textContent='err'; }
+    }
+}
+
+async function pollReliability() {
+    try {
+        var r = await fetch(SYMOVO+'/ops/reliabilityz');
+        if (!r.ok) return;
+        var j = await r.json();
+        var rel = j.reliability||{};
+        $('relDeg').textContent = rel.degraded?'YES':'No';
+        $('relDeg').style.color = rel.degraded?'#ef4444':'#10b981';
+        $('relReasons').textContent = (rel.reasons||[]).length?rel.reasons.join('; '):'—';
+        $('relUptime').textContent = rel.uptime_s?'up '+(rel.uptime_s/60).toFixed(1)+'m':'';
+        var tbl = $('relTbl');
+        var html = '<tr><th>Counter</th><th>Val</th><th>Rate/s</th></tr>';
+        var rates = {}; (rel.top_rates_per_sec||[]).forEach(function(r){rates[r.name]=r.rate_per_sec});
+        var counters = rel.top_counters||[];
+        for (var i=0; i<counters.length; i++) {
+            var cn = counters[i];
+            html += '<tr><td>'+cn.name+'</td><td>'+cn.value+'</td><td>'+(rates[cn.name]||0).toFixed(4)+'</td></tr>';
+        }
+        tbl.innerHTML = html;
+    } catch(e) {}
+}
+
+
+
+async function refreshCharging() {
+    var list = $('chargingList');
+    try {
+        var r = await fetch(SYMOVO+'/charging_stations');
+        if (!r.ok) { list.innerHTML='<div class="empty">Error '+r.status+'</div>'; return; }
+        var j = await r.json();
+        var st = j.stations||j.charging_stations||j||[];
+        if (!Array.isArray(st)||!st.length) { list.innerHTML='<div class="empty">No stations</div>'; return; }
+        list.innerHTML = st.map(function(s) {
+            var id = s.id!=null?s.id:s.station_id!=null?s.station_id:'?';
+            var name = s.name||s.label||'Station '+id;
+            return '<div class="ch-item"><span>'+name+' ('+id+')</span><button class="btn btn-p" style="font-size:9px;padding:2px 6px" onclick="goToCharging(\''+id+'\')">Go</button></div>';
+        }).join('');
+    } catch(e) { list.innerHTML='<div class="empty">Error</div>'; }
+}
+
+var positionsCache = [];
+
+async function loadPositions() {
+    if (!ROBOT_ID) return;
+    try {
+        var r = await fetch(SYMOVO+'/robot_positions/list');
+        var data = await r.json();
+        positionsCache = Array.isArray(data) ? data : (data.positions||data.list||[]);
+    } catch(e) { positionsCache = []; }
+    renderPositions();
+}
+
+function renderPositions() {
+    var positions = positionsCache;
+    $('posCnt').textContent = '('+positions.length+')';
+    var sel = $('posSelect');
+    var prev = sel.value;
+    sel.innerHTML = '<option value="">— select —</option>';
+    for (var i=0; i<positions.length; i++) {
+        var p = positions[i];
+        if (!p.name) continue;
+        var lbl = p.name;
+        if (p.params && p.params.description) lbl += ' — '+p.params.description;
+        sel.innerHTML += '<option value="'+p.name+'" data-id="'+p.id+'">'+lbl+'</option>';
+    }
+    if (prev) sel.value = prev;
+}
+
+function getSelectedPosId() {
+    var sel = $('posSelect');
+    var opt = sel.options[sel.selectedIndex];
+    return opt ? opt.getAttribute('data-id') : null;
+}
+
+function editSelectedPos() {
+    var id = getSelectedPosId();
+    if (!id) return alert('Select a position first');
+    editPosition(id);
+}
+
+function deleteSelectedPos() {
+    var id = getSelectedPosId();
+    var name = $('posSelect').value;
+    if (!id||!name) return alert('Select a position first');
+    deletePosition(id, name);
+}
+
+function togglePosForm() {
+    $('posEditId').value = '';
+    $('posName').value = '';
+    $('posDesc').value = '';
+    $('posParams').value = '{}';
+    $('posForm').style.display = $('posForm').style.display==='none'?'block':'none';
+}
+
+function closePosForm() { $('posEditId').value=''; $('posForm').style.display='none'; }
+
+function editPosition(id) {
+    var p = positionsCache.find(function(x){return x.id===id});
+    if (!p) return;
+    $('posEditId').value = p.id;
+    $('posName').value = p.name||'';
+    $('posDesc').value = (p.params&&p.params.description)||'';
+    $('posParams').value = JSON.stringify(p.params||{}, null, 2);
+    $('posForm').style.display = 'block';
+}
+
+function captureCurrentPos() {
+    var x = $('posX').textContent;
+    var y = $('posY').textContent;
+    var theta = $('posTheta').textContent;
+    try {
+        var params = JSON.parse($('posParams').value||'{}');
+        params.x_m = parseFloat(x); params.y_m = parseFloat(y); params.theta_deg = parseFloat(theta);
+        $('posParams').value = JSON.stringify(params, null, 2);
+    } catch(e) {
+        $('posParams').value = JSON.stringify({x_m:parseFloat(x),y_m:parseFloat(y),theta_deg:parseFloat(theta)}, null, 2);
+    }
+}
+
+async function savePosition() {
+    var name = $('posName').value.trim();
+    if (!name) return alert('Name is required');
+    var paramsStr = $('posParams').value.trim()||'{}';
+    var params;
+    try { params = JSON.parse(paramsStr); } catch(e) { return alert('Invalid JSON in params: '+e.message); }
+    var desc = $('posDesc').value.trim();
+    if (desc) params.description = desc;
+    var body = { name: name, params: params };
+    var editId = $('posEditId').value;
+    if (editId) body.id = editId;
+    try {
+        var r = await fetch(SYMOVO+'/robot_positions/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        var j = await r.json();
+        logReq('POST','/robot_positions/save',r.status,j);
+        if (!r.ok) { alert('Save failed: '+JSON.stringify(j)); return; }
+        closePosForm();
+        await loadPositions();
+    } catch(e) { alert('Error: '+e.message); }
+}
+
+async function deletePosition(id, name) {
+    if (!confirm('Delete position "'+name+'"?')) return;
+    try {
+        var r = await fetch(SYMOVO+'/robot_positions/'+encodeURIComponent(id),{method:'DELETE'});
+        var j = await r.json().catch(function(){return {status:r.status}});
+        logReq('DELETE','/robot_positions/'+id,r.status,j);
+        await loadPositions();
+    } catch(e) { alert('Error: '+e.message); }
+}
+
+/* ========== SSE / Event Polling (auto-fallback) ========== */
+var sseMode = 'init'; // 'sse' | 'poll' | 'init'
+var sseFastFails = 0;
+var sseLastFailTs = 0;
+var pollClientId = uuid();
+var eventPollTimer = null;
+
+function setSseIndicator(mode, detail) {
+    if (mode === 'sse') { $('sseDot').className='dot on'; $('sseLabel').textContent='SSE'; }
+    else if (mode === 'poll') { $('sseDot').className='dot on'; $('sseLabel').textContent='poll'; }
+    else if (mode === 'connecting') { $('sseDot').className='dot off'; $('sseLabel').textContent='connecting…'; }
+    else { $('sseDot').className='dot off'; $('sseLabel').textContent=detail||'off'; }
+}
+
+function handleNavEvent(t, d) {
+    addEvent(t, d);
+    if (t==='result.success') updateNav({status:'arrived',goal_id:d.command_id,progress_percent:100,error_reason:null,eta_seconds:null});
+    else if (t==='result.error') updateNav({status:'error',goal_id:d.command_id,progress_percent:0,error_reason:d.reason||'unknown',eta_seconds:null});
+    else if (t==='result.canceled') updateNav({status:'idle',goal_id:null,progress_percent:0,error_reason:null,eta_seconds:null});
+    else if (t==='state.executing') updateNav({status:'navigating',goal_id:d.command_id,progress_percent:1,error_reason:null,eta_seconds:null});
+    pollNav().catch(function(){});
+}
+
+function connectSSE() {
+    if (!API_BASE) return;
+    if (eventSource) eventSource.close();
+    setSseIndicator('connecting');
+    var url = API_BASE+'/events';
+    addEvent('system',{msg:'SSE connecting to '+url});
+    eventSource = new EventSource(url);
+    var sseConnected = false;
+
+    // Timeout: if onopen doesn't fire within 5s, treat as fail
+    var connectTimeout = setTimeout(function() {
+        if (sseConnected) return;
+        addEvent('system',{msg:'SSE connect timeout (5s), counting as fail'});
+        if (eventSource) { eventSource.close(); eventSource = null; }
+        var now = Date.now();
+        if (now - sseLastFailTs < 8000) { sseFastFails++; } else { sseFastFails = 1; }
+        sseLastFailTs = now;
+        sseReconnectCount++; $('sseReconn').textContent = sseReconnectCount;
+        if (sseFastFails >= 2) {
+            addEvent('system',{msg:'SSE unreachable, switching to poll mode'});
+            startEventPolling();
+        } else {
+            setSseIndicator('off','retry…');
+            setTimeout(connectSSE, 2000);
+        }
+    }, 5000);
+
+    eventSource.onopen = function() {
+        sseConnected = true;
+        clearTimeout(connectTimeout);
+        sseFastFails = 0;
+        sseMode = 'sse';
+        setSseIndicator('sse');
+        addEvent('system',{msg:'SSE connected'});
+    };
+
+    eventSource.onerror = function() {
+        if (!sseConnected) return; // let the timeout handle pre-connect failures
+        clearTimeout(connectTimeout);
+        var now = Date.now();
+        if (now - sseLastFailTs < 8000) { sseFastFails++; } else { sseFastFails = 1; }
+        sseLastFailTs = now;
+        sseReconnectCount++; $('sseReconn').textContent = sseReconnectCount;
+
+        if (sseFastFails >= 3) {
+            addEvent('system',{msg:'SSE unstable ('+sseFastFails+' fast fails), switching to poll mode'});
+            if (eventSource) { eventSource.close(); eventSource = null; }
+            startEventPolling();
+            return;
+        }
+
+        var state = eventSource ? eventSource.readyState : 2;
+        if (state === 2) {
+            setSseIndicator('off','closed');
+            addEvent('system',{msg:'SSE closed, retry in 3s'});
+            setTimeout(function() { if (!eventSource || eventSource.readyState === 2) connectSSE(); }, 3000);
+        } else {
+            setSseIndicator('connecting');
+        }
+    };
+
+    eventSource.onmessage = function(ev) { addEvent('message', {data: ev.data}); };
+
+    var events = ['ack.received','ack.accepted','state.executing','state.progress','result.success','result.error','result.canceled'];
+    for (var i=0; i<events.length; i++) {
+        (function(t) {
+            eventSource.addEventListener(t, function(e) {
+                var d; try { d = JSON.parse(e.data); } catch(ex) { d = {raw:e.data}; }
+                handleNavEvent(t, d);
+            });
+        })(events[i]);
+    }
+}
+
+function startEventPolling() {
+    if (eventPollTimer) return; // already running
+    sseMode = 'poll';
+    setSseIndicator('poll');
+    addEvent('system',{msg:'Event polling started (client='+pollClientId.substring(0,8)+')'});
+    eventPollTimer = setInterval(pollEvents, 2000);
+}
+
+async function pollEvents() {
+    if (!API_BASE) return;
+    try {
+        var r = await fetch(API_BASE+'/events/poll?client_id='+encodeURIComponent(pollClientId));
+        if (!r.ok) return;
+        var j = await r.json();
+        var evts = j.events||[];
+        for (var i=0; i<evts.length; i++) {
+            var e = evts[i];
+            handleNavEvent(e.type, e);
+        }
+    } catch(ex) { /* silent */ }
+}
+
+/* ========== Commands ========== */
+function uuid() { return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(c){var r=Math.random()*16|0;return(c==='x'?r:(r&0x3|0x8)).toString(16)}); }
+
+async function sendNavigate() {
+    var t = $('posSelect').value;
+    if (!t) return alert('Select a position');
+    await sendNavigateTo(t);
+}
+
+async function sendNavigateTo(target) {
+    if (!ROBOT_ID) return alert('No robot');
+    var body = {command_id:uuid(),timestamp:new Date().toISOString(),target_id:target};
+    try {
+        var r = await fetch(API_BASE+'/commands/navigateTo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        var j = await r.json();
+        addEvent('cmd.navigateTo',j);
+        logReq('POST','/commands/navigateTo',r.status,j);
+        if (!r.ok) alert('Failed '+r.status+'\n'+JSON.stringify(j,null,2));
+        pollNav();
+    } catch(e) { alert('Send failed: '+e.message); }
+}
+
+async function sendCancel() {
+    if (!currentGoalId||!ROBOT_ID) return;
+    try {
+        var r = await fetch(API_BASE+'/commands/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command_id:currentGoalId,timestamp:new Date().toISOString()})});
+        var j = await r.json();
+        addEvent('cmd.cancel',j);
+        logReq('POST','/commands/cancel',r.status,j);
+    } catch(e) { alert('Cancel failed: '+e.message); }
+}
+
+async function sendDriveMode(enable) {
+    try {
+        var r = await fetch(SYMOVO+'/drive_mode?enable='+(enable?'true':'false'),{method:'PUT'});
+        var j = await r.json().catch(function(){return {status:r.status}});
+        logReq('PUT','/drive_mode?enable='+enable,r.status,j);
+        pollSymovo();
+        return r.ok;
+    } catch(e) { logReq('PUT','/drive_mode',0,{error:e.message}); return false; }
+}
+
+/* ========== Teleop ========== */
+var teleopActive = false, teleopTimer = null, teleopCmdCount = 0;
+var teleopKeys = { w: false, s: false, a: false, d: false };
+var TELEOP_SEND_MS = 180;
+
+function updateKeyUI() {
+    var keys = ['w','a','s','d'];
+    for (var i=0; i<keys.length; i++) {
+        var k = keys[i];
+        var el = $('key'+k.toUpperCase());
+        if (el) el.className = 'key-box' + (teleopKeys[k] ? ' pressed' : '');
+    }
+}
+
+async function toggleTeleop() {
+    if (teleopActive) {
+        teleopActive = false;
+        teleopKeys = { w:false, s:false, a:false, d:false };
+        updateKeyUI();
+        if (teleopTimer) { clearTimeout(teleopTimer); teleopTimer = null; }
+        await teleopSendCmd(0, 0);
+        await sendDriveMode(false);
+        $('teleopStatus').className = 'teleop-status inactive';
+        $('teleopStateLabel').textContent = 'INACTIVE';
+        $('teleopToggle').textContent = 'Enable';
+    } else {
+        var ok = await sendDriveMode(true);
+        if (!ok) { alert('Failed to enable drive mode'); return; }
+        teleopActive = true;
+        $('teleopStatus').className = 'teleop-status active';
+        $('teleopStateLabel').textContent = 'ACTIVE — WASD or dpad';
+        $('teleopToggle').textContent = 'Disable';
+    }
+}
+
+async function teleopSendCmd(speed, angularSpeed) {
+    if (!MOVE_URL) return;
+    var duration = parseFloat($('telDuration').value) || 0.25;
+    var body = { speed: speed, angular_speed: angularSpeed, duration: duration };
+    $('telTxSpeed').textContent = speed.toFixed(3);
+    $('telTxAngular').textContent = angularSpeed.toFixed(3);
+    teleopCmdCount++;
+    $('telCmdCnt').textContent = teleopCmdCount;
+    $('telInterval').textContent = TELEOP_SEND_MS + 'ms';
+    try {
+        var r = await fetch(MOVE_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        var j = await r.json().catch(function(){return {status:r.status}});
+        logReq('POST','/move/speed',r.status,j);
+    } catch(e) { logReq('POST','/move/speed',0,{error:e.message}); }
+}
+
+function teleopTick() {
+    if (!teleopActive) return;
+    var lin = parseFloat($('telLinear').value) || 0.1;
+    var ang = parseFloat($('telAngular').value) || 0.5;
+    var speed = 0, angularSpeed = 0;
+    if (teleopKeys.w) speed += lin;
+    if (teleopKeys.s) speed -= lin;
+    if (teleopKeys.a) angularSpeed += ang;
+    if (teleopKeys.d) angularSpeed -= ang;
+    teleopSendCmd(speed, angularSpeed);
+    if (teleopKeys.w || teleopKeys.s || teleopKeys.a || teleopKeys.d) {
+        teleopTimer = setTimeout(teleopTick, TELEOP_SEND_MS);
+    } else {
+        teleopTimer = null;
+    }
+}
+
+function teleopKeyDown(k) {
+    if (!teleopActive || teleopKeys[k]) return;
+    teleopKeys[k] = true;
+    updateKeyUI();
+    if (!teleopTimer) teleopTick();
+}
+
+function teleopKeyUp(k) {
+    if (!teleopKeys[k]) return;
+    teleopKeys[k] = false;
+    updateKeyUI();
+    if (!(teleopKeys.w||teleopKeys.s||teleopKeys.a||teleopKeys.d)) {
+        if (teleopTimer) { clearTimeout(teleopTimer); teleopTimer = null; }
+        if (teleopActive) teleopSendCmd(0, 0);
+    }
+}
+
+function teleopStop() {
+    teleopKeys = { w:false, s:false, a:false, d:false };
+    updateKeyUI();
+    if (teleopTimer) { clearTimeout(teleopTimer); teleopTimer = null; }
+    if (teleopActive) teleopSendCmd(0, 0);
+}
+
+document.addEventListener('keydown', function(e) {
+    var k = e.key.toLowerCase();
+    if (['w','s','a','d'].indexOf(k) !== -1 && !e.repeat) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+        e.preventDefault();
+        teleopKeyDown(k);
+    }
+});
+document.addEventListener('keyup', function(e) {
+    var k = e.key.toLowerCase();
+    if (['w','s','a','d'].indexOf(k) !== -1) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+        teleopKeyUp(k);
+    }
+});
+window.addEventListener('blur', teleopStop);
+
+async function loadTeleopConfig() {
+    if (!API_BASE) return;
+    try {
+        var r = await fetch(API_BASE+'/teleop/config');
+        if (!r.ok) { logReq('GET','/teleop/config',r.status,{}); return; }
+        var j = await r.json();
+        logReq('GET','/teleop/config',r.status,j);
+        if (j.linear_m_s != null) $('telLinear').value = j.linear_m_s;
+        if (j.angular_rad_s != null) $('telAngular').value = j.angular_rad_s;
+        if (j.duration != null) $('telDuration').value = j.duration;
+    } catch(e) { logReq('GET','/teleop/config',0,{error:e.message}); }
+}
+
+async function saveTeleopConfig() {
+    if (!API_BASE) return;
+    var body = {
+        linear_m_s: parseFloat($('telLinear').value),
+        angular_rad_s: parseFloat($('telAngular').value),
+        duration: parseFloat($('telDuration').value),
+    };
+    try {
+        var r = await fetch(API_BASE+'/teleop/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        var j = await r.json().catch(function(){return {status:r.status}});
+        logReq('PUT','/teleop/config',r.status,j);
+    } catch(e) { logReq('PUT','/teleop/config',0,{error:e.message}); }
+}
+
+/* ========== Safety & Charging ========== */
+async function goToCharging(id) {
+    try {
+        var r = await fetch(SYMOVO+'/go_to_charging_station/'+encodeURIComponent(id),{method:'POST'});
+        var j = await r.json().catch(function(){return {status:r.status}});
+        logReq('POST','/go_to_charging_station/'+id,r.status,j);
+    } catch(e) { logReq('POST','/go_to_charging_station/'+id,0,{error:e.message}); }
+}
+
+async function resetSafety(endpoint, label) {
+    if (!confirm('Reset '+label+'?')) return;
+    try {
+        var r = await fetch(SYMOVO+endpoint,{method:'PUT'});
+        var j = await r.json().catch(function(){return {status:r.status}});
+        logReq('PUT',endpoint,r.status,j);
+        addEvent('cmd.reset',{endpoint:endpoint,result:j});
+        if (r.ok) { alert(label+' reset OK'); pollSymovo(); }
+        else alert('Reset failed: '+r.status+'\n'+JSON.stringify(j,null,2));
+    } catch(e) { logReq('PUT',endpoint,0,{error:e.message}); alert('Error: '+e.message); }
+}
+
+/* ========== Init ========== */
+window.addEventListener('beforeunload', function() { teleopStop(); if (eventSource) eventSource.close(); if (eventPollTimer) clearInterval(eventPollTimer); });
+
+(async function init() {
+    await fetchRobots();
+    if (!ROBOT_ID) return alert('No robots found');
+    await loadPositions();
+    connectSSE();
+    await Promise.all([pollNav(), pollSymovo(), pollHealth(), pollReliability(), refreshCharging(), loadTeleopConfig()]);
+    setInterval(pollNav, 2000);
+    setInterval(pollSymovo, 2000);
+    setInterval(pollHealth, 10000);
+    setInterval(pollReliability, 15000);
+
+})().catch(function(err) { console.error(err); alert('Init failed: '+err); });
+</script>
+</body>
+</html>

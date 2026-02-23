@@ -1,0 +1,24 @@
+{
+  "name": "api-gateway-frontend",
+  "version": "1.0.0",
+  "description": "Frontend interface for the microservices API Gateway",
+  "main": "index.html",
+  "scripts": {
+    "start": "python -m http.server 3000",
+    "dev": "python -m http.server 3000"
+  },
+  "keywords": [
+    "api",
+    "gateway",
+    "frontend",
+    "microservices",
+    "robot",
+    "igus",
+    "xarm",
+    "symovo"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {},
+  "dependencies": {}
+}

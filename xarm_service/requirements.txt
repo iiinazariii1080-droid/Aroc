@@ -1,0 +1,16 @@
+fastapi>=0.110,<0.116
+uvicorn[standard]>=0.22,<0.31
+pydantic>=2.5,<3
+
+# xArm SDK (install from GitHub; distribution name is xarm-python-sdk)
+# Pinned to commit seen in your build logs for reproducibility
+xarm-python-sdk @ git+https://github.com/xArm-Developer/xArm-Python-SDK@86e12af21cfb6ec6e4075513df30f7ef2180e617
+
+pyserial>=3.4
+
+# Optional deps used by some driver modules
+websockets>=11,<13
+websocket-client>=1.6,<2
+httpx>=0.27,<1
+numpy>=1.26,<3
+opencv-python-headless>=4.8,<5

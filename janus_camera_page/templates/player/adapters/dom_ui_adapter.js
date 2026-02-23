@@ -1,0 +1,210 @@
+(function(){
+  'use strict';
+  const AP = window.AutonomousPlayer;
+  if (!AP) throw new Error('AutonomousPlayer namespace missing');
+
+  const PlayerState = AP.Core.PlayerState;
+  const statusTextFor = AP.Core.statusTextFor;
+
+  /** @implements {AP.Ports.VideoPort} */
+  class DomUIAdapter {
+    /**
+     * @param {any} cfg
+     * @param {any} logger
+     * @param {any} clock
+     */
+    constructor(cfg, logger, clock){
+      this.cfg = cfg;
+      this.log = logger;
+      this.clock = clock;
+
+      this._video = document.getElementById(cfg.videoId);
+      this.playBtn = document.getElementById(cfg.playButtonId);
+      this.statsBtn = document.getElementById(cfg.statsButtonId);
+      this.statsBox = document.getElementById(cfg.statsBoxId);
+      this.statusPill = document.getElementById(cfg.statusPillId);
+      this.debugPanel = document.getElementById(cfg.debugPanelId);
+
+      if (!this._video) throw new Error(`Missing video element #${cfg.videoId}`);
+      if (!this.playBtn) throw new Error(`Missing button #${cfg.playButtonId}`);
+      if (!this.statsBtn) throw new Error(`Missing button #${cfg.statsButtonId}`);
+      if (!this.statsBox) throw new Error(`Missing stats box #${cfg.statsBoxId}`);
+      if (!this.statusPill) throw new Error(`Missing status pill #${cfg.statusPillId}`);
+      if (!this.debugPanel) throw new Error(`Missing debug panel #${cfg.debugPanelId}`);
+
+      this._statsVisible = false;
+      this._intentHandlers = { onTogglePlay: null, onRetry: null, onToggleStats: null };
+
+      // Frame clock (single installation)
+      this._frameClockInstalled = false;
+      this._frameTick = null;
+      this._frameIntervalId = null;
+
+      // Ensure autoplay-friendly attributes
+      this._video.autoplay = true;
+      this._video.playsInline = true;
+      this._video.muted = true;
+
+      this._wireDom();
+    }
+
+    _wireDom(){
+      this.playBtn.addEventListener('click', () => {
+        const h = this._intentHandlers;
+        if (this.playBtn.dataset.mode === 'retry') {
+          h.onRetry && h.onRetry();
+        } else {
+          h.onTogglePlay && h.onTogglePlay();
+        }
+      });
+
+      this.statsBtn.addEventListener('click', () => {
+        this._statsVisible = !this._statsVisible;
+        this.statsBox.style.display = this._statsVisible ? 'block' : 'none';
+        this.statsBtn.textContent = this._statsVisible ? 'Hide stats' : 'Show stats';
+        const h = this._intentHandlers;
+        h.onToggleStats && h.onToggleStats(this._statsVisible);
+      });
+
+      // start hidden
+      this.statsBox.style.display = 'none';
+      this.statusPill.style.display = 'none';
+      this.debugPanel.style.display = 'none';
+    }
+
+    bindIntents(handlers){
+      this._intentHandlers = Object.assign(this._intentHandlers, handlers || {});
+    }
+
+    setStatsText(text){
+      this.statsBox.textContent = text || '';
+    }
+
+    setDebugText(text){
+      if (!this.cfg.debugPanelEnabled) return;
+      this.debugPanel.textContent = text || '';
+      this.debugPanel.style.display = 'block';
+    }
+
+    hideDebug(){
+      this.debugPanel.style.display = 'none';
+    }
+
+    /**
+     * Calls `onFrame()` each time a new frame is observed.
+     * Installed once; safe against reconnect loops.
+     * @param {() => void} onFrame
+     */
+    startFrameClock(onFrame){
+      if (this._frameClockInstalled) return;
+      this._frameClockInstalled = true;
+      this._frameTick = (typeof onFrame === 'function') ? onFrame : () => {};
+
+      const v = this._video;
+
+      // Prefer requestVideoFrameCallback if available.
+      if (typeof v.requestVideoFrameCallback === 'function') {
+        const self = this;
+        const loop = () => {
+          if (!self._frameClockInstalled) return; // stop rescheduling after stopFrameClock
+          try { self._frameTick && self._frameTick(); } catch(_) {}
+          try { v.requestVideoFrameCallback(loop); } catch(_) {}
+        };
+        try { v.requestVideoFrameCallback(loop); } catch (e) {
+          this.log.warn('rvfc_install_failed', { error: String(e?.message || e) });
+        }
+        return;
+      }
+
+      // Fallback: detect progress in currentTime.
+      let lastTime = v.currentTime || 0;
+      this._frameIntervalId = this.clock.setInterval(() => {
+        if (v.readyState >= 2 && v.currentTime !== lastTime) {
+          lastTime = v.currentTime;
+          try { this._frameTick && this._frameTick(); } catch(_) {}
+        }
+      }, 250);
+    }
+
+    stopFrameClock(){
+      if (this._frameIntervalId) {
+        this.clock.clearInterval(this._frameIntervalId);
+        this._frameIntervalId = null;
+      }
+      this._frameTick = null;
+      this._frameClockInstalled = false;
+    }
+
+    /**
+     * @param {{state:string, attempt:number, desiredPlaying:boolean, errCode?:string, autoplayBlocked?:boolean, debugText?:string}} vm
+     */
+    render(vm){
+      const st = vm.state;
+      const attempt = vm.attempt || 0;
+      const errCode = vm.errCode;
+
+      this.statusPill.textContent = statusTextFor(st, attempt, errCode);
+      this.statusPill.dataset.state = st;
+      this.statusPill.style.display = 'flex';
+
+      if (this.cfg.debugPanelEnabled) {
+        this.setDebugText(vm.debugText || '');
+      }
+
+      // Button policy
+      if (this.cfg.autoplayEnabled) {
+        // Hide play in normal operation; show Retry only on ERROR/autoplayBlocked.
+        if (st === PlayerState.ERROR || vm.autoplayBlocked) {
+          this.playBtn.style.display = 'block';
+          this.playBtn.textContent = 'Retry';
+          this.playBtn.dataset.mode = 'retry';
+          this.playBtn.setAttribute('aria-label', 'Retry connection');
+        } else {
+          this.playBtn.style.display = 'none';
+          this.playBtn.dataset.mode = '';
+        }
+      } else {
+        this.playBtn.style.display = 'block';
+        if (st === PlayerState.ERROR) {
+          this.playBtn.textContent = 'Retry';
+          this.playBtn.dataset.mode = 'retry';
+          this.playBtn.setAttribute('aria-label', 'Retry connection');
+        } else {
+          const label = vm.desiredPlaying ? 'Stop' : 'Play';
+          this.playBtn.textContent = label;
+          this.playBtn.dataset.mode = '';
+          this.playBtn.setAttribute('aria-label', label);
+        }
+      }
+    }
+
+    // --------
+    // VideoPort-ish
+    // --------
+
+    bindStream(stream){
+      try {
+        this._video.srcObject = stream;
+      } catch (e) {
+        this.log.warn('video_bind_failed', { error: String(e) });
+      }
+    }
+
+    async ensurePlaying(){
+      try {
+        await this._video.play();
+        return { ok: true, blocked: false };
+      } catch (e) {
+        const name = e && e.name ? String(e.name) : '';
+        if (name === 'NotAllowedError') return { ok: false, blocked: true, error: e };
+        return { ok: false, blocked: false, error: e };
+      }
+    }
+
+    onVideoEvent(type, handler){
+      this._video.addEventListener(type, handler);
+    }
+  }
+
+  AP.Adapters.DomUIAdapter = DomUIAdapter;
+})();

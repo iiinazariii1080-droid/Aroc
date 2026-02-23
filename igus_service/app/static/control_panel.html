@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dryve D1 Control Panel</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            padding: 30px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+            text-align: center;
+            font-size: 2em;
+        }
+
+        .status-panel {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 30px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .status-item {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .status-label {
+            font-size: 0.85em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .status-value {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .status-value.online {
+            color: #28a745;
+        }
+
+        .status-value.offline {
+            color: #dc3545;
+        }
+
+        .status-value.enabled {
+            color: #28a745;
+        }
+
+        .status-value.disabled {
+            color: #dc3545;
+        }
+
+        .control-section {
+            margin-bottom: 30px;
+        }
+
+        .section-title {
+            font-size: 1.3em;
+            color: #333;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+
+        .control-group {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        .input-group label {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        input[type="number"] {
+            padding: 10px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 1em;
+            width: 150px;
+        }
+
+        input[type="number"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 5px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+
+        button:active:not(:disabled) {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background: #5568d3;
+        }
+
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+
+        .btn-danger:hover:not(:disabled) {
+            background: #c82333;
+        }
+
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+
+        .btn-success:hover:not(:disabled) {
+            background: #218838;
+        }
+
+        .btn-warning {
+            background: #ffc107;
+            color: #333;
+        }
+
+        .btn-warning:hover:not(:disabled) {
+            background: #e0a800;
+        }
+
+        .btn-info {
+            background: #17a2b8;
+            color: white;
+        }
+
+        .btn-info:hover:not(:disabled) {
+            background: #138496;
+        }
+
+        .jog-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .jog-btn {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            font-size: 1.5em;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .jog-btn.up {
+            background: #28a745;
+        }
+
+        .jog-btn.down {
+            background: #dc3545;
+        }
+
+        .log-panel {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border-radius: 10px;
+            padding: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 5px;
+        }
+
+        .log-entry.error {
+            color: #f48771;
+        }
+
+        .log-entry.success {
+            color: #89d185;
+        }
+
+        .log-entry.info {
+            color: #4ec9b0;
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .grid-2 {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 Dryve D1 Control Panel</h1>
+
+        <!-- Status Panel -->
+        <div class="status-panel" id="statusPanel">
+            <div class="status-item">
+                <div class="status-label">Connection</div>
+                <div class="status-value" id="statusConnected">-</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Operation Enabled</div>
+                <div class="status-value" id="statusEnabled">-</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Position</div>
+                <div class="status-value" id="statusPosition">-</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Is Moving</div>
+                <div class="status-value" id="statusMoving">-</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Homed</div>
+                <div class="status-value" id="statusHomed">-</div>
+            </div>
+            <div class="status-item">
+                <div class="status-label">Fault</div>
+                <div class="status-value" id="statusFault">-</div>
+            </div>
+        </div>
+
+        <div class="grid-2">
+            <!-- Motion Controls -->
+            <div class="control-section">
+                <h2 class="section-title">Motion Control</h2>
+                
+                <div class="control-group">
+                    <div class="input-group">
+                        <label>Target Position</label>
+                        <input type="number" id="targetPosition" value="0" step="1">
+                    </div>
+                    <div class="input-group">
+                        <label>Velocity (%)</label>
+                        <input type="number" id="velocityPercent" value="50" min="0.1" max="100" step="0.1">
+                    </div>
+                    <div class="input-group">
+                        <label>Acceleration (%)</label>
+                        <input type="number" id="accelerationPercent" value="50" min="0.1" max="100" step="0.1">
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <button class="btn-primary" onclick="moveToPosition()">Move to Position</button>
+                </div>
+
+                <div class="control-group">
+                    <div class="jog-controls">
+                        <button class="jog-btn up" 
+                                id="jogUpBtn"
+                                onmousedown="handleJogStart('positive', event)" 
+                                onmouseup="handleJogStop(event)" 
+                                onmouseleave="handleJogStop(event)"
+                                ontouchstart="handleJogStart('positive', event)" 
+                                ontouchend="handleJogStop(event)"
+                                ontouchcancel="handleJogStop(event)">▲</button>
+                        <button class="btn-danger" onclick="stopDrive()">STOP</button>
+                        <button class="jog-btn down" 
+                                id="jogDownBtn"
+                                onmousedown="handleJogStart('negative', event)" 
+                                onmouseup="handleJogStop(event)" 
+                                onmouseleave="handleJogStop(event)"
+                                ontouchstart="handleJogStart('negative', event)" 
+                                ontouchend="handleJogStop(event)"
+                                ontouchcancel="handleJogStop(event)">▼</button>
+                    </div>
+                    <div class="input-group">
+                        <label>Jog Speed (%)</label>
+                        <input type="number" id="jogSpeed" value="10" min="0.1" max="100" step="0.1">
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Controls -->
+            <div class="control-section">
+                <h2 class="section-title">System Control</h2>
+                
+                <div class="control-group">
+                    <button class="btn-success" onclick="reference()">Reference (Homing)</button>
+                </div>
+
+                <div class="control-group">
+                    <button class="btn-warning" onclick="faultReset()">Fault Reset</button>
+                </div>
+
+                <div class="control-group">
+                    <button class="btn-info" onclick="refreshStatus()">Refresh Status</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Log Panel -->
+        <div class="control-section">
+            <h2 class="section-title">Log</h2>
+            <div class="log-panel" id="logPanel"></div>
+            <button class="btn-primary" onclick="clearLog()" style="margin-top: 10px;">Clear Log</button>
+        </div>
+    </div>
+
+    <script>
+        // Auto-detect gateway prefix from current page URL
+        // Direct access: http://host:8101/static/control_panel.html → prefix = ''
+        // Via gateway:   http://gateway/api/v1/igus/static/control_panel.html → prefix = '/api/v1/igus'
+        const API_PREFIX = (() => {
+            const path = window.location.pathname;
+            const match = path.match(/^(\/api\/v1\/igus)/);
+            return match ? match[1] : '';
+        })();
+        const API_BASE = window.location.origin + API_PREFIX;
+        let jogInterval = null;
+        let statusInterval = null;
+
+        // Logging
+        function log(message, type = 'info') {
+            const logPanel = document.getElementById('logPanel');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            logPanel.appendChild(entry);
+            logPanel.scrollTop = logPanel.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('logPanel').innerHTML = '';
+        }
+
+        // API calls
+        async function apiCall(endpoint, method = 'GET', body = null) {
+            try {
+                const options = {
+                    method: method,
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                };
+                if (body) {
+                    options.body = JSON.stringify(body);
+                }
+                const response = await fetch(`${API_BASE}${endpoint}`, options);
+                
+                // Check Content-Type before parsing JSON
+                const contentType = response.headers.get('content-type') || '';
+                let data;
+                
+                if (contentType.includes('application/json')) {
+                    try {
+                        data = await response.json();
+                    } catch (jsonError) {
+                        // If JSON parsing fails, try to get text
+                        const text = await response.text();
+                        throw new Error(`Invalid JSON response: ${text.substring(0, 100)}`);
+                    }
+                } else {
+                    // Not JSON - try to extract error message from HTML/text
+                    const text = await response.text();
+                    let errorMessage = `HTTP ${response.status}`;
+                    
+                    // Try to extract error from HTML (common FastAPI error format)
+                    const errorMatch = text.match(/<h1[^>]*>([^<]+)<\/h1>/i) || 
+                                      text.match(/<title[^>]*>([^<]+)<\/title>/i) ||
+                                      text.match(/Internal Server Error/i);
+                    if (errorMatch) {
+                        errorMessage = errorMatch[1] || errorMatch[0] || `HTTP ${response.status}`;
+                    } else if (text.length < 200) {
+                        // If text is short, use it as error message
+                        errorMessage = text.trim() || `HTTP ${response.status}`;
+                    }
+                    
+                    const error = new Error(errorMessage);
+                    error.status = response.status;
+                    error.data = { detail: errorMessage };
+                    throw error;
+                }
+                
+                if (!response.ok) {
+                    // Extract error message from various possible formats
+                    let errorMessage = `HTTP ${response.status}`;
+                    if (data.detail) {
+                        if (typeof data.detail === 'string') {
+                            errorMessage = data.detail;
+                        } else if (data.detail.error) {
+                            errorMessage = typeof data.detail.error === 'string' 
+                                ? data.detail.error 
+                                : JSON.stringify(data.detail.error);
+                        } else if (typeof data.detail === 'object') {
+                            errorMessage = JSON.stringify(data.detail);
+                        }
+                    } else if (data.error) {
+                        errorMessage = typeof data.error === 'string'
+                            ? data.error
+                            : JSON.stringify(data.error);
+                    } else if (data.message) {
+                        errorMessage = data.message;
+                    }
+                    const error = new Error(errorMessage);
+                    error.status = response.status;
+                    error.data = data;
+                    throw error;
+                }
+                return data;
+            } catch (error) {
+                // Extract proper error message
+                let errorMsg = 'Unknown error';
+                if (error.message && !error.message.includes('JSON')) {
+                    errorMsg = error.message;
+                } else if (error.data) {
+                    if (error.data.detail) {
+                        errorMsg = typeof error.data.detail === 'string' 
+                            ? error.data.detail 
+                            : (error.data.detail.error || JSON.stringify(error.data.detail));
+                    } else if (error.data.error) {
+                        errorMsg = typeof error.data.error === 'string'
+                            ? error.data.error
+                            : JSON.stringify(error.data.error);
+                    }
+                } else if (typeof error === 'object' && error.message) {
+                    errorMsg = error.message;
+                }
+                
+                // Only log if it's not a JSON parsing error (those are handled above)
+                if (!errorMsg.includes('JSON')) {
+                    log(`Error: ${errorMsg}`, 'error');
+                }
+                throw error;
+            }
+        }
+
+        // Status refresh
+        async function refreshStatus() {
+            try {
+                const status = await apiCall('/status');
+                updateStatusDisplay(status);
+            } catch (error) {
+                // Silently fail on status refresh to avoid log spam
+                // Only show error if it's a critical issue
+                if (error.message.includes('not initialized') || error.message.includes('503')) {
+                    updateStatusDisplay({
+                        connected: false,
+                        enabled: false,
+                        position: 0,
+                        is_moving: false,
+                        homed: false,
+                        error: false
+                    });
+                }
+            }
+        }
+
+        function updateStatusDisplay(status) {
+            // Safely update all status fields with proper defaults
+            const connected = status.connected !== undefined ? status.connected : false;
+            document.getElementById('statusConnected').textContent = connected ? 'Online' : 'Offline';
+            document.getElementById('statusConnected').className = `status-value ${connected ? 'online' : 'offline'}`;
+            
+            // Try to get enabled status - may not be in old API format
+            const enabled = status.enabled !== undefined ? status.enabled : 
+                          (status.operation_enabled !== undefined ? status.operation_enabled : false);
+            document.getElementById('statusEnabled').textContent = enabled ? 'Enabled' : 'Disabled';
+            document.getElementById('statusEnabled').className = `status-value ${enabled ? 'enabled' : 'disabled'}`;
+            
+            const position = status.position !== undefined ? status.position : 0;
+            document.getElementById('statusPosition').textContent = position.toFixed(2);
+            
+            const isMoving = status.is_moving !== undefined ? status.is_moving : false;
+            document.getElementById('statusMoving').textContent = isMoving ? 'Yes' : 'No';
+            
+            const homed = status.homed !== undefined ? status.homed : false;
+            document.getElementById('statusHomed').textContent = homed ? 'Yes' : 'No';
+            
+            const hasError = status.error !== undefined ? status.error : false;
+            document.getElementById('statusFault').textContent = hasError ? 'Yes' : 'No';
+            document.getElementById('statusFault').className = `status-value ${hasError ? 'offline' : 'online'}`;
+        }
+
+        // Motion control
+        let moveInProgress = false;
+        let activeMoveToken = 0;
+        let cancelledMoveToken = 0;
+
+        async function moveToPosition() {
+            if (moveInProgress) {
+                log('Move already in progress (press STOP to interrupt)', 'warn');
+                return;
+            }
+
+            const position = parseFloat(document.getElementById('targetPosition').value);
+            const velocityPercent = parseFloat(document.getElementById('velocityPercent').value);
+            const accelerationPercent = parseFloat(document.getElementById('accelerationPercent').value);
+
+            if (isNaN(position) || isNaN(velocityPercent) || isNaN(accelerationPercent)) {
+                log('Invalid input values', 'error');
+                return;
+            }
+
+            const moveToken = ++activeMoveToken;
+            moveInProgress = true;
+            try {
+                log(`Moving to position ${position} (velocity: ${velocityPercent}%, accel: ${accelerationPercent}%)`, 'info');
+                const result = await apiCall('/move', 'POST', {
+                    position: position,
+                    velocity_percent: velocityPercent,
+                    acceleration_percent: accelerationPercent
+                });
+                if (moveToken <= cancelledMoveToken) {
+                    log('Move response ignored (interrupted by STOP)', 'warn');
+                    return;
+                }
+                log(`Move command sent: ${result.success ? 'Success' : 'Failed'}`, result.success ? 'success' : 'error');
+                await refreshStatus();
+            } catch (error) {
+                log(`Move failed: ${error.message}`, 'error');
+            } finally {
+                if (moveToken === activeMoveToken || moveToken <= cancelledMoveToken) {
+                    moveInProgress = false;
+                }
+            }
+        }
+
+        // Jog control
+        let jogActive = false;
+        let jogStarting = false;
+        let jogDirection = null;
+        let jogSpeed = null;
+        let jogKeepaliveInterval = null;
+
+        async function startJog(direction) {
+            if (moveInProgress) {
+                log('Cannot start jog while move is in progress (press STOP first)', 'warn');
+                return;
+            }
+
+            // Prevent multiple starts
+            if (jogActive || jogStarting) {
+                return;
+            }
+
+            const speedPercent = parseFloat(document.getElementById('jogSpeed').value);
+            if (isNaN(speedPercent)) {
+                log('Invalid jog speed', 'error');
+                return;
+            }
+
+            // Convert percent to speed (assuming max speed is 10000 units/s)
+            const speed = (speedPercent / 100.0) * 10000;
+
+            try {
+                jogStarting = true;
+                
+                log(`Starting jog ${direction} at ${speedPercent}%`, 'info');
+                
+                // Start jog using direct endpoint (no command queue for responsiveness)
+                await apiCall('/drive/jog_start', 'POST', {
+                    direction: direction,
+                    speed: speed,
+                    ttl_ms: 1000  // TTL from config (1000ms default)
+                });
+                
+                jogActive = true;
+                jogDirection = direction;
+                jogSpeed = speed;
+                jogStarting = false;
+                
+                log(`Jog started`, 'success');
+                
+                // Start keepalive to refresh jog TTL (every 100ms)
+                jogKeepaliveInterval = setInterval(async () => {
+                    if (jogActive && jogDirection && jogSpeed !== null) {
+                        try {
+                            // Use jog_update for keepalive (not creating new commands)
+                            await apiCall('/drive/jog_update', 'POST', {
+                                direction: jogDirection,
+                                speed: jogSpeed,
+                                ttl_ms: 1000
+                            });
+                        } catch (error) {
+                            // On ANY keepalive error, stop the interval to prevent flood
+                            console.error('Jog keepalive error:', error.message);
+                            if (jogKeepaliveInterval) {
+                                clearInterval(jogKeepaliveInterval);
+                                jogKeepaliveInterval = null;
+                            }
+                            jogActive = false;
+                            jogDirection = null;
+                            jogSpeed = null;
+                            jogStarting = false;
+                            log(`Jog stopped: ${error.message}`, 'error');
+                        }
+                    }
+                }, 100); // Refresh every 100ms (well within TTL of 1000ms)
+            } catch (error) {
+                log(`Jog start failed: ${error.message}`, 'error');
+                jogActive = false;
+                jogDirection = null;
+                jogSpeed = null;
+                jogStarting = false;
+            }
+        }
+
+        async function stopJog() {
+            if (!jogActive && !jogStarting) {
+                return;
+            }
+
+            // Set flags synchronously to prevent re-entry
+            jogActive = false;
+            jogStarting = false;
+
+            // Clear keepalive interval first
+            if (jogKeepaliveInterval) {
+                clearInterval(jogKeepaliveInterval);
+                jogKeepaliveInterval = null;
+            }
+
+            try {
+                // Stop jog using direct endpoint
+                await apiCall('/drive/jog_stop', 'POST', {});
+                log('Jog stopped', 'info');
+            } catch (error) {
+                log(`Jog stop failed: ${error.message}`, 'error');
+            } finally {
+                jogDirection = null;
+                jogSpeed = null;
+                await refreshStatus();
+            }
+        }
+
+        async function stopDrive() {
+            const hadMoveInProgress = moveInProgress;
+            cancelledMoveToken = activeMoveToken;
+            moveInProgress = false;
+            if (hadMoveInProgress && cancelledMoveToken > 0) {
+                log('In-progress move interrupted by STOP', 'info');
+            }
+            try {
+                log('Stopping drive...', 'info');
+                await apiCall('/drive/stop', 'POST', {
+                    mode: 'quick_stop',
+                    timeout_ms: 5000
+                });
+                log('Stop command sent', 'success');
+                await refreshStatus();
+            } catch (error) {
+                log(`Stop failed: ${error.message}`, 'error');
+            }
+        }
+
+        // System control
+        async function reference() {
+            try {
+                log('Starting reference (homing)...', 'info');
+                const result = await apiCall('/reference', 'POST');
+                log(`Reference: ${result.success ? 'Success' : 'Failed'}`, result.success ? 'success' : 'error');
+                await refreshStatus();
+            } catch (error) {
+                log(`Reference failed: ${error.message}`, 'error');
+            }
+        }
+
+        async function faultReset() {
+            try {
+                log('Resetting fault...', 'info');
+                const result = await apiCall('/fault_reset', 'POST');
+                log(`Fault reset: ${result.success ? 'Success' : 'Failed'}`, result.success ? 'success' : 'error');
+                await refreshStatus();
+            } catch (error) {
+                log(`Fault reset failed: ${error.message}`, 'error');
+            }
+        }
+
+        // Auto-refresh status
+        function startAutoRefresh() {
+            refreshStatus();
+            statusInterval = setInterval(refreshStatus, 1000); // Refresh every 1 second for better responsiveness
+        }
+
+        function stopAutoRefresh() {
+            if (statusInterval) {
+                clearInterval(statusInterval);
+                statusInterval = null;
+            }
+        }
+
+        // Initialize
+        window.addEventListener('load', () => {
+            log('Control panel initialized', 'success');
+            startAutoRefresh();
+        });
+
+        window.addEventListener('beforeunload', () => {
+            stopAutoRefresh();
+            if (jogActive) {
+                stopJog();
+            }
+        });
+
+        // Prevent context menu on long press for jog buttons
+        document.addEventListener('contextmenu', (e) => {
+            if (e.target.classList.contains('jog-btn')) {
+                e.preventDefault();
+            }
+        });
+
+        // Jog event handlers with proper event management
+        function handleJogStart(direction, event) {
+            event.preventDefault();
+            event.stopPropagation();
+            startJog(direction);
+        }
+
+        function handleJogStop(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            stopJog();
+        }
+
+        // Prevent jog from starting if already active
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && jogActive) {
+                stopJog();
+            }
+        });
+    </script>
+</body>
+</html>

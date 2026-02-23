@@ -1,0 +1,11 @@
+      0 research_logs/20260213_163446/api_gateway_logs_last15m_signals.txt
+      0 research_logs/20260213_163446/healthz.json
+      0 research_logs/20260213_163446/openapi_snapshot.json
+      0 research_logs/20260213_163446/readyz.json
+      2 research_logs/20260213_163446/compose_ps.txt
+      2 research_logs/20260213_163446/docker_stats_snapshot.txt
+     13 research_logs/20260213_163446/docker_stats_timeseries_60s.csv
+    303 research_logs/20260213_163446/docker_inspect.json
+   1831 research_logs/20260213_163446/api_gateway_logs_last15m.txt
+   2336 research_logs/20260213_163446/api_gateway_logs_full.txt
+   4487 total

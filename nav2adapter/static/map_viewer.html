@@ -1,0 +1,1543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Symovo AGV Map Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 1rem 2rem;
+            box-shadow: 0 2px 20px rgba(0, 0, 0, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            color: #333;
+            font-size: 1.8rem;
+            font-weight: 600;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            border-radius: 25px;
+            background: #f8f9fa;
+            border: 2px solid #e9ecef;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #dc3545;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.online {
+            background: #28a745;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        .main-container {
+            flex: 1;
+            display: flex;
+            gap: 1rem;
+            padding: 1rem;
+        }
+
+        .sidebar {
+            width: 300px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 1.5rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .map-container {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 1rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .map-canvas {
+            width: 100%;
+            height: 100%;
+            border-radius: 10px;
+            background: #f8f9fa;
+            position: relative;
+            cursor: crosshair;
+            border: 2px solid #e9ecef;
+        }
+
+        .crosshair {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #007bff;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 1000;
+            display: none;
+        }
+
+        .crosshair::before,
+        .crosshair::after {
+            content: '';
+            position: absolute;
+            background: #007bff;
+        }
+
+        .crosshair::before {
+            width: 2px;
+            height: 8px;
+            left: 50%;
+            top: -10px;
+            transform: translateX(-50%);
+        }
+
+        .crosshair::after {
+            width: 8px;
+            height: 2px;
+            left: -10px;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .robot-marker {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: #dc3545;
+            border: 3px solid #fff;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 100;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        .robot-marker::after {
+            content: '';
+            position: absolute;
+            width: 0;
+            height: 0;
+            border-left: 6px solid transparent;
+            border-right: 6px solid transparent;
+            border-bottom: 12px solid #dc3545;
+            top: -15px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .station-marker {
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            background: #28a745;
+            border: 2px solid #fff;
+            border-radius: 3px;
+            transform: translate(-50%, -50%);
+            z-index: 90;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            cursor: pointer;
+        }
+
+        .station-marker.charging {
+            background: #ffc107;
+        }
+
+        .station-marker.inactive {
+            background: #6c757d;
+            opacity: 0.6;
+        }
+
+        .target-marker {
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            background: #007bff;
+            border: 2px solid #fff;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 80;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+
+        .target-marker.reachable {
+            background: #28a745;
+        }
+
+        .target-marker.unreachable {
+            background: #dc3545;
+        }
+
+        .info-panel {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 1rem;
+            border: 1px solid #e9ecef;
+        }
+
+        .info-panel h3 {
+            color: #333;
+            margin-bottom: 0.5rem;
+            font-size: 1.1rem;
+        }
+
+        .info-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.3rem;
+            font-size: 0.9rem;
+        }
+
+        .info-label {
+            color: #666;
+            font-weight: 500;
+        }
+
+        .info-value {
+            color: #333;
+            font-weight: 600;
+        }
+
+        .button {
+            background: linear-gradient(135deg, #007bff, #0056b3);
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 123, 255, 0.3);
+        }
+
+        .button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 123, 255, 0.4);
+        }
+
+        .button:active {
+            transform: translateY(0);
+        }
+
+        .button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .button.secondary {
+            background: linear-gradient(135deg, #6c757d, #495057);
+            box-shadow: 0 4px 15px rgba(108, 117, 125, 0.3);
+        }
+
+        .button.secondary:hover {
+            box-shadow: 0 6px 20px rgba(108, 117, 125, 0.4);
+        }
+
+        .button.danger {
+            background: linear-gradient(135deg, #dc3545, #c82333);
+            box-shadow: 0 4px 15px rgba(220, 53, 69, 0.3);
+        }
+
+        .button.danger:hover {
+            box-shadow: 0 6px 20px rgba(220, 53, 69, 0.4);
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #007bff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .alert {
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            border: 1px solid transparent;
+        }
+
+        .alert.success {
+            background: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+        }
+
+        .alert.error {
+            background: #f8d7da;
+            border-color: #f5c6cb;
+            color: #721c24;
+        }
+
+        .alert.info {
+            background: #d1ecf1;
+            border-color: #bee5eb;
+            color: #0c5460;
+        }
+
+        .coordinates-display {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 0.5rem;
+            border-radius: 5px;
+            font-family: monospace;
+            font-size: 0.8rem;
+            z-index: 200;
+        }
+
+        .legend {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+            border: 1px solid #fff;
+        }
+
+        .legend-color.robot {
+            background: #dc3545;
+            border-radius: 50%;
+        }
+
+        .legend-color.station {
+            background: #28a745;
+        }
+
+        .legend-color.charging {
+            background: #ffc107;
+        }
+
+        .legend-color.target {
+            background: #007bff;
+            border-radius: 50%;
+        }
+
+        .legend-color.reachable {
+            background: #28a745;
+            border-radius: 50%;
+        }
+
+        .legend-color.unreachable {
+            background: #dc3545;
+            border-radius: 50%;
+        }
+
+        .tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 0.5rem;
+            border-radius: 5px;
+            font-size: 0.8rem;
+            pointer-events: none;
+            z-index: 1000;
+            max-width: 200px;
+        }
+
+        .tooltip::after {
+            content: '';
+            position: absolute;
+            top: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            border: 5px solid transparent;
+            border-top-color: rgba(0, 0, 0, 0.9);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Symovo AGV Map Viewer</h1>
+        <div class="status-indicator">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Connecting...</span>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <div class="sidebar">
+            <div class="info-panel">
+                <h3>Robot Status</h3>
+                <div class="info-item">
+                    <span class="info-label">ID:</span>
+                    <span class="info-value" id="robotId">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">State:</span>
+                    <span class="info-value" id="robotState">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Battery:</span>
+                    <span class="info-value" id="batteryLevel">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Position X:</span>
+                    <span class="info-value" id="positionX">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Position Y:</span>
+                    <span class="info-value" id="positionY">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Angle:</span>
+                    <span class="info-value" id="positionTheta">-</span>
+                </div>
+            </div>
+
+            <div class="info-panel">
+                <h3>Map Information</h3>
+                <div class="info-item">
+                    <span class="info-label">Name:</span>
+                    <span class="info-value" id="mapName">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Size:</span>
+                    <span class="info-value" id="mapSize">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Resolution:</span>
+                    <span class="info-value" id="mapResolution">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Offset X:</span>
+                    <span class="info-value" id="mapOffsetX">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Offset Y:</span>
+                    <span class="info-value" id="mapOffsetY">-</span>
+                </div>
+            </div>
+
+            <div class="info-panel">
+                <h3>Crosshair</h3>
+                <div class="info-item">
+                    <span class="info-label">X (m):</span>
+                    <span class="info-value" id="targetX">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Y (m):</span>
+                    <span class="info-value" id="targetY">-</span>
+                </div>
+                <div class="info-item">
+                    <span class="info-label">Reachability:</span>
+                    <span class="info-value" id="reachability">-</span>
+                </div>
+                <button class="button secondary" id="goToPoseBtn" disabled style="margin-top: 0.5rem;">
+                    <span class="loading" id="goLoading" style="display: none;"></span>
+                    <span id="goText">Send Robot</span>
+                </button>
+            </div>
+
+            <div class="info-panel">
+                <h3>Charging Stations</h3>
+                <div id="chargingStationsList">
+                    <div style="text-align: center; color: #666; font-size: 0.9rem;">
+                        Loading...
+                    </div>
+                </div>
+            </div>
+
+            <div class="legend">
+                <h3>Legend</h3>
+                <div class="legend-item">
+                    <div class="legend-color robot"></div>
+                    <span>Robot</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color station"></div>
+                    <span>Station</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color charging"></div>
+                    <span>Charging Station</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color target"></div>
+                    <span>Target Point</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color reachable"></div>
+                    <span>Reachable</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color unreachable"></div>
+                    <span>Unreachable</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="map-container">
+            <div class="coordinates-display" id="coordinatesDisplay">
+                X: 0.00, Y: 0.00
+            </div>
+            <div class="crosshair" id="crosshair"></div>
+            <canvas class="map-canvas" id="mapCanvas"></canvas>
+            <div class="tooltip" id="tooltip" style="display: none;"></div>
+        </div>
+    </div>
+
+    <script>
+        class SymovoMapViewer {
+            constructor() {
+                // Auto-detect service prefix from page URL:
+                // "/api/v1/symovo/static/map_viewer.html" → "/api/v1/symovo"
+                // "/api/v1/symovo/map_viewer.html" → "/api/v1/symovo"
+                // "/static/map_viewer.html" → ""
+                // "/map_viewer.html" → ""
+                this.SERVICE_PREFIX = window.location.pathname.replace(/(\/static)?\/[^\/]*\.html$/, '');
+
+                this.canvas = document.getElementById('mapCanvas');
+                this.ctx = this.canvas.getContext('2d');
+                this.crosshair = document.getElementById('crosshair');
+                this.tooltip = document.getElementById('tooltip');
+                this.coordinatesDisplay = document.getElementById('coordinatesDisplay');
+                
+                this.mapData = null;
+                this.robotData = null;
+                this.stations = [];
+                this.targetPoint = null;
+                this.mapScale = 1;
+                this.mapOffsetX = 0;
+                this.mapOffsetY = 0;
+                this.mapImage = null; // Cache loaded map image
+                
+                this.isMouseOverCanvas = false;
+                this.currentTargetX = 0;
+                this.currentTargetY = 0;
+                
+                this.init();
+            }
+
+            init() {
+                this.setupCanvas();
+                this.setupEventListeners();
+                this.loadInitialData();
+                this.startStatusUpdates();
+            }
+
+            setupCanvas() {
+                const container = this.canvas.parentElement;
+                const resizeCanvas = async () => {
+                    // Get container dimensions
+                    const containerWidth = container.clientWidth - 2;
+                    const containerHeight = container.clientHeight - 2;
+                    
+                    // Set canvas dimensions
+                    this.canvas.width = containerWidth;
+                    this.canvas.height = containerHeight;
+                    
+                    // Redraw map when resizing (cache remains)
+                    if (this.mapData) {
+                        await this.drawMap();
+                    }
+                };
+                
+                resizeCanvas();
+                window.addEventListener('resize', resizeCanvas);
+            }
+
+            setupEventListeners() {
+                // Mouse events for crosshair and coordinates
+                this.canvas.addEventListener('mousemove', (e) => {
+                    this.handleMouseMove(e);
+                });
+
+                this.canvas.addEventListener('mouseenter', () => {
+                    this.isMouseOverCanvas = true;
+                    this.crosshair.style.display = 'block';
+                });
+
+                this.canvas.addEventListener('mouseleave', () => {
+                    this.isMouseOverCanvas = false;
+                    this.crosshair.style.display = 'none';
+                    this.tooltip.style.display = 'none';
+                });
+
+                this.canvas.addEventListener('click', (e) => {
+                    this.handleCanvasClick(e);
+                });
+
+                this.canvas.addEventListener('contextmenu', (e) => {
+                    this.handleCanvasRightClick(e);
+                });
+
+                document.getElementById('goToPoseBtn').addEventListener('click', () => {
+                    this.goToPose();
+                });
+
+            }
+
+            handleMouseMove(e) {
+                if (!this.isMouseOverCanvas) return;
+
+                const rect = this.canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+
+                // Check if cursor is in map area
+                if (!this.isPointInMapArea(x, y)) {
+                    this.crosshair.style.display = 'none';
+                    this.coordinatesDisplay.textContent = 'Outside map area';
+                    // Only disable check button if no target point is set
+                    if (!this.targetPoint) {
+                        document.getElementById('checkPoseBtn').disabled = true;
+                    }
+                    return;
+                }
+
+                // Update crosshair position
+                this.crosshair.style.display = 'block';
+                this.crosshair.style.left = (x - 10) + 'px';
+                this.crosshair.style.top = (y - 10) + 'px';
+
+                // Convert canvas coordinates to world coordinates
+                const worldCoords = this.canvasToWorld(x, y);
+                
+                // Store current cursor position for potential click
+                this.currentTargetX = worldCoords.x;
+                this.currentTargetY = worldCoords.y;
+
+                // Update coordinates display with higher precision (cursor position)
+                this.coordinatesDisplay.textContent = 
+                    `X: ${worldCoords.x.toFixed(4)}, Y: ${worldCoords.y.toFixed(4)}`;
+
+                // Only update sidebar coordinates if no target point is set
+                // This prevents overwriting the saved target position
+                if (!this.targetPoint) {
+                    document.getElementById('targetX').textContent = worldCoords.x.toFixed(4);
+                    document.getElementById('targetY').textContent = worldCoords.y.toFixed(4);
+                }
+
+                // Enable check button only if target point is set
+                document.getElementById('checkPoseBtn').disabled = !this.targetPoint;
+            }
+
+            handleCanvasClick(e) {
+                const rect = this.canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                
+                // Check if click is in map area
+                if (!this.isPointInMapArea(x, y)) {
+                    return;
+                }
+                
+                const worldCoords = this.canvasToWorld(x, y);
+                
+                // Debug information for click accuracy verification
+                console.log('Click coordinates:', {
+                    canvas: { x, y },
+                    world: worldCoords,
+                    mapScale: this.mapScale,
+                    mapOffsetCanvas: { x: this.mapOffsetX, y: this.mapOffsetY }
+                });
+                
+                this.setTargetPoint(worldCoords.x, worldCoords.y);
+            }
+
+            handleCanvasRightClick(e) {
+                e.preventDefault(); // Prevent context menu
+                
+                // Clear target point on right click
+                this.targetPoint = null;
+                document.getElementById('goToPoseBtn').disabled = true;
+                document.getElementById('checkPoseBtn').disabled = true;
+                document.getElementById('reachability').textContent = '-';
+                document.getElementById('reachability').style.color = '#6c757d';
+                
+                // Reset sidebar coordinates to show current cursor position
+                if (this.currentTargetX !== undefined && this.currentTargetY !== undefined) {
+                    document.getElementById('targetX').textContent = this.currentTargetX.toFixed(4);
+                    document.getElementById('targetY').textContent = this.currentTargetY.toFixed(4);
+                }
+                
+                this.drawMapElements(); // Update all elements
+                
+                console.log('Target point cleared');
+            }
+
+            isPointInMapArea(x, y) {
+                if (!this.mapData) return false;
+                
+                const map = this.mapData.result[0];
+                const mapWidth = map.size[0] * this.mapScale;
+                const mapHeight = map.size[1] * this.mapScale;
+                
+                return x >= this.mapOffsetX && 
+                       x <= this.mapOffsetX + mapWidth &&
+                       y >= this.mapOffsetY && 
+                       y <= this.mapOffsetY + mapHeight;
+            }
+
+            canvasToWorld(canvasX, canvasY) {
+                if (!this.mapData) return { x: 0, y: 0 };
+
+                const map = this.mapData.result[0];
+                const resolution = map.resolution;
+                const offsetX = map.offsetX;
+                const offsetY = map.offsetY;
+
+                // Convert canvas coordinates to world coordinates
+                // More accurate transformation considering map offset
+                const mapPixelX = (canvasX - this.mapOffsetX) / this.mapScale;
+                // Y INVERSION: in canvas Y points down, in map - up
+                const mapPixelY = map.size[1] - (canvasY - this.mapOffsetY) / this.mapScale;
+                
+                const worldX = mapPixelX * resolution + offsetX;
+                const worldY = mapPixelY * resolution + offsetY;
+
+                return { x: worldX, y: worldY };
+            }
+
+            worldToCanvas(worldX, worldY) {
+                if (!this.mapData) return { x: 0, y: 0 };
+
+                const map = this.mapData.result[0];
+                const resolution = map.resolution;
+                const offsetX = map.offsetX;
+                const offsetY = map.offsetY;
+
+                // Convert world coordinates to canvas coordinates
+                // More accurate transformation considering map offset
+                const mapPixelX = (worldX - offsetX) / resolution;
+                // Y INVERSION: in map Y points up, in canvas - down
+                const mapPixelY = map.size[1] - (worldY - offsetY) / resolution;
+                
+                const canvasX = mapPixelX * this.mapScale + this.mapOffsetX;
+                const canvasY = mapPixelY * this.mapScale + this.mapOffsetY;
+
+                return { x: canvasX, y: canvasY };
+            }
+
+            async loadInitialData() {
+                try {
+                    await Promise.all([
+                        this.loadMap(),
+                        this.loadRobotStatus(),
+                        this.loadChargingStations()
+                    ]);
+                } catch (error) {
+                    console.error('Error loading data:', error);
+                    this.showAlert('Error loading data: ' + error.message, 'error');
+                }
+            }
+
+            async loadMap() {
+                try {
+                    const response = await fetch(`${this.SERVICE_PREFIX}/map`);
+                    const data = await response.json();
+                    
+                    if (data.result && data.result.length > 0) {
+                        this.mapData = data;
+                        this.updateMapInfo(data.result[0]);
+                        await this.drawMap();
+                        this.showAlert('Map loaded successfully', 'success');
+                    } else {
+                        throw new Error('Map not found');
+                    }
+                } catch (error) {
+                    console.error('Error loading map:', error);
+                    this.showAlert('Error loading map: ' + error.message, 'error');
+                }
+            }
+
+            async loadRobotStatus() {
+                try {
+                    const response = await fetch(`${this.SERVICE_PREFIX}/status`);
+                    const data = await response.json();
+                    
+                    this.robotData = data;
+                    this.updateRobotInfo(data);
+                    this.updateStatusIndicator(true);
+                    this.drawMapElements(); // Update only elements, don't redraw map
+                } catch (error) {
+                    console.error('Error loading robot status:', error);
+                    this.updateStatusIndicator(false);
+                }
+            }
+
+            async loadChargingStations() {
+                try {
+                    const response = await fetch(`${this.SERVICE_PREFIX}/charging_stations`);
+                    const data = await response.json();
+                    
+                    this.stations = data.stations || data.result || [];
+                    this.updateStationsList();
+                    this.drawMapElements(); // Update only elements, don't redraw map
+                } catch (error) {
+                    console.error('Error loading stations:', error);
+                }
+            }
+
+            async refreshMap() {
+                // Clear map cache and reload
+                this.mapImage = null;
+                await this.loadMap();
+                this.showAlert('Map updated', 'success');
+            }
+
+            drawCoordinateAxes(ctx, map) {
+                // Draw coordinate axes for debugging
+                const centerX = this.mapOffsetX + (map.size[0] * this.mapScale) / 2;
+                const centerY = this.mapOffsetY + (map.size[1] * this.mapScale) / 2;
+                
+                // X axis (red line)
+                ctx.strokeStyle = '#ff0000';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(this.mapOffsetX, centerY);
+                ctx.lineTo(this.mapOffsetX + map.size[0] * this.mapScale, centerY);
+                ctx.stroke();
+                
+                // Y axis (green line) - inverted
+                ctx.strokeStyle = '#00ff00';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(centerX, this.mapOffsetY);
+                ctx.lineTo(centerX, this.mapOffsetY + map.size[1] * this.mapScale);
+                ctx.stroke();
+                
+                // Axis labels
+                ctx.fillStyle = '#ff0000';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('X', this.mapOffsetX + map.size[0] * this.mapScale - 10, centerY - 5);
+                
+                ctx.fillStyle = '#00ff00';
+                ctx.textAlign = 'center';
+                ctx.fillText('Y', centerX + 5, this.mapOffsetY + 15);
+                
+                // Coordinate center
+                ctx.fillStyle = '#ffff00';
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, 3, 0, 2 * Math.PI);
+                ctx.fill();
+            }
+
+            testCoordinates() {
+                if (!this.mapData) {
+                    this.showAlert('Map not loaded', 'error');
+                    return;
+                }
+
+                const map = this.mapData.result[0];
+                console.log('=== COORDINATE TEST ===');
+                console.log('Map data:', {
+                    size: map.size,
+                    resolution: map.resolution,
+                    offsetX: map.offsetX,
+                    offsetY: map.offsetY
+                });
+                console.log('Canvas scale and offsets:', {
+                    mapScale: this.mapScale,
+                    mapOffsetX: this.mapOffsetX,
+                    mapOffsetY: this.mapOffsetY,
+                    canvasSize: { width: this.canvas.width, height: this.canvas.height }
+                });
+
+                // Test coordinate transformation
+                const testPoints = [
+                    { x: 0, y: 0, name: "Top-left corner of map" },
+                    { x: map.size[0], y: map.size[1], name: "Bottom-right corner of map" },
+                    { x: map.size[0] / 2, y: map.size[1] / 2, name: "Center of map" },
+                    { x: 0, y: map.size[1], name: "Bottom-left corner of map" },
+                    { x: map.size[0], y: 0, name: "Top-right corner of map" }
+                ];
+
+                testPoints.forEach((point, index) => {
+                    const worldCoords = this.canvasToWorld(
+                        this.mapOffsetX + point.x * this.mapScale,
+                        this.mapOffsetY + point.y * this.mapScale
+                    );
+                    console.log(`Test ${index + 1} (${point.name}):`, {
+                        mapPixel: point,
+                        canvas: {
+                            x: this.mapOffsetX + point.x * this.mapScale,
+                            y: this.mapOffsetY + point.y * this.mapScale
+                        },
+                        world: worldCoords,
+                        note: "Y inverted: canvas Y down, map Y up"
+                    });
+                });
+
+                this.showAlert('Coordinate test completed, check console', 'info');
+            }
+
+            testRobotAngle() {
+                if (!this.robotData || !this.robotData.pose) {
+                    this.showAlert('Robot data not loaded', 'error');
+                    return;
+                }
+
+                const pose = this.robotData.pose;
+                const theta = pose.theta_rad || pose.theta;
+                const correctedAngle = -theta + Math.PI / 2;
+                
+                console.log('=== ROBOT ANGLE TEST ===');
+                console.log('Original angle (theta):', {
+                    radians: theta,
+                    degrees: (theta * 180 / Math.PI).toFixed(1) + '°'
+                });
+                console.log('Corrected angle (for display):', {
+                    radians: correctedAngle,
+                    degrees: (correctedAngle * 180 / Math.PI).toFixed(1) + '°'
+                });
+                console.log('Explanation:', {
+                    reason: 'Angle inversion due to Y axis inversion in canvas + 90° rotation',
+                    formula: 'correctedAngle = -theta + π/2',
+                    note: 'In canvas Y points down, in map - up, +90° clockwise'
+                });
+
+                // Test different angles
+                const testAngles = [0, Math.PI/4, Math.PI/2, Math.PI, 3*Math.PI/2, 2*Math.PI];
+                console.log('Test different angles:');
+                testAngles.forEach((angle, index) => {
+                    const corrected = -angle + Math.PI / 2;
+                    console.log(`Angle ${index + 1}:`, {
+                        original: (angle * 180 / Math.PI).toFixed(1) + '°',
+                        corrected: (corrected * 180 / Math.PI).toFixed(1) + '°',
+                        direction: this.getAngleDirection(angle)
+                    });
+                });
+
+                this.showAlert('Robot angle test completed, check console', 'info');
+            }
+
+            getAngleDirection(angle) {
+                const degrees = angle * 180 / Math.PI;
+                if (degrees >= -22.5 && degrees < 22.5) return 'Right (0°)';
+                if (degrees >= 22.5 && degrees < 67.5) return 'Right-Up (45°)';
+                if (degrees >= 67.5 && degrees < 112.5) return 'Up (90°)';
+                if (degrees >= 112.5 && degrees < 157.5) return 'Left-Up (135°)';
+                if (degrees >= 157.5 || degrees < -157.5) return 'Left (180°)';
+                if (degrees >= -157.5 && degrees < -112.5) return 'Left-Down (225°)';
+                if (degrees >= -112.5 && degrees < -67.5) return 'Down (270°)';
+                if (degrees >= -67.5 && degrees < -22.5) return 'Right-Down (315°)';
+                return 'Unknown';
+            }
+
+
+            async drawMap() {
+                if (!this.mapData || !this.canvas) return;
+
+                const map = this.mapData.result[0];
+                const canvas = this.canvas;
+                const ctx = this.ctx;
+
+                // Clear canvas
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // Draw map background
+                ctx.fillStyle = '#f8f9fa';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                // Calculate scale and offset for map
+                const mapWidth = map.size[0];
+                const mapHeight = map.size[1];
+                
+                // Always use proportional scaling
+                // Reduce coordinate area strictly to map dimensions
+                this.mapScaleX = canvas.width / mapWidth;
+                this.mapScaleY = canvas.height / mapHeight;
+                this.mapScale = Math.min(this.mapScaleX, this.mapScaleY);
+                
+                // Center map in canvas
+                this.mapOffsetX = (canvas.width - mapWidth * this.mapScale) / 2;
+                this.mapOffsetY = (canvas.height - mapHeight * this.mapScale) / 2;
+
+                // Draw map image (load PNG only if not cached)
+                await this.drawMapImage(map);
+
+                // Draw all elements
+                this.drawMapElements();
+            }
+
+            drawMapElements() {
+                // Draw robot
+                if (this.robotData && this.robotData.pose) {
+                    this.drawRobot();
+                }
+
+                // Draw stations
+                this.drawStations();
+
+                // Draw target point
+                if (this.targetPoint) {
+                    this.drawTargetPoint();
+                }
+            }
+
+            async drawMapImage(map) {
+                const ctx = this.ctx;
+                
+                try {
+                    // Load PNG map image only if not already loaded
+                    if (!this.mapImage) {
+                        const mapId = map.id || 1; // Use map ID or 1 as default
+                        const imageUrl = `${this.SERVICE_PREFIX}/map/${mapId}/full.png`;
+                        
+                        const img = new Image();
+                        img.crossOrigin = 'anonymous'; // For CORS
+                        
+                        await new Promise((resolve, reject) => {
+                            img.onload = resolve;
+                            img.onerror = reject;
+                            img.src = imageUrl;
+                        });
+                        
+                        this.mapImage = img; // Cache the image
+                        console.log('Map loaded and cached');
+                    }
+                    
+                    // Draw map image with proportional scaling
+                    ctx.drawImage(
+                        this.mapImage,
+                        this.mapOffsetX,
+                        this.mapOffsetY,
+                        map.size[0] * this.mapScale,
+                        map.size[1] * this.mapScale
+                    );
+                    
+                    // Draw map border
+                    ctx.strokeStyle = '#6c757d';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(
+                        this.mapOffsetX,
+                        this.mapOffsetY,
+                        map.size[0] * this.mapScale,
+                        map.size[1] * this.mapScale
+                    );
+
+                    // Draw map info
+                    ctx.fillStyle = '#ffffff';
+                    ctx.font = 'bold 14px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.strokeStyle = '#000000';
+                    ctx.lineWidth = 2;
+                    ctx.strokeText(
+                        `Map: ${map.name}`,
+                        this.mapOffsetX + (map.size[0] * this.mapScale) / 2,
+                        this.mapOffsetY + 20
+                    );
+                    ctx.fillText(
+                        `Map: ${map.name}`,
+                        this.mapOffsetX + (map.size[0] * this.mapScale) / 2,
+                        this.mapOffsetY + 20
+                    );
+
+                    // Draw coordinate axes for debugging
+                    this.drawCoordinateAxes(ctx, map);
+                    
+                } catch (error) {
+                    console.error('Error loading map image:', error);
+                    
+                    // Fallback: draw placeholder
+                    ctx.fillStyle = '#e9ecef';
+                    ctx.fillRect(
+                        this.mapOffsetX,
+                        this.mapOffsetY,
+                        map.size[0] * this.mapScale,
+                        map.size[1] * this.mapScale
+                    );
+
+                    // Draw map border
+                    ctx.strokeStyle = '#6c757d';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(
+                        this.mapOffsetX,
+                        this.mapOffsetY,
+                        map.size[0] * this.mapScale,
+                        map.size[1] * this.mapScale
+                    );
+
+                    // Draw error message
+                    ctx.fillStyle = '#dc3545';
+                    ctx.font = '14px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(
+                        `Error loading map: ${map.name}`,
+                        this.mapOffsetX + (map.size[0] * this.mapScale) / 2,
+                        this.mapOffsetY + 20
+                    );
+                }
+            }
+
+            drawGrid(map) {
+                const ctx = this.ctx;
+                const gridSize = 50;
+                
+                ctx.strokeStyle = '#dee2e6';
+                ctx.lineWidth = 1;
+
+                // Vertical lines
+                for (let x = 0; x <= map.size[0]; x += gridSize) {
+                    const canvasX = this.mapOffsetX + x * this.mapScale;
+                    ctx.beginPath();
+                    ctx.moveTo(canvasX, this.mapOffsetY);
+                    ctx.lineTo(canvasX, this.mapOffsetY + map.size[1] * this.mapScale);
+                    ctx.stroke();
+                }
+
+                // Horizontal lines
+                for (let y = 0; y <= map.size[1]; y += gridSize) {
+                    const canvasY = this.mapOffsetY + y * this.mapScale;
+                    ctx.beginPath();
+                    ctx.moveTo(this.mapOffsetX, canvasY);
+                    ctx.lineTo(this.mapOffsetX + map.size[0] * this.mapScale, canvasY);
+                    ctx.stroke();
+                }
+            }
+
+            drawRobot() {
+                if (!this.robotData || !this.robotData.pose) return;
+
+                const pose = this.robotData.pose;
+                // Use correct fields from API
+                const x = pose.x_m || pose.x;
+                const y = pose.y_m || pose.y;
+                const theta = pose.theta_rad || pose.theta;
+                
+                if (x === undefined || y === undefined || theta === undefined) {
+                    console.warn('Incomplete robot position data:', pose);
+                    return;
+                }
+                
+                const canvasPos = this.worldToCanvas(x, y);
+                
+                // Correct robot rotation considering Y axis inversion
+                // In canvas Y points down, so we need to invert the angle
+                // Additionally rotate 90° clockwise
+                const correctedAngle = -theta + Math.PI / 2;
+
+                // Debug information for accuracy verification
+                console.log('Robot position:', {
+                    world: { x: x, y: y },
+                    canvas: canvasPos,
+                    angle: {
+                        original: theta,
+                        corrected: correctedAngle,
+                        originalDegrees: (theta * 180 / Math.PI).toFixed(1),
+                        correctedDegrees: (correctedAngle * 180 / Math.PI).toFixed(1),
+                        additionalRotation: '+90° (clockwise)'
+                    },
+                    mapOffset: { x: this.mapData?.result[0]?.offsetX, y: this.mapData?.result[0]?.offsetY },
+                    resolution: this.mapData?.result[0]?.resolution,
+                    mapScale: this.mapScale,
+                    mapOffsetCanvas: { x: this.mapOffsetX, y: this.mapOffsetY }
+                });
+
+                // Create robot marker element
+                let robotMarker = document.querySelector('.robot-marker');
+                if (!robotMarker) {
+                    robotMarker = document.createElement('div');
+                    robotMarker.className = 'robot-marker';
+                    this.canvas.parentElement.appendChild(robotMarker);
+                }
+
+                robotMarker.style.left = canvasPos.x + 'px';
+                robotMarker.style.top = canvasPos.y + 'px';
+                
+                // Use already calculated correctedAngle
+                robotMarker.style.transform = `translate(-50%, -50%) rotate(${correctedAngle}rad)`;
+
+                // Add tooltip
+                robotMarker.addEventListener('mouseenter', (e) => {
+                    this.showTooltip(e, `
+                        <strong>Robot</strong><br>
+                        ID: ${this.robotData.id || 'N/A'}<br>
+                        State: ${this.robotData.state || 'N/A'}<br>
+                        Battery: ${this.robotData.battery_level_percent ? this.robotData.battery_level_percent.toFixed(1) + '%' : 'N/A'}<br>
+                        Position: (${x.toFixed(2)}, ${y.toFixed(2)})<br>
+                        Angle: ${(theta * 180 / Math.PI).toFixed(1)}° (original)<br>
+                        Angle: ${(correctedAngle * 180 / Math.PI).toFixed(1)}° (displayed +90°)
+                    `);
+                });
+
+                robotMarker.addEventListener('mouseleave', () => {
+                    this.hideTooltip();
+                });
+            }
+
+            drawStations() {
+                // Remove existing station markers
+                document.querySelectorAll('.station-marker').forEach(marker => marker.remove());
+
+                this.stations.forEach(station => {
+                    if (!station.pose) return;
+
+                    const canvasPos = this.worldToCanvas(station.pose.x, station.pose.y);
+                    
+                    const marker = document.createElement('div');
+                    marker.className = 'station-marker';
+                    
+                    if (station._type_id === 4) { // Charging station
+                        marker.classList.add('charging');
+                    }
+                    
+                    if (station.state === 'INACTIVE') {
+                        marker.classList.add('inactive');
+                    }
+
+                    marker.style.left = canvasPos.x + 'px';
+                    marker.style.top = canvasPos.y + 'px';
+
+                    this.canvas.parentElement.appendChild(marker);
+
+                    // Add tooltip
+                    marker.addEventListener('mouseenter', (e) => {
+                        this.showTooltip(e, `
+                            <strong>Station</strong><br>
+                            ID: ${station.id}<br>
+                            Name: ${station.name || 'N/A'}<br>
+                            Type: ${station._type_id === 4 ? 'Charging' : 'Regular'}<br>
+                            State: ${station.state || 'N/A'}<br>
+                            Position: (${station.pose.x.toFixed(2)}, ${station.pose.y.toFixed(2)})
+                        `);
+                    });
+
+                    marker.addEventListener('mouseleave', () => {
+                        this.hideTooltip();
+                    });
+
+                    // Add click handler for charging stations
+                    if (station._type_id === 4) {
+                        marker.addEventListener('click', () => {
+                            this.goToChargingStation(station.id);
+                        });
+                    }
+                });
+            }
+
+            drawTargetPoint() {
+                if (!this.targetPoint) return;
+
+                const canvasPos = this.worldToCanvas(this.targetPoint.x, this.targetPoint.y);
+                
+                let targetMarker = document.querySelector('.target-marker');
+                if (!targetMarker) {
+                    targetMarker = document.createElement('div');
+                    targetMarker.className = 'target-marker';
+                    this.canvas.parentElement.appendChild(targetMarker);
+                }
+
+                targetMarker.style.left = canvasPos.x + 'px';
+                targetMarker.style.top = canvasPos.y + 'px';
+
+                // Update class based on reachability
+                targetMarker.classList.remove('reachable', 'unreachable');
+                if (this.targetPoint.reachable !== undefined) {
+                    targetMarker.classList.add(this.targetPoint.reachable ? 'reachable' : 'unreachable');
+                }
+            }
+
+            setTargetPoint(x, y) {
+                this.targetPoint = { x, y };
+                
+                // Update sidebar coordinates with the saved target position
+                document.getElementById('targetX').textContent = x.toFixed(4);
+                document.getElementById('targetY').textContent = y.toFixed(4);
+                
+                // Reset reachability status when setting new target
+                document.getElementById('reachability').textContent = '-';
+                document.getElementById('reachability').style.color = '#6c757d';
+                
+                this.drawMapElements(); // Update all elements including target point
+                document.getElementById('goToPoseBtn').disabled = false;
+                document.getElementById('checkPoseBtn').disabled = false;
+                
+                console.log('Target point set:', { x: x.toFixed(4), y: y.toFixed(4) });
+            }
+
+            async checkPose() {
+                // Check if target point is set
+                if (!this.targetPoint) {
+                    this.showAlert('No target point set. Click on the map to set a target point.', 'error');
+                    return;
+                }
+
+                const button = document.getElementById('checkPoseBtn');
+                const loading = document.getElementById('checkLoading');
+                const text = document.getElementById('checkText');
+
+                button.disabled = true;
+                loading.style.display = 'inline-block';
+                text.textContent = 'Checking...';
+
+                try {
+                    const response = await fetch(`${this.SERVICE_PREFIX}/check_pose`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            x_m: this.targetPoint.x,
+                            y_m: this.targetPoint.y,
+                            theta_rad: 0,
+                            map_id: this.robotData?.pose?.map_id || 0
+                        })
+                    });
+
+                    const data = await response.json();
+                    const isReachable = data.result?.reachable !== false;
+
+                    // Update target point with reachability status
+                    this.targetPoint.reachable = isReachable;
+
+                    this.drawMapElements(); // Update all elements including target point
+                    this.updateReachabilityStatus(isReachable);
+
+                } catch (error) {
+                    console.error('Error checking point:', error);
+                    this.showAlert('Error checking point: ' + error.message, 'error');
+                } finally {
+                    button.disabled = false;
+                    loading.style.display = 'none';
+                    text.textContent = 'Check Point';
+                }
+            }
+
+            async goToPose() {
+                // Check if target point is set
+                if (!this.targetPoint) {
+                    this.showAlert('No target point set. Click on the map to set a target point.', 'error');
+                    return;
+                }
+
+                const button = document.getElementById('goToPoseBtn');
+                const loading = document.getElementById('goLoading');
+                const text = document.getElementById('goText');
+
+                button.disabled = true;
+                loading.style.display = 'inline-block';
+                text.textContent = 'Sending...';
+
+                try {
+                    const response = await fetch(`${this.SERVICE_PREFIX}/go_to_pose`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            x_m: this.targetPoint.x,
+                            y_m: this.targetPoint.y,
+                            theta_rad: 0,
+                            map_id: this.robotData?.pose?.map_id || 0,
+                            max_speed_m_s: 0.5,
+                            wait: false
+                        })
+                    });
+
+                    const data = await response.json();
+                    this.showAlert(`Robot sent to point (${this.targetPoint.x.toFixed(2)}, ${this.targetPoint.y.toFixed(2)})!`, 'success');
+
+                } catch (error) {
+                    console.error('Error sending robot:', error);
+                    this.showAlert('Error sending robot: ' + error.message, 'error');
+                } finally {
+                    button.disabled = false;
+                    loading.style.display = 'none';
+                    text.textContent = 'Send Robot';
+                }
+            }
+
+            async goToChargingStation(stationId) {
+                try {
+                    const response = await fetch(`${this.SERVICE_PREFIX}/go_to_charging_station/${stationId}`, {
+                        method: 'POST'
+                    });
+
+                    const data = await response.json();
+                    this.showAlert(`Robot sent to charging station ${stationId}!`, 'success');
+
+                } catch (error) {
+                    console.error('Error sending to station:', error);
+                    this.showAlert('Error sending to station: ' + error.message, 'error');
+                }
+            }
+
+            updateRobotInfo(data) {
+                document.getElementById('robotId').textContent = data.id || 'N/A';
+                document.getElementById('robotState').textContent = data.state || 'N/A';
+                document.getElementById('batteryLevel').textContent = 
+                    data.battery_level_percent ? data.battery_level_percent.toFixed(1) + '%' : 'N/A';
+                
+                if (data.pose) {
+                    const x = data.pose.x_m || data.pose.x;
+                    const y = data.pose.y_m || data.pose.y;
+                    const theta = data.pose.theta_rad || data.pose.theta;
+                    
+                    document.getElementById('positionX').textContent = 
+                        x !== undefined ? x.toFixed(2) : 'N/A';
+                    document.getElementById('positionY').textContent = 
+                        y !== undefined ? y.toFixed(2) : 'N/A';
+                    document.getElementById('positionTheta').textContent = 
+                        theta !== undefined ? (theta * 180 / Math.PI).toFixed(1) + '°' : 'N/A';
+                } else {
+                    document.getElementById('positionX').textContent = 'N/A';
+                    document.getElementById('positionY').textContent = 'N/A';
+                    document.getElementById('positionTheta').textContent = 'N/A';
+                }
+            }
+
+            updateMapInfo(map) {
+                document.getElementById('mapName').textContent = map.name || 'N/A';
+                document.getElementById('mapSize').textContent = 
+                    map.size ? `${map.size[0]} × ${map.size[1]}` : 'N/A';
+                document.getElementById('mapResolution').textContent = 
+                    map.resolution ? map.resolution.toFixed(4) + ' m/pixel' : 'N/A';
+                document.getElementById('mapOffsetX').textContent = 
+                    map.offsetX ? map.offsetX.toFixed(3) + ' m' : 'N/A';
+                document.getElementById('mapOffsetY').textContent = 
+                    map.offsetY ? map.offsetY.toFixed(3) + ' m' : 'N/A';
+            }
+
+            updateStatusIndicator(isOnline) {
+                const statusDot = document.getElementById('statusDot');
+                const statusText = document.getElementById('statusText');
+                
+                if (isOnline) {
+                    statusDot.classList.add('online');
+                    statusText.textContent = 'Connected';
+                } else {
+                    statusDot.classList.remove('online');
+                    statusText.textContent = 'Disconnected';
+                }
+            }
+
+            updateReachabilityStatus(isReachable) {
+                const reachabilityElement = document.getElementById('reachability');
+                reachabilityElement.textContent = isReachable ? 'Reachable' : 'Unreachable';
+                reachabilityElement.style.color = isReachable ? '#28a745' : '#dc3545';
+            }
+
+            updateStationsList() {
+                const container = document.getElementById('chargingStationsList');
+                
+                if (this.stations.length === 0) {
+                    container.innerHTML = '<div style="text-align: center; color: #666; font-size: 0.9rem;">No stations found</div>';
+                    return;
+                }
+
+                const stationsHtml = this.stations.map(station => `
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; border-bottom: 1px solid #e9ecef;">
+                        <div>
+                            <div style="font-weight: 600;">${station.name || `Station ${station.id}`}</div>
+                            <div style="font-size: 0.8rem; color: #666;">
+                                ${station._type_id === 4 ? 'Charging' : 'Regular'} • ${station.state || 'N/A'}
+                            </div>
+                        </div>
+                        <div style="width: 12px; height: 12px; border-radius: 2px; background: ${station.state === 'OK' ? '#28a745' : '#6c757d'};"></div>
+                    </div>
+                `).join('');
+
+                container.innerHTML = stationsHtml;
+            }
+
+            showTooltip(event, content) {
+                this.tooltip.innerHTML = content;
+                this.tooltip.style.display = 'block';
+                this.tooltip.style.left = (event.clientX + 10) + 'px';
+                this.tooltip.style.top = (event.clientY - 10) + 'px';
+            }
+
+            hideTooltip() {
+                this.tooltip.style.display = 'none';
+            }
+
+            showAlert(message, type = 'info') {
+                // Create alert element
+                const alert = document.createElement('div');
+                alert.className = `alert ${type}`;
+                alert.textContent = message;
+                
+                // Insert at the top of sidebar
+                const sidebar = document.querySelector('.sidebar');
+                sidebar.insertBefore(alert, sidebar.firstChild);
+                
+                // Remove after 5 seconds
+                setTimeout(() => {
+                    alert.remove();
+                }, 5000);
+            }
+
+            startStatusUpdates() {
+                // Update robot status every 2 seconds
+                setInterval(() => {
+                    this.loadRobotStatus();
+                }, 2000);
+
+                // Update stations every 10 seconds
+                setInterval(() => {
+                    this.loadChargingStations();
+                }, 10000);
+            }
+        }
+
+        // Initialize the map viewer when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new SymovoMapViewer();
+        });
+    </script>
+</body>
+</html>

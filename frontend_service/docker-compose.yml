@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  frontend:
+    build: .
+    ports:
+      - "8401:8401"
+    volumes:
+      # Для разработки - монтируем код для hot reload
+      - .:/app
+    environment:
+      - PYTHONPATH=/app
+      - HOST=0.0.0.0
+      - PORT=8000
+      - ALLOWED_ORIGINS=*
+      - API_GATEWAY_URL=http://192.168.1.10:8201
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - frontend-network
+
+networks:
+  frontend-network:
+    driver: bridge

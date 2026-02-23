@@ -1,0 +1,65 @@
+version: "3.9"
+
+services:
+  robot-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: robot-service:latest
+    restart: on-failure
+    ports:
+      - "8110:8110"
+    environment:
+      # Logging and workers
+      LOG_LEVEL: "info"
+      UVICORN_WORKERS: "1"
+
+      # Optional: override config file path (the image already has /app/config.yaml)
+      APP_CONFIG_FILE: "/app/config.yaml"
+
+      # Optional: override endpoints via env (env has priority over YAML)
+      IGUS_CONTAINER_IP: "192.168.1.10"
+      IGUS_CONTAINER_PORT: "8101"
+      XARM_CONTAINER_IP: "192.168.1.10"
+      XARM_CONTAINER_PORT: "8102"
+      SYMOVO_CONTAINER_IP: "192.168.1.10"
+      SYMOVO_CONTAINER_PORT: "7905"
+      # Nav2adapter (host:7905): teleop move_speed and drive_mode. robot_id used in /api/v1/robots/<id>/move/speed
+      SYMOVO_NAV2ADAPTER_HOST: "192.168.1.10"
+      SYMOVO_ROBOT_ID: "fahrdummy-01"
+      # Or override: SYMOVO_TELEOP_MOVE_URL, SYMOVO_DRIVE_MODE_URL
+      DEPTH_CAMERA_CONTAINER_IP: "192.168.1.55"
+      DEPTH_CAMERA_CONTAINER_PORT: "8000"
+      XARM_WS_URL: "ws://192.168.1.220:18333/ws?channel=prod&lang=en&v=1&id=robot"
+
+      # Joystick params (optional)
+      JOYSTICK_DEADZONE: "0.12"
+      JOYSTICK_DEFAULT_TTL_MS: "150"
+      JOYSTICK_HOLD_TIMEOUT_MS: "2000"
+      JOYSTICK_MOVE_ACC: "1000"
+      JOYSTICK_IS_MOVE_TOOL: "false"
+      JOYSTICK_MODE: "0"
+      JOYSTICK_LIFT_JOG_SPEED: "2000"
+      JOYSTICK_LIFT_JOG_TTL_MS: "200"
+
+      # Safety layer params
+      WATCHDOG_TIMEOUT: "10.0"
+      HOLD_TIMEOUT: "2.0"
+
+    # Mount local config if you want to override the image default
+    # volumes:
+    #   - ./config.yaml:/app/config.yaml:ro
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://127.0.0.1:8110/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+

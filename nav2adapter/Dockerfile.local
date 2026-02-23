@@ -1,0 +1,39 @@
+# Альтернативный Dockerfile для локальной сборки
+FROM ubuntu:22.04
+
+# Установка Python 3.11
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-pip \
+    python3.11-venv \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Создание символической ссылки
+RUN ln -s /usr/bin/python3.11 /usr/bin/python
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# Copy requirements and install
+COPY requirements.txt ./
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# Copy app
+COPY . ./
+
+# Default envs
+ENV SERVICE_HOST=0.0.0.0 \
+    SERVICE_PORT=7905 \
+    LOG_LEVEL=info
+
+EXPOSE 7905
+
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 CMD curl -fsS http://localhost:${SERVICE_PORT}/healthz || exit 1
+
+CMD ["python", "main.py"]
+

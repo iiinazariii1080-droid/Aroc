@@ -1,0 +1,23 @@
+# Development dependencies for dryve D1 driver
+
+# Testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+
+# Property-based testing
+hypothesis>=6.0.0
+
+# Type checking
+mypy>=1.0.0
+types-all>=0.1.0
+
+# Code quality
+black>=23.0.0
+ruff>=0.1.0
+
+# Security scanning
+bandit>=1.7.0
+safety>=2.0.0
+pip-audit>=2.6.0
+
