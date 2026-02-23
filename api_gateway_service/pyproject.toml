@@ -1,3 +1,17 @@
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "--strict-markers --tb=short -q"
+markers = [
+    "unit: fast isolated unit tests",
+    "integration: tests with multiple modules or HTTP",
+    "slow: tests that take > 5 s",
+]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["tests/*", ".venv/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 50

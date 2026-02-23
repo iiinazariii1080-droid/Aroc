@@ -173,6 +173,9 @@ class TestGraspVerifier:
 
 # ── DepthService helpers ───────────────────────────────────────────────────
 
+cv2 = pytest.importorskip("cv2", reason="opencv not installed")
+
+
 class TestDepthServiceHelpers:
     def test_calibrate_distance(self):
         from services.depth_service import DepthService

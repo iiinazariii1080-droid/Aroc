@@ -155,7 +155,7 @@ class BrokerConfigResponse(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "MQTT_BROKER": "123.123.123.123,
+                "MQTT_BROKER": "123.123.123.123",
                 "MQTT_PORT": MQTT_DEFAULT_PORT,
                 "mqtt_user": "admin",
                 "mqtt_password": "secret",

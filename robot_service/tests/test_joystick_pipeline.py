@@ -99,7 +99,7 @@ async def test_single_click_and_scheduled_stop():
             "buttons": [0]*13 + [1] + [0]*(18-14),  # button13 rising
             "ttl": 100,
         }
-        assert jp.submit(frame) is True
+        assert await jp.submit(frame) is True
 
         # Wait for move to be processed
         await asyncio.sleep(0.05)
@@ -122,7 +122,7 @@ async def test_hold_then_release_immediate_stop():
     try:
         # First send neutral frame to initialize prev_buttons
         neutral = {"ts": time.time(), "axes": [0.0]*6, "buttons": [0]*18, "ttl": 200}
-        assert jp.submit(neutral)
+        assert await jp.submit(neutral)
         await asyncio.sleep(0.01)
 
         # First hold frame (rising edge -> single click)
@@ -132,7 +132,7 @@ async def test_hold_then_release_immediate_stop():
             "buttons": [0]*11 + [1] + [0]*(18-12),
             "ttl": 200,
         }
-        assert jp.submit(hold1)
+        assert await jp.submit(hold1)
         await asyncio.sleep(0.01)
 
         # Second hold frame (continuous hold -> loop move)
@@ -142,13 +142,13 @@ async def test_hold_then_release_immediate_stop():
             "buttons": [0]*11 + [1] + [0]*(18-12),
             "ttl": 200,
         }
-        assert jp.submit(hold2)
+        assert await jp.submit(hold2)
         await asyncio.sleep(0.05)
         assert any(c.get("type") == "move_step" and c.get("is_loop") is True for c in fake.calls)
 
         # Release
         release = {"ts": time.time(), "axes": [0.0]*6, "buttons": [0]*18, "ttl": 200}
-        assert jp.submit(release)
+        assert await jp.submit(release)
         await asyncio.sleep(0.05)
         # Idle path should send move_step_over immediately
         assert any(c.get("type") == "move_step_over" for c in fake.calls)
@@ -164,7 +164,7 @@ async def test_stale_frame_ignored():
     await jp.start()
     try:
         stale = {"ts": time.time() - 5, "axes": [0.0]*6, "buttons": [0]*18, "ttl": 100}
-        assert jp.submit(stale)
+        assert await jp.submit(stale)
         await asyncio.sleep(0.05)
         assert fake.calls == []
     finally:
@@ -180,7 +180,7 @@ async def test_emergency_stop_button0():
     await jp.start()
     try:
         frame = {"ts": time.time(), "axes": [0.0]*6, "buttons": [1] + [0]*17, "ttl": 150}
-        assert jp.submit(frame)
+        assert await jp.submit(frame)
         await asyncio.sleep(0.05)
         # Button 0 should toggle gripper (take on first press)
         assert any(c.get("type") == "gripper_take" for c in fake_http.calls)
@@ -208,7 +208,7 @@ async def test_heartbeat_when_inactive():
     try:
         # Send one frame to start activity
         frame = {"ts": time.time(), "axes": [0.0]*6, "buttons": [0]*18, "ttl": 200}
-        assert jp.submit(frame)
+        assert await jp.submit(frame)
         await asyncio.sleep(0.1)
 
         # Wait for heartbeat to trigger (inactive for 2+ seconds)
@@ -248,7 +248,7 @@ async def test_no_heartbeat_when_active():
         # Send frames regularly to keep active
         for i in range(5):
             frame = {"ts": time.time(), "axes": [0.0]*6, "buttons": [0]*18, "ttl": 200}
-            assert jp.submit(frame)
+            assert await jp.submit(frame)
             await asyncio.sleep(0.5)  # Send frame every 0.5 seconds
 
         # Wait a bit more but not enough for heartbeat
@@ -290,7 +290,7 @@ async def test_heartbeat_integration():
     try:
         # Send initial frame
         frame1 = {"ts": time.time(), "axes": [0.0]*6, "buttons": [0]*18, "ttl": 200}
-        assert jp.submit(frame1)
+        assert await jp.submit(frame1)
         await asyncio.sleep(0.1)
 
         # Wait for heartbeat to trigger (inactive for 1.5+ seconds)
@@ -301,7 +301,7 @@ async def test_heartbeat_integration():
 
         # Send another frame to reset activity
         frame2 = {"ts": time.time(), "axes": [0.0]*6, "buttons": [0]*18, "ttl": 200}
-        assert jp.submit(frame2)
+        assert await jp.submit(frame2)
         await asyncio.sleep(0.1)
 
         # Wait again for heartbeat
@@ -323,26 +323,26 @@ async def test_zero_frame_triggers_immediate_stop():
     await jp.start()
     try:
         neutral = {"ts": time.time(), "axes": [0.0] * 6, "buttons": [0] * 18, "ttl": 150}
-        assert jp.submit(neutral)
+        assert await jp.submit(neutral)
         await asyncio.sleep(0.01)
 
         press = {"ts": time.time(), "axes": [0.0] * 6, "buttons": [0] * 12 + [1] + [0] * (18 - 13), "ttl": 150}
-        assert jp.submit(press)
+        assert await jp.submit(press)
         await asyncio.sleep(0.01)
 
         hold = {"ts": time.time(), "axes": [0.0] * 6, "buttons": [0] * 12 + [1] + [0] * (18 - 13), "ttl": 150}
-        assert jp.submit(hold)
+        assert await jp.submit(hold)
         await asyncio.sleep(0.05)
         assert any(call.get("type") == "move_step" for call in fake.calls)
 
         zero = {"ts": time.time(), "axes": [0.0] * 6, "buttons": [0] * 18, "ttl": 150}
-        assert jp.submit(zero)
+        assert await jp.submit(zero)
         await asyncio.sleep(0.05)
         stop_calls = [c for c in fake.calls if c.get("type") == "move_step_over"]
         assert stop_calls, "zero frame should trigger immediate move_step_over"
 
         prev_count = len(stop_calls)
-        assert jp.submit(zero)
+        assert await jp.submit(zero)
         await asyncio.sleep(0.05)
         stop_calls = [c for c in fake.calls if c.get("type") == "move_step_over"]
         assert len(stop_calls) == prev_count, "repeated zero frames should not spam stop commands"
@@ -357,14 +357,14 @@ async def test_inactivity_timer_restarts_with_active_frames():
     jp = JoystickPipeline(fake, safety_layer=fake_safety, deadzone=0.0, default_ttl_ms=150, hold_timeout_ms=1000)
     await jp.start()
     try:
-        assert jp.submit({"ts": time.time(), "axes": [0.0] * 6, "buttons": [0] * 18, "ttl": 150})
+        assert await jp.submit({"ts": time.time(), "axes": [0.0] * 6, "buttons": [0] * 18, "ttl": 150})
         await asyncio.sleep(0.02)
-        assert jp.submit({"ts": time.time(), "axes": [0.0] * 6, "buttons": [0] * 12 + [1] + [0] * (18 - 13), "ttl": 150})
+        assert await jp.submit({"ts": time.time(), "axes": [0.0] * 6, "buttons": [0] * 12 + [1] + [0] * (18 - 13), "ttl": 150})
         await asyncio.sleep(0.02)
 
         for _ in range(3):
             hold_frame = {"ts": time.time(), "axes": [0.0] * 6, "buttons": [0] * 12 + [1] + [0] * (18 - 13), "ttl": 150}
-            assert jp.submit(hold_frame)
+            assert await jp.submit(hold_frame)
             await asyncio.sleep(0.3)
 
         assert not any(call.get("type") == "move_step_over" for call in fake.calls), "inactivity timer should reset on active frames"

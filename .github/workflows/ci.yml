@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ── Lint ───────────────────────────────────────────────────────────────
+  lint:
+    name: "Lint (${{ matrix.service }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api_gateway_service
+          - igus_service
+          - mqtt_command_service
+          - nav2adapter
+          - xarm_service
+          - robot_service
+          - frontend_service
+          - proxt_camera_service
+          - janus_camera_page
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install ruff
+        run: pip install ruff==0.15.0
+
+      - name: Run ruff check
+        run: ruff check ${{ matrix.service }}
+        continue-on-error: true  # non-blocking until codebase is fully clean
+
+  # ── Unit tests ─────────────────────────────────────────────────────────
+  test:
+    name: "Test (${{ matrix.service }})"
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: api_gateway_service
+            requirements: api_gateway_service/requirements.txt
+          - service: igus_service
+            requirements: igus_service/requirements-dev.txt
+          - service: mqtt_command_service
+            requirements: mqtt_command_service/requirements.txt
+          - service: nav2adapter
+            requirements: nav2adapter/requirements.txt
+          - service: xarm_service
+            requirements: requirements-dev.txt
+          - service: robot_service
+            requirements: robot_service/requirements.txt
+          - service: frontend_service
+            requirements: frontend_service/requirements.txt
+          - service: proxt_camera_service
+            requirements: requirements-dev.txt
+          - service: janus_camera_page
+            requirements: requirements-dev.txt
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          if [ -f "${{ matrix.requirements }}" ]; then
+            pip install -r "${{ matrix.requirements }}" || true
+          fi
+          # Install service-specific deps if they have their own requirements
+          if [ -f "${{ matrix.service }}/requirements.txt" ]; then
+            pip install -r "${{ matrix.service }}/requirements.txt" || true
+          fi
+
+      - name: Run tests
+        env:
+          PYTHONPATH: "${{ matrix.service }}:."
+          XARM_IP: "127.0.0.1"
+          WS_CHECK_DISABLED: "1"
+          DRYVE_HOST: "127.0.0.1"
+          MQTT_BROKER: "127.0.0.1"
+          DEPTH_BASE_URL: "http://127.0.0.1:9999"
+          CONFIG_DB_PATH: ":memory:"
+          API_ENABLED: "false"
+        run: |
+          if [ -d "${{ matrix.service }}/tests" ]; then
+            python -m pytest "${{ matrix.service }}/tests" \
+              -m "not hardware and not simulator" \
+              --timeout=30 \
+              -q --tb=short \
+              --junitxml=test-results-${{ matrix.service }}.xml
+          else
+            echo "No tests directory found for ${{ matrix.service }}"
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.service }}
+          path: test-results-${{ matrix.service }}.xml
+          if-no-files-found: ignore
+
+  # ── Coverage (optional, runs after tests pass) ─────────────────────────
+  coverage:
+    name: "Coverage report"
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          # Install all service requirements
+          for svc in api_gateway_service igus_service mqtt_command_service nav2adapter robot_service frontend_service; do
+            if [ -f "$svc/requirements.txt" ]; then
+              pip install -r "$svc/requirements.txt" 2>/dev/null || true
+            fi
+          done
+
+      - name: Run tests with coverage
+        env:
+          XARM_IP: "127.0.0.1"
+          WS_CHECK_DISABLED: "1"
+          DRYVE_HOST: "127.0.0.1"
+          MQTT_BROKER: "127.0.0.1"
+          CONFIG_DB_PATH: ":memory:"
+          API_ENABLED: "false"
+        run: |
+          for svc in api_gateway_service igus_service mqtt_command_service nav2adapter xarm_service robot_service; do
+            if [ -d "$svc/tests" ]; then
+              echo "── coverage: $svc ──"
+              PYTHONPATH="$svc:.:$PYTHONPATH" \
+              python -m pytest "$svc/tests" \
+                -m "not hardware and not simulator" \
+                --cov="$svc/app" \
+                --cov-report=term-missing:skip-covered \
+                --timeout=30 -q --tb=short 2>&1 || true
+              echo ""
+            fi
+          done

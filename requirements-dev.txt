@@ -1,0 +1,29 @@
+# ── Test & dev dependencies (project-wide) ─────────────────────────────────
+# Install: pip install -r requirements-dev.txt
+
+# Testing
+pytest==8.4.2
+pytest-asyncio==0.25.3
+pytest-cov==6.1.1
+pytest-mock==3.14.0
+pytest-timeout==2.3.1
+
+# FastAPI test client
+httpx==0.27.2
+anyio==4.7.0
+
+# HTTP mocking
+respx==0.22.0            # mock httpx calls
+aioresponses==0.7.7      # mock aiohttp calls
+
+# Linting & type checking
+ruff==0.15.0
+mypy==1.19.1
+
+# Common service deps (needed to import service code)
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.1
+pydantic>=2.7.4
+pydantic-settings>=2.2.1
+python-dotenv>=1.0.0
+PyYAML>=6.0.2
