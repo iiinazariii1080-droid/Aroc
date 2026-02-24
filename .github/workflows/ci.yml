@@ -105,7 +105,7 @@ jobs:
               --junitxml=test-results-${{ matrix.service }}.xml \
               --cov="${{ matrix.service }}" \
               --cov-report=term-missing:skip-covered \
-              --cov-fail-under=60
+              --cov-fail-under=70
           else
             echo "No tests directory found for ${{ matrix.service }}"
           fi
