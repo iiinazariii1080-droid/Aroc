@@ -51,22 +51,31 @@ jobs:
         include:
           - service: api_gateway_service
             requirements: api_gateway_service/requirements.txt
+            cov_source: api_gateway_service/app
           - service: igus_service
             requirements: igus_service/requirements-dev.txt
+            cov_source: igus_service/app
           - service: mqtt_command_service
             requirements: mqtt_command_service/requirements.txt
+            cov_source: mqtt_command_service
           - service: nav2adapter
             requirements: nav2adapter/requirements.txt
+            cov_source: nav2adapter/app
           - service: xarm_service
             requirements: requirements-dev.txt
+            cov_source: xarm_service/app
           - service: robot_service
             requirements: robot_service/requirements.txt
+            cov_source: robot_service/app
           - service: frontend_service
             requirements: frontend_service/requirements.txt
+            cov_source: frontend_service
           - service: proxt_camera_service
             requirements: requirements-dev.txt
+            cov_source: proxt_camera_service/app
           - service: janus_camera_page
             requirements: requirements-dev.txt
+            cov_source: janus_camera_page/app
     steps:
       - uses: actions/checkout@v4
 
@@ -103,9 +112,9 @@ jobs:
               --timeout=30 \
               -q --tb=short \
               --junitxml=test-results-${{ matrix.service }}.xml \
-              --cov="${{ matrix.service }}" \
+              --cov="${{ matrix.cov_source }}" \
               --cov-report=term-missing:skip-covered \
-              --cov-fail-under=70
+              --cov-fail-under=75
           else
             echo "No tests directory found for ${{ matrix.service }}"
           fi
