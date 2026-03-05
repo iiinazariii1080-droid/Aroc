@@ -105,12 +105,15 @@
     const textOnly = textOnlyUrl === true;
     const textroomEnabled = textOnly ? true : (streamOnly ? false : resolveFeatureFlag(dataset.textroom ?? (joystickEnabled ? 'on' : 'off'), joystickEnabled));
 
-    const noFrameThresholdMs = clampInt(dataset.noFrameThresholdMs, 2000, 60000, 5000);
+    const noFrameThresholdMs = clampInt(dataset.noFrameThresholdMs, 2000, 60000, 3000);
     const watchdogTickMs = clampInt(dataset.watchdogIntervalMs, 500, 10000, 2000);
     const trackMuteRestartMs = clampInt(dataset.trackMuteMs, 500, 15000, 3000);
 
-    const backoffBaseMs = clampInt(dataset.backoffBaseMs, 200, 5000, 500);
-    const backoffMinMs = clampInt(dataset.backoffMinMs, 100, 2000, 250);
+    const minAcceptableFps = clampInt(dataset.minAcceptableFps, 1, 60, 5);
+    const fpsDropThresholdMs = clampInt(dataset.fpsDropThresholdMs, 1000, 15000, 3000);
+
+    const backoffBaseMs = clampInt(dataset.backoffBaseMs, 100, 5000, 300);
+    const backoffMinMs = clampInt(dataset.backoffMinMs, 50, 2000, 150);
     const backoffMaxMs = clampInt(dataset.backoffMaxMs, 2000, 60000, 15000);
     const backoffFactor = (() => {
       const raw = Number(dataset.backoffFactor);
@@ -122,7 +125,7 @@
     })();
     // Reconnect attempt limit: default from AP.Core.MAX_RECONNECT_ATTEMPTS, clamped [3, 50]. Exhausted -> single transition to ERROR (L15: timers cleared).
     const maxReconnectAttempts = clampInt(dataset.maxReconnectAttempts, 3, 50, AP.Core.MAX_RECONNECT_ATTEMPTS ?? 12);
-    const iceDisconnectedGraceMs = clampInt(dataset.iceDisconnectedGraceMs, 1000, 30000, 5000);
+    const iceDisconnectedGraceMs = clampInt(dataset.iceDisconnectedGraceMs, 1000, 30000, 3000);
     const connectSettleMs = clampInt(dataset.connectSettleMs, 500, 20000, 6000);
     const settleStartTimeoutMs = clampInt(dataset.settleStartTimeoutMs, 3000, 60000, 15000);
     const reconnectAttemptTimeoutMs = clampInt(dataset.reconnectAttemptTimeoutMs, 5000, 60000, 15000);
@@ -135,6 +138,9 @@
 
     // When true (default): reconnect only while tab is visible; on tab visible again, auto-retry if ERROR or resume RECONNECTING.
     const visibilityAwareReconnect = resolveFeatureFlag(dataset.visibilityAwareReconnect, true);
+    // sessionTimeoutMs: must match Janus janus.jcfg session_timeout. Used by visibility handler to
+    // detect dead sessions after long tab-hide. Default 30s matches our Janus config.
+    const sessionTimeoutMs = clampInt(dataset.sessionTimeoutMs, 10000, 120000, 30000);
     const preferStreamId = dataset.preferStreamId ? parseInt(dataset.preferStreamId, 10) : null;
     const streamName = dataset.streamName || 'RealSense Stream';
     const clientConfigPath = dataset.clientConfigPath || `/api/v1/${CAM_TYPE}/client-config`;
@@ -181,6 +187,10 @@
       settleStartTimeoutMs,
       reconnectAttemptTimeoutMs,
 
+      // FPS-based quality watchdog
+      minAcceptableFps,
+      fpsDropThresholdMs,
+
       // stats
       statsIntervalMs: 1000,
 
@@ -196,6 +206,7 @@
       errorAutoRetryBaseMs,
       errorAutoRetryMaxMs,
       visibilityAwareReconnect,
+      sessionTimeoutMs,
     };
   }
 

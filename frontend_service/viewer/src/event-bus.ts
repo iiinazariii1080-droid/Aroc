@@ -14,9 +14,11 @@
  */
 
 import type { ArmSnapshot, ArmIdentity, JointState, LiftState, MountDegrees } from '@/types/arm-state';
-import type { AgvPose, ResolvedPoses, TransformChainState } from '@/types/transforms';
-import type { PointCloud, DepthFrame, RgbFrame, VoxelEntry } from '@/types/depth';
+import type { AgvPose, ResolvedPoses } from '@/types/transforms';
+import type { PointCloud, DepthFrame, VoxelEntry, FrameDropReason, DepthCameraRuntimeParams } from '@/types/depth';
 import type { ArmConfigPayload } from '@/types/messages';
+import type { Mat4 } from '@/types/coordinates';
+import type { RobotStatusUpdate } from '@/types/robot-status';
 
 // ─── Event map ───────────────────────────────────
 
@@ -28,34 +30,67 @@ export interface EventMap {
   'arm:lift':       LiftState;
   'arm:mount':      MountDegrees;
   'arm:config':     ArmConfigPayload;
+  'robot:status':   RobotStatusUpdate;
+
+  // Raw data events (emitted by data layer before domain processing)
+  'raw:joints':     { angles: readonly number[]; timestamp: number };
+  'raw:lift':       { motorUnits: number; timestamp: number };
+  'raw:depthFrame': {
+    depthRaw: Uint16Array;
+    rgbRaw: Uint8Array | null;
+    width: number;
+    height: number;
+    timestamp: number;
+    timestampSource: 'source' | 'local';
+  };
 
   // AGV
   'agv:pose':       AgvPose;
 
   // Transforms
-  'fk:updated':     TransformChainState;
+  'fk:updated':     { rotations: readonly import('@/domain/arm-kinematics').JointRotation[]; fkMatrix: Mat4 };
   'transform:resolved': ResolvedPoses;
 
+  // Camera world matrix (Three.js scene graph, column-major 16 floats)
+  'camera:worldMatrix': { elements: number[] };
+
   // Depth camera
+  'depth:fetchNow': undefined;
   'depth:frame':    DepthFrame;
-  'depth:rgb':      RgbFrame;
   'depth:cloud':    PointCloud;
+  'depth:skew':     { skewMs: number; thresholdMs: number };
+  'depth:dropped':  { reason: FrameDropReason; detail?: string; skewMs?: number };
 
   // Voxel map
   'voxel:updated':  readonly VoxelEntry[];
-  'voxel:clear':    void;
+  'voxel:clear':    undefined;
 
   // UI commands
   'ui:toggleDepth':       boolean;
   'ui:toggleAxes':        boolean;
   'ui:toggleFrustum':     boolean;
   'ui:toggleRecording':   boolean;
-  'ui:requestSnapshot':   void;
+  'ui:clearFrame':        undefined;
+  'ui:pointSize':         number;
+  'ui:shot':              undefined;
+  'ui:shotColor':         undefined;
+  'debug:cameraTransform': {
+    tx: number;
+    ty: number;
+    tz: number;
+    rxDeg: number;
+    ryDeg: number;
+    rzDeg: number;
+  };
+  'depth:cameraParams': DepthCameraRuntimeParams;
+
+  // Voxel persistence
+  'voxel:load':           VoxelEntry[];
 
   // Viewer lifecycle
   'viewer:ready':   { version: number };
   'viewer:resize':  { width: number; height: number };
-  'viewer:dispose': void;
+  'viewer:dispose': undefined;
 
   // Error
   'error':          { source: string; message: string; detail?: unknown };
@@ -77,7 +112,7 @@ export interface EventBus {
   once<K extends EventKey>(event: K, handler: EventHandler<K>): Unsubscribe;
 
   /** Emit an event synchronously to all subscribers. */
-  emit<K extends EventKey>(event: K, payload: EventMap[K]): void;
+  emit<K extends EventKey>(event: K, ...args: EventMap[K] extends undefined ? [] : [EventMap[K]]): void;
 
   /** Remove ALL handlers for a specific event. */
   off<K extends EventKey>(event: K): void;
@@ -118,9 +153,10 @@ export function createEventBus(): EventBus {
       return () => { set.delete(wrapper); };
     },
 
-    emit<K extends EventKey>(event: K, payload: EventMap[K]): void {
+    emit<K extends EventKey>(event: K, ...args: EventMap[K] extends undefined ? [] : [EventMap[K]]): void {
       const set = listeners.get(event);
       if (!set) return;
+      const payload = args[0] as EventMap[K];
       // Snapshot the set to avoid mutation during iteration
       for (const handler of [...set]) {
         try {

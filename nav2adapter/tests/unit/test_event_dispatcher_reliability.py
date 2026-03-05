@@ -64,4 +64,5 @@ async def test_dispatcher_failure_counters() -> None:
         await dispatcher.stop()
 
         metrics.inc.assert_any_call("event_dispatcher.consume.failed")
-        metrics.inc.assert_any_call("event_dispatcher.runtime.failed")
+        # P1-2 fix: the dispatcher no longer dies on a single bad event,
+        # so runtime.failed is NOT expected. The loop continues.

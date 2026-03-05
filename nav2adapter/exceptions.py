@@ -1,29 +1,41 @@
 class RobotBaseError(Exception):
-    """Базовый класс для всех ошибок робота."""
-    pass
+    """Базовый класс для всех ошибок робота.
+
+    Supports an optional machine-readable ``error_code`` for structured error
+    handling (e.g. ``"DEVICE_BUSY"``, ``"TRANSPORT_MOVE_FAILED"``).
+    """
+
+    error_code: str = "ROBOT_ERROR"
+
+    def __init__(self, *args: object, error_code: str | None = None) -> None:
+        super().__init__(*args)
+        if error_code is not None:
+            self.error_code = error_code
 
 class RobotError(RobotBaseError):
-    pass
+    error_code = "ROBOT_ERROR"
 
 class DeviceBusyError(RobotBaseError):
-    pass
+    error_code = "DEVICE_BUSY"
+
 class DeviceConnectionError(RobotBaseError):
     """Ошибка подключения к устройству."""
-    pass
+    error_code = "DEVICE_CONNECTION_ERROR"
+
 class DeviceError(RobotBaseError):
-    pass
+    error_code = "DEVICE_ERROR"
 
 class Conflict(RobotBaseError):
-    pass
+    error_code = "CONFLICT"
 
 class InputError(RobotBaseError):
-    pass
+    error_code = "INPUT_ERROR"
 
 class DeviceReadyError(RobotBaseError):
-    pass
+    error_code = "DEVICE_NOT_READY"
 
 class TransportMoveError(RobotBaseError):
-    pass
+    error_code = "TRANSPORT_MOVE_FAILED"
 
 
 

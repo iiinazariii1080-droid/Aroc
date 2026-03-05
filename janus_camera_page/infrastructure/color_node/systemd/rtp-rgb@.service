@@ -1,0 +1,20 @@
+[Unit]
+Description=RTP push RGB (V4L2 %i) -> Janus 1305
+Requires=janus.service
+After=janus.service
+Conflicts=camera-webrtc-color.service
+StartLimitIntervalSec=30
+StartLimitBurst=20
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/robot/cam-rgb.env
+ExecStartPre=/usr/local/bin/cam-wait-capture.sh %i
+ExecStart=/usr/local/bin/rtp-rgb.sh /dev/%i
+Restart=always
+RestartSec=3s
+SuccessExitStatus=143 255 SIGTERM
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

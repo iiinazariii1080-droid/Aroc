@@ -1,7 +1,7 @@
 
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from db.trajectory import get_trajectory, save_trajectory, calibrate_distance, init_trajectory_table
+from db.trajectory import get_trajectory, save_trajectory, init_trajectory_table
 import math
 import asyncio
 import time
@@ -148,255 +148,651 @@ async def _preflight_make_transport_safe(params) -> None:
         logger.error("preflight: failed: %s", e)
         raise
 
+async def _measure_depth(config: dict) -> float:
+    """Measure depth from camera center in mm.
+
+    Returns raw distance in mm.
+    Raises RuntimeError when the camera is unavailable or reading is invalid.
+    """
+    resp = await depth_camera.depth(x_norm=50, y_norm=50)
+    raw_mm = resp['depth'] * 1000  # metres → mm
+    if raw_mm is None or raw_mm <= 0:
+        raise RuntimeError("Depth camera reading is invalid: %s" % raw_mm)
+    logger.info("Autotake depth: raw=%.1f mm", raw_mm)
+    return raw_mm
+
+
+async def _verify_vacuum(config: dict) -> tuple[bool, str]:
+    """Check gripper PDI: part_present / part_secured flags.
+
+    Returns (is_gripped: bool, feedback: str).
+    """
+    verify_cfg = config.get("gripperVerify", {}) if isinstance(config, dict) else {}
+    sample_count = max(1, int(verify_cfg.get("samples", 3)))
+    required_positive = max(1, min(sample_count, int(verify_cfg.get("required", 2))))
+    interval_ms = max(50, int(verify_cfg.get("intervalMs", 120)))
+    max_errors = max(1, int(verify_cfg.get("maxReadErrors", 3)))
+
+    positives = 0
+    pp_count = 0
+    last_feedback = "UNKNOWN"
+    read_errors = 0
+    valid_samples = 0
+
+    max_attempts = sample_count + max_errors
+    for idx in range(max_attempts):
+        if idx > 0:
+            await asyncio.sleep(interval_ms / 1000.0)
+        try:
+            gs = await manipulator.gripper_status()
+        except Exception as read_exc:
+            read_errors += 1
+            logger.warning("vacuum verify: read error %d/%d: %s", read_errors, max_errors, read_exc)
+            if read_errors > max_errors:
+                return False, "READ_ERROR"
+            continue
+
+        last_feedback = str(gs.get("feedback", "UNKNOWN"))
+        part_present = bool(gs.get("part_present", False))
+        part_secured = bool(gs.get("part_secured", False))
+        vacuum_kpa = gs.get("vacuum_level")
+
+        effective_secured = part_secured or (last_feedback == "PART_GRIPPED")
+        effective_present = part_present or (last_feedback in ("PART_GRIPPED", "VACUUM_NO_PART"))
+
+        valid_samples += 1
+        if effective_secured:
+            positives += 1
+        if effective_present:
+            pp_count += 1
+
+        logger.debug(
+            "vacuum verify sample %d: feedback=%s PP=%s PS=%s effPP=%s effPS=%s vac=%s",
+            valid_samples, last_feedback, part_present, part_secured,
+            effective_present, effective_secured, vacuum_kpa,
+        )
+        if valid_samples >= sample_count:
+            break
+
+    logger.info(
+        "vacuum verify: secured=%d/%d present=%d/%d required=%d feedback=%s errors=%d/%d",
+        positives, valid_samples, pp_count, valid_samples,
+        required_positive, last_feedback, read_errors, max_errors,
+    )
+
+    if positives >= required_positive:
+        return True, last_feedback
+    # Part present but not secured — weak grip, still accept
+    if pp_count >= required_positive:
+        logger.warning("vacuum verify: WEAK grip — part_present but not part_secured")
+        return True, "PART_PRESENT_NOT_SECURED"
+    return False, last_feedback
+
+
+async def _verify_vacuum_detailed(config: dict, override: dict | None = None) -> dict:
+    """Detailed vacuum verification with confidence score output."""
+    verify_cfg = config.get("gripperVerify", {}) if isinstance(config, dict) else {}
+    if override:
+        verify_cfg = {**verify_cfg, **override}
+
+    sample_count = max(1, int(verify_cfg.get("samples", 3)))
+    required_positive = max(1, min(sample_count, int(verify_cfg.get("required", 2))))
+    interval_ms = max(50, int(verify_cfg.get("intervalMs", 120)))
+    max_errors = max(1, int(verify_cfg.get("maxReadErrors", 3)))
+
+    positives = 0
+    pp_count = 0
+    last_feedback = "UNKNOWN"
+    read_errors = 0
+    valid_samples = 0
+    supported_samples = 0
+    max_vacuum = 0.0
+
+    max_attempts = sample_count + max_errors
+    for idx in range(max_attempts):
+        if idx > 0:
+            await asyncio.sleep(interval_ms / 1000.0)
+        try:
+            gs = await manipulator.gripper_status()
+        except Exception as read_exc:
+            read_errors += 1
+            logger.warning("vacuum verify: read error %d/%d: %s", read_errors, max_errors, read_exc)
+            if read_errors > max_errors:
+                return {
+                    "ok": False,
+                    "feedback": "READ_ERROR",
+                    "pcs": 0.0,
+                    "secured": 0,
+                    "present": 0,
+                    "valid_samples": valid_samples,
+                    "read_errors": read_errors,
+                    "required": required_positive,
+                }
+            continue
+
+        last_feedback, effective_present, effective_secured, vacuum_kpa = _effective_grip_flags(gs)
+        sensor_supported = bool(gs.get("sensor_supported", False))
+        if sensor_supported:
+            supported_samples += 1
+
+        valid_samples += 1
+        if effective_secured:
+            positives += 1
+        if effective_present:
+            pp_count += 1
+        if isinstance(vacuum_kpa, (int, float)):
+            max_vacuum = max(max_vacuum, abs(float(vacuum_kpa)))
+
+        if valid_samples >= sample_count:
+            break
+
+    secured_ratio = (positives / valid_samples) if valid_samples else 0.0
+    present_ratio = (pp_count / valid_samples) if valid_samples else 0.0
+    support_ratio = (supported_samples / valid_samples) if valid_samples else 0.0
+    vacuum_ratio = min(1.0, max_vacuum / 60.0)
+    pcs = min(1.0, max(0.0, 0.60 * secured_ratio + 0.25 * present_ratio + 0.10 * support_ratio + 0.05 * vacuum_ratio))
+
+    ok = positives >= required_positive or pp_count >= required_positive
+    detail_feedback = last_feedback
+    if not (positives >= required_positive) and pp_count >= required_positive:
+        detail_feedback = "PART_PRESENT_NOT_SECURED"
+
+    logger.info(
+        "vacuum verify+pcs: secured=%d/%d present=%d/%d required=%d feedback=%s pcs=%.2f vac_max=%.1f errors=%d/%d",
+        positives, valid_samples, pp_count, valid_samples,
+        required_positive, detail_feedback, pcs, max_vacuum, read_errors, max_errors,
+    )
+
+    return {
+        "ok": ok,
+        "feedback": detail_feedback,
+        "pcs": pcs,
+        "secured": positives,
+        "present": pp_count,
+        "valid_samples": valid_samples,
+        "read_errors": read_errors,
+        "required": required_positive,
+    }
+
+
+def _effective_grip_flags(gs: dict) -> tuple[str, bool, bool, object]:
+    """Normalize raw gripper status into effective grip flags."""
+    feedback = str(gs.get("feedback", "UNKNOWN"))
+    part_present = bool(gs.get("part_present", False))
+    part_secured = bool(gs.get("part_secured", False))
+    vacuum_kpa = gs.get("vacuum_level")
+    effective_secured = part_secured or (feedback == "PART_GRIPPED")
+    effective_present = part_present or (feedback in ("PART_GRIPPED", "VACUUM_NO_PART"))
+    return feedback, effective_present, effective_secured, vacuum_kpa
+
+
+async def _stage3_approach_until_detect(
+    config: dict,
+    remaining_travel: float,
+    velocity: int,
+    budget_mm: float | None = None,
+) -> tuple[float, bool, str, str]:
+    """Approach in micro-steps and stop as soon as grip signal is detected.
+
+    Returns: (moved_z_mm, detected, feedback, reason)
+    """
+    approach_cfg = config.get("gripperApproach", {}) if isinstance(config, dict) else {}
+    step_mm = max(0.5, float(approach_cfg.get("stepMm", 2.0)))
+    fine_step_mm = max(0.5, float(approach_cfg.get("fineStepMm", 1.0)))
+    detect_consecutive = max(1, int(approach_cfg.get("detectConsecutive", 2)))
+    sample_interval_ms = max(30, int(approach_cfg.get("sampleIntervalMs", 80)))
+    max_read_errors = max(1, int(approach_cfg.get("maxReadErrors", 3)))
+    max_stage3_travel = max(1.0, float(approach_cfg.get("maxStage3TravelMm", 20.0)))
+
+    hard_budget = min(float(remaining_travel), max_stage3_travel)
+    stage3_budget = hard_budget if budget_mm is None else max(0.0, min(hard_budget, float(budget_mm)))
+    slow_velocity = max(1, velocity // 2)
+    moved = 0.0
+    consecutive_detect = 0
+    read_errors = 0
+    last_feedback = "UNKNOWN"
+    detected = False
+
+    logger.info(
+        "Stage 3 (smart): budget=%.1f step=%.1f fine=%.1f detect=%d interval=%dms vel=%d",
+        stage3_budget, step_mm, fine_step_mm, detect_consecutive, sample_interval_ms, slow_velocity,
+    )
+
+    while moved < stage3_budget:
+        step = step_mm if consecutive_detect == 0 else fine_step_mm
+        step = min(step, stage3_budget - moved)
+        if step <= 0:
+            break
+
+        await manipulator.change_tool_position(XarmMoveWithToolParams(
+            x_offset_mm=0, y_offset_mm=0, z_offset_mm=step,
+            velocity_percent=slow_velocity, reset_faults=False,
+        ))
+        moved += step
+
+        await asyncio.sleep(sample_interval_ms / 1000.0)
+        try:
+            gs = await manipulator.gripper_status()
+        except Exception as read_exc:
+            read_errors += 1
+            logger.warning("Stage 3 read error %d/%d: %s", read_errors, max_read_errors, read_exc)
+            if read_errors > max_read_errors:
+                return moved, False, "READ_ERROR", "read_error_limit"
+            continue
+
+        feedback, effective_present, effective_secured, vacuum_kpa = _effective_grip_flags(gs)
+        last_feedback = feedback
+
+        if effective_secured or effective_present:
+            consecutive_detect += 1
+        else:
+            consecutive_detect = 0
+
+        logger.debug(
+            "Stage 3 sample: moved=%.1f/%.1f fb=%s effPP=%s effPS=%s consec=%d vac=%s",
+            moved, stage3_budget, feedback, effective_present, effective_secured,
+            consecutive_detect, vacuum_kpa,
+        )
+
+        if consecutive_detect >= detect_consecutive:
+            detected = True
+            logger.info(
+                "Stage 3 detection: moved=%.1f/%.1f feedback=%s (consecutive=%d)",
+                moved, stage3_budget, feedback, consecutive_detect,
+            )
+            break
+
+    reason = "detected" if detected else "stage3_budget_exhausted"
+    return moved, detected, last_feedback, reason
+
+
+async def _run_xy_retry_search(config: dict, velocity: int, total_x: float, total_y: float, total_z: float) -> tuple[bool, float, float, float, str]:
+    """Run bounded XY retry probes near contact plane.
+
+    Returns: (detected, add_x, add_y, add_z, feedback)
+    """
+    xy_cfg = config.get("xySearch", {}) if isinstance(config, dict) else {}
+    if not bool(xy_cfg.get("enabled", True)):
+        return False, 0.0, 0.0, 0.0, "DISABLED"
+
+    amp = max(0.5, float(xy_cfg.get("amplitudeMm", 2.0)))
+    max_probes = max(1, int(xy_cfg.get("maxProbes", 4)))
+    z_probe_mm = max(0.5, float(xy_cfg.get("zProbeMm", 1.5)))
+    probe_velocity = max(1, int(xy_cfg.get("velocityPercent", max(1, velocity // 3))))
+
+    pattern = [
+        (amp, 0.0),
+        (-2.0 * amp, 0.0),
+        (amp, amp),
+        (0.0, -2.0 * amp),
+        (0.0, amp),
+    ]
+    pattern = pattern[:max_probes]
+
+    add_x = 0.0
+    add_y = 0.0
+    add_z = 0.0
+    last_feedback = "UNKNOWN"
+
+    logger.info("Stage 3 XY-search: probes=%d amp=%.1f z_probe=%.1f vel=%d", len(pattern), amp, z_probe_mm, probe_velocity)
+
+    for idx, (dx, dy) in enumerate(pattern, start=1):
+        await manipulator.change_tool_position(XarmMoveWithToolParams(
+            x_offset_mm=dx, y_offset_mm=dy, z_offset_mm=0,
+            velocity_percent=probe_velocity, reset_faults=False,
+        ))
+        add_x += dx
+        add_y += dy
+
+        moved_z, detected, feedback, _ = await _stage3_approach_until_detect(
+            config=config,
+            remaining_travel=z_probe_mm,
+            velocity=probe_velocity,
+            budget_mm=z_probe_mm,
+        )
+        add_z += moved_z
+        last_feedback = feedback
+        logger.info(
+            "Stage 3 XY-search probe %d/%d: dx=%.1f dy=%.1f moved_z=%.1f detected=%s feedback=%s",
+            idx, len(pattern), dx, dy, moved_z, detected, feedback,
+        )
+        if detected:
+            return True, add_x, add_y, add_z, last_feedback
+
+    return False, add_x, add_y, add_z, last_feedback
+
+
+async def _lift_test_gate(config: dict, velocity: int) -> tuple[bool, float, dict]:
+    """Lift slightly and re-verify grip stability.
+
+    Returns: (ok, z_offset_applied, verify_details)
+    """
+    lift_cfg = config.get("liftTest", {}) if isinstance(config, dict) else {}
+    if not bool(lift_cfg.get("enabled", True)):
+        return True, 0.0, {"ok": True, "feedback": "LIFT_TEST_DISABLED", "pcs": 1.0}
+
+    lift_mm = max(0.0, float(lift_cfg.get("liftMm", 8.0)))
+    hold_ms = max(50, int(lift_cfg.get("holdMs", 220)))
+    lift_velocity = max(1, int(lift_cfg.get("velocityPercent", max(1, velocity // 2))))
+    verify_override = {
+        "samples": max(1, int(lift_cfg.get("samples", 2))),
+        "required": max(1, int(lift_cfg.get("required", 2))),
+        "intervalMs": max(50, int(lift_cfg.get("intervalMs", 100))),
+        "maxReadErrors": max(1, int(lift_cfg.get("maxReadErrors", 2))),
+    }
+
+    if lift_mm > 0:
+        await manipulator.change_tool_position(XarmMoveWithToolParams(
+            x_offset_mm=0, y_offset_mm=0, z_offset_mm=-lift_mm,
+            velocity_percent=lift_velocity, reset_faults=False,
+        ))
+        await asyncio.sleep(hold_ms / 1000.0)
+
+    details = await _verify_vacuum_detailed(config, override=verify_override)
+    return bool(details.get("ok", False)), (-lift_mm if lift_mm > 0 else 0.0), details
+
+
 @guarded_async_call(robot_lock)
 async def autotake(velocity: int) -> bool:
-    MAX_TOOL_OFFSET_MM = 300.0  # safety cap for any single tool-frame move
+    """3-stage autotake: approach → refine → contact.
+
+    Stage 1 (far):   distance > 150 mm → move Z only (no X/Y offsets), keep camera on target.
+    Stage 2 (mid):   150..20 mm → re-measure depth (glare protection), apply X/Y offsets from trajectory.
+    Stage 3 (close): last 20 mm → half speed, blind approach, then vacuum verification.
+    """
+    # ── Thresholds ──────────────────────────────────────────────────────
+    STAGE2_THRESHOLD_MM = 250.0   # switch from stage 1 → stage 2
+    STAGE3_THRESHOLD_MM = 20.0    # switch from stage 2 → stage 3
+    MAX_DISTANCE_MM = 1000.0
+    MIN_DISTANCE_MM = 30.0
 
     try:
-        # Ensure xarm motion is enabled before any movement
         await manipulator.enable_motion()
-
-        # Initialize database table if it doesn't exist
         init_trajectory_table()
-
-        # Try to get depth from camera, use default if unavailable
-        try:
-            # depth API expects [0..100]
-            forward_distance = await depth_camera.depth(x_norm=50, y_norm=50)
-            raw_distance = forward_distance['depth'] * 1000
-            if raw_distance is None:
-                raise RuntimeError("Depth camera reading is None")
-            distance = calibrate_distance(raw_distance)
-        except Exception as e:
-            logger.warning("Depth camera unavailable, using default distance: %s", e)
-            distance = 0
-            return False
-
         config = get_trajectory()
 
-        # Optional depth compensation from trajectory config (for camera/geometry bias tuning)
-        # Example:
-        # "depthCompensation": {"scale": 1.0, "bias": 0.0, "quad": 0.0}
-        depth_comp = config.get("depthCompensation", {}) if isinstance(config, dict) else {}
-        depth_scale = float(depth_comp.get("scale", 1.0))
-        depth_bias = float(depth_comp.get("bias", 0.0))
-        depth_quad = float(depth_comp.get("quad", 0.0))
-        compensated_distance = (distance * depth_scale) + depth_bias + (depth_quad * (distance ** 2))
-        logger.info(
-            "Autotake depth: raw=%.1f calibrated=%.1f compensated=%.1f (scale=%.4f bias=%.2f quad=%.6f)",
-            raw_distance,
-            distance,
-            compensated_distance,
-            depth_scale,
-            depth_bias,
-            depth_quad,
-        )
-        distance = compensated_distance
-        if distance > 1000.0:
-            raise RuntimeError("Calculated distance %.1f mm exceeds 1000 mm limit" % distance)
-        elif distance < 100.0:
-            raise RuntimeError("Calculated distance %.1f mm below 100 mm limit" % distance)
+        # ── Initial depth measurement ───────────────────────────────────
+        try:
+            distance = await _measure_depth(config)
+        except Exception as e:
+            logger.warning("Depth camera unavailable: %s", e)
+            return False
 
-        # Track whether the controller may need a fault reset before next move
-        needs_fault_reset = False
-        applied_base_move = None
+        if distance > MAX_DISTANCE_MM:
+            raise RuntimeError("Distance %.1f mm exceeds %d mm limit" % (distance, MAX_DISTANCE_MM))
+        if distance < MIN_DISTANCE_MM:
+            raise RuntimeError("Distance %.1f mm below %d mm limit" % (distance, MIN_DISTANCE_MM))
 
-        if config['prefix']['active']:
-            prefix_position = XarmMoveWithToolParams(x_offset_mm=config['prefix']['posX'],
-                                                    y_offset_mm=config['prefix']['posY'],
-                                                    z_offset_mm=config['prefix']['posZ'],
-                                                    velocity_percent=velocity,
-                                                    reset_faults=False)
-            await manipulator.change_tool_position(prefix_position)
+        # Trajectory offsets from DB
+        base_cfg = config.get('baseMove', {})
+        base_active = base_cfg.get('active', False)
+        offset_x = float(base_cfg.get('posX', 0))
+        offset_y = float(base_cfg.get('posY', 0))
+        offset_z = float(base_cfg.get('posZ', 0))  # additional Z shift (geometry compensation)
 
-        if config['gripper']['active']:
-            try:
-                await manipulator.gripper_take()
+        # Accumulate all applied moves for precise return
+        total_x = 0.0
+        total_y = 0.0
+        total_z = 0.0
+        gripper_on = False
 
-                # Robust grip verification to avoid false "grip success"
-                verify_cfg = config.get("gripperVerify", {}) if isinstance(config, dict) else {}
-                verify_enabled = bool(verify_cfg.get("enabled", True))
-                if verify_enabled:
-                    sample_count = max(1, int(verify_cfg.get("samples", 3)))
-                    required_positive = max(1, min(sample_count, int(verify_cfg.get("required", 2))))
-                    interval_ms = max(50, int(verify_cfg.get("intervalMs", 120)))
-                    max_errors = max(1, int(verify_cfg.get("maxReadErrors", 2)))
-                    max_recoveries = max(0, int(verify_cfg.get("maxAutoRecoveries", 1)))
-                    allow_unknown_when_sensor_unsupported = bool(
-                        verify_cfg.get("allowUnknownWhenSensorUnsupported", True)
-                    )
-                    max_attempts = sample_count + max_errors + max_recoveries
+        # ── Prefix move (unchanged) ────────────────────────────────────
+        if config.get('prefix', {}).get('active'):
+            pfx = config['prefix']
+            await manipulator.change_tool_position(XarmMoveWithToolParams(
+                x_offset_mm=pfx['posX'], y_offset_mm=pfx['posY'], z_offset_mm=pfx['posZ'],
+                velocity_percent=velocity, reset_faults=False,
+            ))
 
-                    positives = 0
-                    last_feedback = "UNKNOWN"
-                    read_errors = 0
-                    valid_samples = 0
-                    recoveries = 0
-                    unknown_samples = 0
-                    sensor_supported = True
-                    for index in range(max_attempts):
-                        if index > 0:
-                            await asyncio.sleep(interval_ms / 1000.0)
-                        try:
-                            gs = await manipulator.gripper_status()
-                        except Exception as read_exc:
-                            read_errors += 1
-                            msg = str(read_exc).lower()
-                            is_fault_like = ("faulted" in msg) or ("controllererror" in msg) or ("c19" in msg)
-                            if is_fault_like and recoveries < max_recoveries:
-                                recoveries += 1
-                                logger.warning(
-                                    "Autotake grip verify: fault-like read error -> auto recover %d/%d: %s",
-                                    recoveries,
-                                    max_recoveries,
-                                    read_exc,
-                                )
-                                try:
-                                    await manipulator.fault_reset()
-                                    await manipulator.enable_motion()
-                                except Exception as recover_exc:
-                                    logger.warning("Autotake grip verify: auto recover failed: %s", recover_exc)
-                                continue
-                            logger.warning(
-                                "Autotake grip verify: gripper_status read error %d/%d: %s",
-                                read_errors,
-                                max_errors,
-                                read_exc,
-                            )
-                            if read_errors > max_errors:
-                                raise RuntimeError(
-                                    f"Gripper status unstable during verify: {read_errors} read errors"
-                                ) from read_exc
-                            continue
-                        sensor_supported = bool(gs.get("sensor_supported", True))
-                        last_feedback = str(gs.get("feedback", "UNKNOWN"))
-                        if last_feedback == "UNKNOWN" and recoveries < max_recoveries:
-                            recoveries += 1
-                            logger.warning(
-                                "Autotake grip verify: feedback UNKNOWN -> auto recover %d/%d",
-                                recoveries,
-                                max_recoveries,
-                            )
-                            try:
-                                await manipulator.fault_reset()
-                                await manipulator.enable_motion()
-                            except Exception as recover_exc:
-                                logger.warning("Autotake grip verify: auto recover failed: %s", recover_exc)
-                            continue
-                        valid_samples += 1
-                        if last_feedback == "UNKNOWN":
-                            unknown_samples += 1
-                        if last_feedback == "PART_GRIPPED":
-                            positives += 1
-                        if valid_samples >= sample_count:
-                            break
-
-                    logger.info(
-                        "Autotake grip verify: positives=%d/%d required=%d last_feedback=%s read_errors=%d/%d",
-                        positives,
-                        valid_samples,
-                        required_positive,
-                        last_feedback,
-                        read_errors,
-                        max_errors,
-                    )
-                    if valid_samples < sample_count:
-                        raise RuntimeError(
-                            "Vacuum verify incomplete: only %d/%d valid samples"
-                            % (valid_samples, sample_count)
-                        )
-                    if positives < required_positive:
-                        if (
-                            allow_unknown_when_sensor_unsupported
-                            and not sensor_supported
-                            and valid_samples >= sample_count
-                            and unknown_samples == valid_samples
-                        ):
-                            logger.warning(
-                                "Autotake grip verify degraded accept: sensor unsupported, UNKNOWN samples=%d/%d",
-                                unknown_samples,
-                                valid_samples,
-                            )
-                        else:
-                            raise RuntimeError(
-                                "Vacuum grip not confirmed: PART_GRIPPED %d/%d (<%d), last=%s"
-                                % (positives, valid_samples, required_positive, last_feedback)
-                            )
-            except Exception as e:
-                logger.warning("Gripper take/verify failed: %s — will reset faults before next move", e)
-                needs_fault_reset = True
-                raise
-
-        if config['baseMove']['active']:
-            z_total = config['baseMove']['posZ'] + distance
-            x_off = config['baseMove']['posX']
-            y_off = config['baseMove']['posY']
+        if not base_active:
+            logger.info("Autotake: baseMove not active — skipping approach stages")
+        else:
+            # `distance` = calibrated camera depth (physical distance from camera to object)
+            # `offset_z` = geometry compensation (e.g. camera recessed behind suction cups)
+            # Total Z to travel = distance + offset_z
+            # Thresholds are in terms of CAMERA distance to object (physical), not travel distance
+            total_travel = distance + offset_z
             logger.info(
-                "Autotake baseMove: x=%.1f y=%.1f z=%.1f (posZ=%.1f + distance=%.1f)",
-                x_off, y_off, z_total, config['baseMove']['posZ'], distance,
+                "Autotake plan: cam_distance=%.1f offset_z=%.1f total_travel=%.1f offset_x=%.1f offset_y=%.1f",
+                distance, offset_z, total_travel, offset_x, offset_y,
             )
-            # Clamp each axis to prevent OUT_OF_WORKSPACE
-            x_off = max(-MAX_TOOL_OFFSET_MM, min(MAX_TOOL_OFFSET_MM, x_off))
-            y_off = max(-MAX_TOOL_OFFSET_MM, min(MAX_TOOL_OFFSET_MM, y_off))
-            z_total = max(-MAX_TOOL_OFFSET_MM, min(MAX_TOOL_OFFSET_MM, z_total))
-            # Adaptive fallback for workspace envelope: shrink move vector on OUT_OF_WORKSPACE
-            base_move_scales = (1.0, 0.85, 0.7, 0.55, 0.4, 0.25)
-            last_workspace_error = None
-            for scale in base_move_scales:
-                sx = x_off * scale
-                sy = y_off * scale
-                sz = z_total * scale
-                try:
-                    take_position = XarmMoveWithToolParams(x_offset_mm=sx,
-                                                            y_offset_mm=sy,
-                                                            z_offset_mm=sz,
-                                                            velocity_percent=velocity,
-                                                            reset_faults=needs_fault_reset)
-                    await manipulator.change_tool_position(take_position)
-                    applied_base_move = (sx, sy, sz)
-                    if scale < 1.0:
-                        logger.warning(
-                            "Autotake baseMove reduced by scale=%.2f to stay in workspace: x=%.1f y=%.1f z=%.1f",
-                            scale, sx, sy, sz,
-                        )
-                    break
-                except Exception as e:
-                    if "OUT_OF_WORKSPACE" in str(e):
-                        last_workspace_error = e
-                        continue
-                    raise
-            if applied_base_move is None:
-                if last_workspace_error is not None:
-                    raise last_workspace_error
-                raise RuntimeError("Autotake baseMove failed without accepted fallback")
-            needs_fault_reset = False
 
-        if config['postfix']['active']:
-            postfix_position = XarmMoveWithToolParams(x_offset_mm=config['postfix']['posX'],
-                                                    y_offset_mm=config['postfix']['posY'],
-                                                    z_offset_mm=config['postfix']['posZ'],
-                                                    velocity_percent=velocity,
-                                                    reset_faults=needs_fault_reset)
-            await manipulator.change_tool_position(postfix_position)
-            needs_fault_reset = False
+            # ── STAGE 1 (far): Z-only approach keeping camera aimed at object ─
+            # Stop when camera distance to object ≈ STAGE2_THRESHOLD
+            if distance > STAGE2_THRESHOLD_MM:
+                stage1_z = distance - STAGE2_THRESHOLD_MM
+                logger.info("Stage 1 (far): moving Z=%.1f mm (cam_distance %.1f → %.1f)",
+                            stage1_z, distance, STAGE2_THRESHOLD_MM)
+                await manipulator.change_tool_position(XarmMoveWithToolParams(
+                    x_offset_mm=0, y_offset_mm=0, z_offset_mm=stage1_z,
+                    velocity_percent=velocity, reset_faults=False,
+                ))
+                total_z += stage1_z
+                distance -= stage1_z  # update estimated camera distance
+                logger.info("Stage 1 done: est. cam_distance=%.1f mm", distance)
 
-        if config['return']['active']:
-            if applied_base_move is not None:
-                x_ret, y_ret, z_ret = -applied_base_move[0], -applied_base_move[1], -applied_base_move[2]
+            # ── STAGE 2 (mid): re-measure depth, apply X/Y offsets ────────
+            try:
+                new_depth = await _measure_depth(config)
+                if new_depth >= MIN_DISTANCE_MM:
+                    logger.info("Stage 2: fresh depth=%.1f (was %.1f)", new_depth, distance)
+                    distance = new_depth
+                else:
+                    logger.warning("Stage 2: bad reading %.1f (< %.1f) — keeping old estimate %.1f",
+                                   new_depth, MIN_DISTANCE_MM, distance)
+            except Exception as depth_exc:
+                logger.warning("Stage 2: re-measurement failed (%s), using old estimate %.1f", depth_exc, distance)
+
+            # Now calculate remaining travel = camera distance + offset_z
+            remaining_travel = distance + offset_z
+            logger.info("Stage 2: cam_distance=%.1f + offset_z=%.1f → remaining_travel=%.1f",
+                        distance, offset_z, remaining_travel)
+
+            # Move to within STAGE3_THRESHOLD of travel distance, applying X/Y offsets
+            if remaining_travel > STAGE3_THRESHOLD_MM:
+                stage2_z = remaining_travel - STAGE3_THRESHOLD_MM
+                # Optional early VAC ON in Stage 2 to build vacuum before final contact
+                if config.get('gripper', {}).get('active'):
+                    approach_cfg = config.get("gripperApproach", {}) if isinstance(config, dict) else {}
+                    enable_stage2 = bool(approach_cfg.get("enableAtStage2", True))
+                    if enable_stage2 and not gripper_on:
+                        try:
+                            await manipulator.gripper_take()
+                            gripper_on = True
+                            logger.info(
+                                "Gripper activated early in Stage 2 (VAC ON), remaining_travel=%.1f",
+                                remaining_travel,
+                            )
+                        except Exception as e:
+                            logger.warning("Stage 2 early gripper activation failed: %s", e)
+                logger.info(
+                    "Stage 2 (mid): moving x=%.1f y=%.1f z=%.1f (remaining_travel %.1f → %.1f)",
+                    offset_x, offset_y, stage2_z, remaining_travel, STAGE3_THRESHOLD_MM,
+                )
+                await manipulator.change_tool_position(XarmMoveWithToolParams(
+                    x_offset_mm=offset_x, y_offset_mm=offset_y, z_offset_mm=stage2_z,
+                    velocity_percent=velocity, reset_faults=False,
+                ))
+                total_x += offset_x
+                total_y += offset_y
+                total_z += stage2_z
+                remaining_travel = STAGE3_THRESHOLD_MM
             else:
-                z_total_base = config['baseMove']['posZ'] + distance
-                z_total_base = max(-MAX_TOOL_OFFSET_MM, min(MAX_TOOL_OFFSET_MM, z_total_base))
-                x_ret = max(-MAX_TOOL_OFFSET_MM, min(MAX_TOOL_OFFSET_MM, -(config['baseMove']['posX'])))
-                y_ret = max(-MAX_TOOL_OFFSET_MM, min(MAX_TOOL_OFFSET_MM, -(config['baseMove']['posY'])))
-                z_ret = -z_total_base
+                # Already close enough — just apply X/Y offsets
+                logger.info("Stage 2: already within %.1f mm — applying X/Y offsets only", STAGE3_THRESHOLD_MM)
+                if offset_x != 0 or offset_y != 0:
+                    await manipulator.change_tool_position(XarmMoveWithToolParams(
+                        x_offset_mm=offset_x, y_offset_mm=offset_y, z_offset_mm=0,
+                        velocity_percent=velocity, reset_faults=False,
+                    ))
+                    total_x += offset_x
+                    total_y += offset_y
 
-            take_position = XarmMoveWithToolParams(x_offset_mm=x_ret,
-                                                    y_offset_mm=y_ret,
-                                                    z_offset_mm=z_ret,
-                                                    velocity_percent=velocity,
-                                                    reset_faults=needs_fault_reset)
-            await manipulator.change_tool_position(take_position)
-            needs_fault_reset = False
+            logger.info("Stage 2 done: remaining_travel=%.1f mm", remaining_travel)
+
+            # ── Gripper ON (between stage 2 and 3) ────────────────────────
+            # Keep backward-compat path if early Stage 2 activation is disabled.
+            if config.get('gripper', {}).get('active') and not gripper_on:
+                try:
+                    await manipulator.gripper_take()
+                    gripper_on = True
+                    logger.info("Gripper activated (VAC ON) at %.1f mm travel left", remaining_travel)
+                except Exception as e:
+                    logger.warning("Gripper activation failed: %s — continuing approach", e)
+
+            # ── STAGE 3 (close): segmented approach with early stop ───────
+            approach_cfg = config.get("gripperApproach", {}) if isinstance(config, dict) else {}
+            max_stage3 = max(1.0, float(approach_cfg.get("maxStage3TravelMm", 20.0)))
+            primary_ratio = min(0.95, max(0.40, float(approach_cfg.get("primaryBudgetRatio", 0.70))))
+            primary_budget = max_stage3 * primary_ratio
+
+            stage3_moved, detected, stage3_feedback, stop_reason = await _stage3_approach_until_detect(
+                config=config,
+                remaining_travel=remaining_travel,
+                velocity=velocity,
+                budget_mm=primary_budget,
+            )
+            total_z += stage3_moved
+            logger.info(
+                "Stage 3 done: moved_z=%.1f detected=%s reason=%s feedback=%s total: x=%.1f y=%.1f z=%.1f",
+                stage3_moved, detected, stop_reason, stage3_feedback, total_x, total_y, total_z,
+            )
+
+            if not detected:
+                retry_detected, add_x, add_y, add_z, retry_feedback = await _run_xy_retry_search(
+                    config=config,
+                    velocity=velocity,
+                    total_x=total_x,
+                    total_y=total_y,
+                    total_z=total_z,
+                )
+                total_x += add_x
+                total_y += add_y
+                total_z += add_z
+                detected = retry_detected
+                if retry_detected:
+                    stage3_feedback = retry_feedback
+                    logger.info(
+                        "Stage 3 XY-search detected grip: add_x=%.1f add_y=%.1f add_z=%.1f feedback=%s",
+                        add_x, add_y, add_z, stage3_feedback,
+                    )
+
+            if detected:
+                settle_mm = max(0.0, float(approach_cfg.get("microSettleMm", 1.5)))
+                residual_budget = max(0.0, max_stage3 - stage3_moved)
+                micro_settle = min(settle_mm, residual_budget)
+                if micro_settle > 0:
+                    slow_velocity = max(1, velocity // 2)
+                    await manipulator.change_tool_position(XarmMoveWithToolParams(
+                        x_offset_mm=0, y_offset_mm=0, z_offset_mm=micro_settle,
+                        velocity_percent=slow_velocity, reset_faults=False,
+                    ))
+                    total_z += micro_settle
+                    logger.info("Stage 3 micro-settle: z=%.1f (after detection)", micro_settle)
+
+            # ── Vacuum verification after contact ─────────────────────────
+            if config.get('gripper', {}).get('active'):
+                await asyncio.sleep(0.2)  # let vacuum settle
+                verify = await _verify_vacuum_detailed(config)
+                grip_ok = bool(verify.get("ok", False))
+                feedback = str(verify.get("feedback", "UNKNOWN"))
+                pcs = float(verify.get("pcs", 0.0))
+
+                if not grip_ok:
+                    second_cfg = config.get("gripperVerifySecondChance", {}) if isinstance(config, dict) else {}
+                    if bool(second_cfg.get("enabled", True)) and detected:
+                        delay_ms = max(50, int(second_cfg.get("delayMs", 180)))
+                        min_pcs = max(0.0, min(1.0, float(second_cfg.get("minPcs", 0.30))))
+                        logger.warning(
+                            "Vacuum first check failed after detection (feedback=%s pcs=%.2f) — second chance in %dms",
+                            feedback, pcs, delay_ms,
+                        )
+                        await asyncio.sleep(delay_ms / 1000.0)
+                        recheck = await _verify_vacuum_detailed(
+                            config,
+                            override={
+                                "samples": max(1, int(second_cfg.get("samples", 2))),
+                                "required": max(1, int(second_cfg.get("required", 1))),
+                                "intervalMs": max(50, int(second_cfg.get("intervalMs", 90))),
+                                "maxReadErrors": max(1, int(second_cfg.get("maxReadErrors", 2))),
+                            },
+                        )
+                        re_ok = bool(recheck.get("ok", False))
+                        re_feedback = str(recheck.get("feedback", "UNKNOWN"))
+                        re_pcs = float(recheck.get("pcs", 0.0))
+                        if re_ok or re_pcs >= min_pcs:
+                            grip_ok = True
+                            feedback = re_feedback
+                            pcs = re_pcs
+                            logger.info(
+                                "Vacuum second chance accepted (feedback=%s pcs=%.2f)",
+                                feedback, pcs,
+                            )
+
+                if not grip_ok:
+                    logger.error(
+                        "Autotake vacuum check FAILED (feedback=%s pcs=%.2f) — reversing and aborting", feedback, pcs,
+                    )
+                    # Release vacuum
+                    try:
+                        await manipulator.gripper_drop()
+                    except Exception:
+                        pass
+                    # Reverse all accumulated moves
+                    try:
+                        await manipulator.change_tool_position(XarmMoveWithToolParams(
+                            x_offset_mm=-total_x, y_offset_mm=-total_y, z_offset_mm=-total_z,
+                            velocity_percent=velocity, reset_faults=True,
+                        ))
+                    except Exception as rev_exc:
+                        logger.warning("Autotake reverse after failed vacuum: %s", rev_exc)
+                    raise RuntimeError(
+                        "Vacuum grip not confirmed after contact (feedback=%s) — reversed" % feedback
+                    )
+                logger.info("Vacuum check OK (feedback=%s pcs=%.2f) — grip confirmed", feedback, pcs)
+
+                # ── Lift-test gate (post-grip stability check) ─────────────────
+                lift_ok, lift_z, lift_details = await _lift_test_gate(config, velocity)
+                total_z += lift_z
+                if not lift_ok:
+                    logger.error(
+                        "Lift-test FAILED (feedback=%s pcs=%.2f) — reversing and aborting",
+                        lift_details.get("feedback"), float(lift_details.get("pcs", 0.0)),
+                    )
+                    try:
+                        await manipulator.gripper_drop()
+                    except Exception:
+                        pass
+                    try:
+                        await manipulator.change_tool_position(XarmMoveWithToolParams(
+                            x_offset_mm=-total_x, y_offset_mm=-total_y, z_offset_mm=-total_z,
+                            velocity_percent=velocity, reset_faults=True,
+                        ))
+                    except Exception as rev_exc:
+                        logger.warning("Autotake reverse after failed lift-test: %s", rev_exc)
+                    raise RuntimeError(
+                        "Lift-test failed after grip confirm (feedback=%s)" % lift_details.get("feedback")
+                    )
+                logger.info(
+                    "Lift-test OK (feedback=%s pcs=%.2f)",
+                    lift_details.get("feedback"), float(lift_details.get("pcs", 0.0)),
+                )
+
+        # ── Postfix (unchanged) ─────────────────────────────────────────
+        if config.get('postfix', {}).get('active'):
+            pfx = config['postfix']
+            await manipulator.change_tool_position(XarmMoveWithToolParams(
+                x_offset_mm=pfx['posX'], y_offset_mm=pfx['posY'], z_offset_mm=pfx['posZ'],
+                velocity_percent=velocity, reset_faults=False,
+            ))
+
+        # ── Return move ─────────────────────────────────────────────────
+        if config.get('return', {}).get('active') and (total_x or total_y or total_z):
+            logger.info("Return: reversing x=%.1f y=%.1f z=%.1f", -total_x, -total_y, -total_z)
+            await manipulator.change_tool_position(XarmMoveWithToolParams(
+                x_offset_mm=-total_x, y_offset_mm=-total_y, z_offset_mm=-total_z,
+                velocity_percent=velocity, reset_faults=False,
+            ))
 
         logger.info("Autotake completed successfully")
         return True

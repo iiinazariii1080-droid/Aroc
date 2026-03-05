@@ -3,6 +3,7 @@
  */
 
 import type { RosPose, StaticTransform, Mat4 } from './coordinates';
+import type { MountDegrees } from './arm-state';
 
 /**
  * Complete transform chain state.
@@ -15,7 +16,9 @@ import type { RosPose, StaticTransform, Mat4 } from './coordinates';
 export interface TransformChainState {
   /** AGV pose in world (map) frame. Dynamic — from navigation. */
   readonly worldToAgv: RosPose;
-  /** Arm base offset on AGV chassis. Static — from mounting. */
+  /** Physical mount orientation (tilt→ry, rotation→rx). Dynamic — from robot status. */
+  readonly mountOrientation: MountDegrees;
+  /** Arm base offset on AGV chassis. Static — from mounting CAD. */
   readonly agvToArmBase: StaticTransform;
   /** Lift displacement from arm base. Dynamic — from motor units. */
   readonly liftDisplacement: RosPose;

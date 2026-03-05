@@ -2,8 +2,9 @@
  * arm-kinematics.test.ts — Unit tests for FK computation.
  */
 import { describe, it, expect } from 'vitest';
-import { computeFK, computeFKForVariant, computeGroupSetup, getAxisCount } from '../domain/arm-kinematics';
+import { computeFK, computeFKForVariant, computeFKMatrix, computeGroupSetup, getAxisCount } from '../domain/arm-kinematics';
 import { ARM_SPECS } from '../config/arm-specs';
+import { mat4Identity, mat4GetTranslation, mat4ThreeToRos, mat4FromPose, mat4Multiply } from '../domain/coord-utils';
 
 const D = Math.PI / 180;
 const EPSILON = 1e-10;
@@ -131,4 +132,93 @@ describe('getAxisCount', () => {
   it('5-5 → 5', () => expect(getAxisCount('5-5')).toBe(5));
   it('6-12 → 6', () => expect(getAxisCount('6-12')).toBe(6));
   it('7-13 → 7', () => expect(getAxisCount('7-13')).toBe(7));
+});
+
+// ─── computeFKMatrix tests ────────────────────────
+
+describe('computeFKMatrix', () => {
+  const EPS = 1e-6;
+
+  it('returns a 16-element Mat4', () => {
+    const spec = ARM_SPECS['6-6'];
+    const fk = computeFKMatrix([0, 0, 0, 0, 0, 0], spec);
+    expect(fk.length).toBe(16);
+  });
+
+  it('all-zero joints → non-identity matrix (includes link offsets + J1 -180° offset)', () => {
+    const spec = ARM_SPECS['6-6'];
+    const fk = computeFKMatrix([0, 0, 0, 0, 0, 0], spec);
+    const I = mat4Identity();
+    // FK at zero joints should NOT be identity (link offsets + J1 -180°)
+    let differ = false;
+    for (let i = 0; i < 16; i++) {
+      if (Math.abs(fk[i] - I[i]) > EPS) differ = true;
+    }
+    expect(differ).toBe(true);
+  });
+
+  it('result is in ROS convention (COB sandwich applied)', () => {
+    // Verify by manually computing FK in Three.js space and converting
+    const spec = ARM_SPECS['6-6'];
+    const joints = [0, 0, 0, 0, 0, 0];
+    const fk = computeFKMatrix(joints, spec);
+
+    // Manual: chain all groups in Three.js space
+    let M = mat4Identity();
+    for (let i = 0; i < spec.groupsPosition.length; i++) {
+      const [px, py, pz] = spec.groupsPosition[i];
+      M = mat4Multiply(M, mat4FromPose(px, py, pz, 0, 0, 0));
+      const jIdx = i - 1;
+      if (jIdx >= 0 && jIdx < spec.jointAxes.length) {
+        const rawDeg = joints[jIdx] || 0;
+        const offsetDeg = spec.jointOffsetsDeg[jIdx] || 0;
+        const sign = spec.jointSigns[jIdx] || 1;
+        const angle = ((rawDeg + offsetDeg) * sign) * Math.PI / 180;
+        const axis = spec.jointAxes[jIdx].toLowerCase();
+        const R = axis === 'x'
+          ? mat4FromPose(0, 0, 0, angle, 0, 0)
+          : mat4FromPose(0, 0, 0, 0, angle, 0);
+        M = mat4Multiply(M, R);
+      }
+    }
+    const expected = mat4ThreeToRos(M);
+
+    for (let i = 0; i < 16; i++) {
+      expect(fk[i]).toBeCloseTo(expected[i], 8);
+    }
+  });
+
+  it('6-6 at zero joints: translation is sum of all group offsets (rotated)', () => {
+    const spec = ARM_SPECS['6-6'];
+    const fk = computeFKMatrix([0, 0, 0, 0, 0, 0], spec);
+    const pos = mat4GetTranslation(fk);
+    // The FK translation should be non-zero (link offsets chain up)
+    const dist = Math.sqrt(pos.x ** 2 + pos.y ** 2 + pos.z ** 2);
+    expect(dist).toBeGreaterThan(0);
+  });
+
+  it('different joint angles produce different matrices', () => {
+    const spec = ARM_SPECS['6-6'];
+    const fk1 = computeFKMatrix([0, 0, 0, 0, 0, 0], spec);
+    const fk2 = computeFKMatrix([30, 45, -60, 20, -15, 10], spec);
+    let differ = false;
+    for (let i = 0; i < 16; i++) {
+      if (Math.abs(fk1[i] - fk2[i]) > EPS) differ = true;
+    }
+    expect(differ).toBe(true);
+  });
+
+  it('works for 5-joint arm', () => {
+    const spec = ARM_SPECS['5-5'];
+    const fk = computeFKMatrix([0, 0, 0, 0, 0], spec);
+    expect(fk.length).toBe(16);
+    expect(mat4GetTranslation(fk)).toBeDefined();
+  });
+
+  it('works for 7-joint arm', () => {
+    const spec = ARM_SPECS['7-7'];
+    const fk = computeFKMatrix([0, 0, 0, 0, 0, 0, 0], spec);
+    expect(fk.length).toBe(16);
+    expect(mat4GetTranslation(fk)).toBeDefined();
+  });
 });

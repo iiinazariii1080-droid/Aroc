@@ -88,7 +88,7 @@ class RobotMain(object):
         self._last_alive = time.time()
         self._handle_joystick_stream_in_active = threading.Lock()
         try:
-            self.gripper = GripperController(robot, baudrate=115200, timeout=10)
+            self.gripper = GripperController(robot, baudrate=115200, timeout=100)
         except:
             print("Gripper is not available")
 

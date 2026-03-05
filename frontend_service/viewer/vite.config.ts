@@ -3,7 +3,7 @@ import { resolve } from 'path';
 
 export default defineConfig({
   root: '.',
-  base: '/arm3d_viewer/',
+  base: '/arm3d_v2/',
 
   resolve: {
     alias: {
@@ -21,9 +21,22 @@ export default defineConfig({
     outDir: 'dist',
     sourcemap: true,
     assetsDir: 'assets',
+    target: 'es2020',
+    minify: 'esbuild',
     rollupOptions: {
       input: resolve(__dirname, 'index.html'),
+      output: {
+        manualChunks: {
+          'three-core': ['three'],
+        },
+        // Deterministic chunk filenames for caching
+        chunkFileNames: 'assets/[name]-[hash].js',
+        entryFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash].[ext]',
+      },
     },
+    // Warn on large chunks (Pi has limited bandwidth)
+    chunkSizeWarningLimit: 600,
   },
 
   server: {

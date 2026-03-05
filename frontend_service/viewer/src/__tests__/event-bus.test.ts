@@ -53,7 +53,7 @@ describe('EventBus', () => {
     bus.on('voxel:clear', a);
     bus.on('voxel:clear', b);
     bus.off('voxel:clear');
-    bus.emit('voxel:clear', undefined as unknown as void);
+    bus.emit('voxel:clear');
     expect(a).not.toHaveBeenCalled();
     expect(b).not.toHaveBeenCalled();
   });
@@ -66,7 +66,12 @@ describe('EventBus', () => {
     bus.on('depth:cloud', b);
     bus.dispose();
     bus.emit('viewer:ready', { version: 1 });
-    bus.emit('depth:cloud', { positions: new Float32Array(0), colors: new Float32Array(0), count: 0 });
+    bus.emit('depth:cloud', {
+      positions: new Float32Array(0),
+      colors: new Float32Array(0),
+      count: 0,
+      timestampMs: Date.now(),
+    });
     expect(a).not.toHaveBeenCalled();
     expect(b).not.toHaveBeenCalled();
   });

@@ -3,6 +3,7 @@
 """
 import asyncio
 import logging
+import math
 import time
 import aiohttp
 from typing import Optional, Dict, Any, List
@@ -48,13 +49,13 @@ def normalize_symovo_status(raw):
         theta_rad = pose.get("theta")
         theta_deg = None
         if theta_rad is not None and isinstance(theta_rad, (int, float)):
-            theta_deg = theta_rad * 180.0 / 3.141592653589793  # pi
+            theta_deg = math.degrees(theta_rad)
         
         # Конвертируем угловую скорость из рад/с в град/с
         omega_rad_s = velocity.get("theta")
         omega_deg_s = None
         if omega_rad_s is not None and isinstance(omega_rad_s, (int, float)):
-            omega_deg_s = omega_rad_s * 180.0 / 3.141592653589793  # pi
+            omega_deg_s = math.degrees(omega_rad_s)
         
         normalized = {
             "online": True,
@@ -87,7 +88,8 @@ def normalize_symovo_status(raw):
         }
         return SymovoStatusResponse(**normalized)
     except Exception as e:
-        return ErrorStatus(error={"type": "InvalidSymovoStatus", "msg": str(e), "raw": raw})
+        _LOGGER.warning("Failed to normalize Symovo status: %s (raw keys: %s)", e, list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__)
+        return ErrorStatus(error={"type": "InvalidSymovoStatus", "msg": "Failed to parse controller status"})
 
 
 class SymovoAgvClient(BaseHttpClient):
@@ -104,8 +106,8 @@ class SymovoAgvClient(BaseHttpClient):
     ):
         # Используем настройки из конфига по умолчанию
         base_url = base_url or settings.symovo_base_url
-        robot_number = robot_number or settings.symovo_robot_number
-        timeout_seconds = timeout_seconds or settings.symovo_timeout_seconds
+        robot_number = robot_number if robot_number is not None else settings.symovo_robot_number
+        timeout_seconds = timeout_seconds if timeout_seconds is not None else settings.symovo_timeout_seconds
         allow_invalid_certs = allow_invalid_certs if allow_invalid_certs is not None else settings.symovo_allow_invalid_certs
         
         super().__init__(
@@ -115,8 +117,8 @@ class SymovoAgvClient(BaseHttpClient):
         )
         
         self.robot_number = robot_number
-        self._operation_timeout_seconds = operation_timeout_seconds or settings.symovo_operation_timeout_seconds
-        self._motion_timeout_seconds = motion_timeout_seconds or settings.symovo_motion_timeout_seconds
+        self._operation_timeout_seconds = operation_timeout_seconds if operation_timeout_seconds is not None else settings.symovo_operation_timeout_seconds
+        self._motion_timeout_seconds = motion_timeout_seconds if motion_timeout_seconds is not None else settings.symovo_motion_timeout_seconds
         self._infinite_timeout = aiohttp.ClientTimeout(total=None)
 
     # Удаляем старые методы управления сессией - теперь используем BaseHttpClient
@@ -439,12 +441,27 @@ class SymovoAgvClient(BaseHttpClient):
             op_timeout=self._operation_timeout_seconds
         )
 
-    @guarded_async_call(symovo_lock, timeout_s=15.0)  # Increased timeout - may call transport_create internally
-    @cache_invalidate("symovo_pose")  # Инвалидируем кеш позиции
     async def transport_move_to_pose(self, *, x_m: float, y_m: float, theta_rad: float = 0.0, map_id: Optional[Any] = None, max_speed_m_s: Optional[float] = None, wait: bool = True) -> Dict[str, Any]:
-        """Создать транспортную задачу для перемещения в позицию."""
+        """Create a transport task to move the robot to the specified pose.
+
+        Phase 1 (charger disable) runs WITHOUT holding symovo_lock so safety
+        operations (e-stop, pause, cancel) are never blocked.
+        Phase 2 (transport create) acquires the lock.
+        Polling for completion (wait=True) happens outside the lock.
+        """
         from services import charger_workflow
+        # Phase 1: charger disable — NO lock held
         await charger_workflow.disable_all_before_move(self)
+        # Phase 2: transport create — guarded
+        return await self._transport_move_to_pose_guarded(
+            x_m=x_m, y_m=y_m, theta_rad=theta_rad,
+            map_id=map_id, max_speed_m_s=max_speed_m_s, wait=wait,
+        )
+
+    @guarded_async_call(symovo_lock, timeout_s=15.0)
+    @cache_invalidate("symovo_pose")
+    async def _transport_move_to_pose_guarded(self, *, x_m: float, y_m: float, theta_rad: float = 0.0, map_id: Optional[Any] = None, max_speed_m_s: Optional[float] = None, wait: bool = True) -> Dict[str, Any]:
+        """Guarded inner method — creates transport under symovo_lock."""
         
         pose: Dict[str, Any] = {
             "x": x_m,
@@ -494,10 +511,20 @@ class SymovoAgvClient(BaseHttpClient):
         transport_id = result.get("id") if isinstance(result, dict) else None
         if transport_id is None:
             return result
+        # Return only the transport_id; the caller will poll outside the lock.
+        # Store it so _poll_transport_completion can use it.
+        result["_wait_transport_id"] = transport_id
+        return result
+
+    async def _poll_transport_completion(self, transport_id: Any) -> Dict[str, Any]:
+        """Poll for transport completion WITHOUT holding symovo_lock.
+
+        Called by the route/facade layer after ``transport_move_to_pose`` returns.
+        """
         return await self.get(
-            f"/transport/{transport_id}", 
-            timeout=self._infinite_timeout, 
-            op_timeout=self._motion_timeout_seconds or self._operation_timeout_seconds
+            f"/transport/{transport_id}",
+            timeout=self._infinite_timeout,
+            op_timeout=self._motion_timeout_seconds if self._motion_timeout_seconds is not None else self._operation_timeout_seconds,
         )
 
     @safe_call
@@ -678,31 +705,28 @@ class SymovoAgvClient(BaseHttpClient):
     async def set_charging_station_enabled_by_name(self, name: str, enabled: bool = True) -> Optional[int]:
         # Enable/disable a charging station by its name (case-insensitive).
         # Returns station id if found and request is sent.
-        import logging
-        _logger = logging.getLogger(__name__)
-        
         stations = await self.get_charging_stations()
         target = name.strip().lower()
         
-        _logger.debug(
+        _LOGGER.debug(
             "Searching for charging station by name: '%s' (case-insensitive). Found %d charging station(s) total.",
             name,
             len(stations),
         )
         
         if not stations:
-            _logger.warning("No charging stations found on controller. Check controller connectivity and station configuration.")
+            _LOGGER.warning("No charging stations found on controller. Check controller connectivity and station configuration.")
             return None
         
         # Log all available station names for debugging
         available_names = [str(st.get("name", "")).strip() for st in stations if st.get("name")]
-        _logger.debug("Available charging station names: %s", available_names)
+        _LOGGER.debug("Available charging station names: %s", available_names)
         
         for st in stations:
             st_name = str(st.get("name", "")).strip().lower()
             if st_name == target:
                 station_id = int(st["id"])
-                _logger.info(
+                _LOGGER.info(
                     "Found charging station: name='%s' id=%d. Setting enabled=%s",
                     st.get("name"),
                     station_id,
@@ -711,7 +735,7 @@ class SymovoAgvClient(BaseHttpClient):
                 await self.set_charging_station_enabled(station_id, enabled)
                 return station_id
         
-        _logger.warning(
+        _LOGGER.warning(
             "Charging station not found by name '%s'. Available names: %s. "
             "Check CHARGER_STATION_NAME setting matches station name on controller.",
             name,
@@ -720,10 +744,21 @@ class SymovoAgvClient(BaseHttpClient):
         return None
 
     async def wait_until_charging_stations_inactive(self, timeout: float = 5.0, interval: float = 0.5) -> bool:
-        """Ждём, пока все зарядные станции не станут INACTIVE."""
+        """Ждём, пока все зарядные станции не станут INACTIVE.
+
+        Bypasses the @cached get_charging_stations() to see real-time state.
+        """
         start = time.time()
         while time.time() - start < timeout:
-            stations = await self.get_charging_stations()
+            # Fetch stations via raw GET (bypass both @cached get_stations and get_charging_stations)
+            result = await self.get("/station")
+            if isinstance(result, dict) and "result" in result and isinstance(result["result"], list):
+                all_stations = result["result"]
+            elif isinstance(result, list):
+                all_stations = result
+            else:
+                all_stations = [result] if isinstance(result, dict) else []
+            stations = [s for s in all_stations if isinstance(s, dict) and s.get("_type_id") == 4]
             if all(st.get("state") == "INACTIVE" for st in stations):
                 return True
             await asyncio.sleep(interval)
@@ -733,17 +768,14 @@ class SymovoAgvClient(BaseHttpClient):
     @cache_invalidate("symovo_transport")  # Инвалидируем кеш транспортов
     async def clear_all_transports(self) -> List[Dict[str, Any]]:
         """Удалить все транспортные задачи (guarded, serialized)."""
-        import logging
-        _logger = logging.getLogger(__name__)
-        
         # Use shorter timeout per request (5 seconds) to avoid hanging on individual requests
         request_timeout = 5.0
         
-        _logger.info("Fetching transport list...")
+        _LOGGER.info("Fetching transport list...")
         try:
             result = await self.get("/transport", op_timeout=request_timeout)
         except Exception as e:
-            _logger.warning(f"Failed to fetch transport list: {e}")
+            _LOGGER.warning("Failed to fetch transport list: %s", e)
             return []
 
         # Нормализуем список
@@ -753,39 +785,48 @@ class SymovoAgvClient(BaseHttpClient):
         elif isinstance(result, list):
             transports = result
         else:
-            _logger.info("No transports found or invalid response format")
+            _LOGGER.info("No transports found or invalid response format")
             return []
 
         transport_count = len(transports)
-        _logger.info(f"Found {transport_count} transport(s) to delete")
+        _LOGGER.info("Found %d transport(s) to delete", transport_count)
         
         if transport_count == 0:
             return []
 
         deleted = []
-        for idx, t in enumerate(transports, 1):
-            tid = t.get("id")
-            if tid is not None:
+        # Delete transports with bounded concurrency to avoid overwhelming the controller
+        _sem = asyncio.Semaphore(5)
+        async def _delete_one(tid: int, idx: int) -> Optional[Dict[str, Any]]:
+            async with _sem:
                 try:
                     if transport_count > 5 or idx % 5 == 0 or idx == transport_count:
-                        _logger.info(f"Deleting transport {tid} ({idx}/{transport_count})...")
-                    resp = await self.delete(f"/transport/{tid}", op_timeout=request_timeout)
-                    deleted.append({"id": tid, "status": resp})
+                        _LOGGER.info("Deleting transport %s (%d/%d)...", tid, idx, transport_count)
+                    resp = await self._make_request("DELETE", f"/transport/{tid}", op_timeout=request_timeout, max_retries=0)
+                    return {"id": tid, "status": resp}
                 except Exception as e:
-                    _logger.warning(f"Failed to delete transport {tid}: {e}")
-                    # Continue with other transports even if one fails
+                    _LOGGER.warning("Failed to delete transport %s: %s", tid, e)
+                    return None
+
+        results = await asyncio.gather(
+            *[_delete_one(t.get("id"), idx) for idx, t in enumerate(transports, 1) if t.get("id") is not None],
+            return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, dict):
+                deleted.append(r)
         
-        _logger.info("Verifying deletion by fetching transport list again...")
+        _LOGGER.info("Verifying deletion by fetching transport list again...")
         try:
             result = await self.get("/transport", op_timeout=request_timeout)
             remaining = result.get("result", []) if isinstance(result, dict) else (result if isinstance(result, list) else [])
-            _logger.info(f"Deletion complete. Deleted {len(deleted)} transport(s), remaining: {len(remaining)}")
+            _LOGGER.info("Deletion complete. Deleted %d transport(s), remaining: %d", len(deleted), len(remaining))
             # P1-5 fix: Return *deleted* transports (what we removed), not *remaining*.
             # Callers log the result as "cleared N transports" — 0 should mean "nothing to clear",
             # not "all deletions succeeded".
             return deleted
         except Exception as e:
-            _logger.warning(f"Failed to verify deletion: {e}")
+            _LOGGER.warning("Failed to verify deletion: %s", e)
             return deleted
 
 

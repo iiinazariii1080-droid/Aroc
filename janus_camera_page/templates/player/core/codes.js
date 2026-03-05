@@ -34,6 +34,10 @@
     JANUS_ERROR: 'janus_error',
     ALREADY_WATCHING: 'already_watching',
     SESSION_RESET: 'session_reset',
+    FPS_DROP: 'fps_drop',
+    VIDEO_STALLED: 'video_stalled',
+    TAB_RESUME_STALE: 'tab_resume_stale',
+    NETWORK_RESTORED: 'network_restored',
   });
 
   /** Maximum reconnect attempts before transitioning to ERROR (L12). Config may clamp within [3, 50]. */

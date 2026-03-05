@@ -45,9 +45,11 @@ async def lifespan(app: FastAPI):
     app.state.startup_ok = False
     app.state.startup_ts = time.time()
     app.state.last_heartbeat_ts = time.time()
-    app.state._heartbeat_task = asyncio.create_task(_heartbeat_loop(app))
 
     await startup(app)
+
+    # Start heartbeat AFTER startup succeeds to avoid task leak on failure.
+    app.state._heartbeat_task = asyncio.create_task(_heartbeat_loop(app))
     app.state.startup_ok = True
 
     # Отдельный поток: HTTP‑сервер телеуправления (джойстик/клавиатура)
@@ -91,7 +93,7 @@ async def lifespan(app: FastAPI):
                 await hb
             except asyncio.CancelledError:
                 pass
-            except BaseException:
+            except Exception:
                 pass
         await shutdown(app)
 
@@ -123,30 +125,56 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.get("/dashboard.html")
 async def serve_dashboard():
     """Serve unified AGV dashboard page."""
-    return FileResponse(os.path.join(STATIC_DIR, "dashboard.html"))
+    path = os.path.join(STATIC_DIR, "dashboard.html")
+    if not os.path.isfile(path):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="dashboard.html not found")
+    return FileResponse(path)
 
 @app.get("/map_viewer.html")
 async def serve_map_viewer():
-    return FileResponse(os.path.join(STATIC_DIR, "map_viewer.html"))
+    """Serve map viewer HTML page."""
+    path = os.path.join(STATIC_DIR, "map_viewer.html")
+    if not os.path.isfile(path):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="map_viewer.html not found")
+    return FileResponse(path)
 
 @app.get("/robot_monitor.html")
 async def serve_robot_monitor():
     """Serve robot monitor HTML page."""
-    return FileResponse(os.path.join(STATIC_DIR, "robot_monitor.html"))
+    path = os.path.join(STATIC_DIR, "robot_monitor.html")
+    if not os.path.isfile(path):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="robot_monitor.html not found")
+    return FileResponse(path)
 
 @app.get("/nav_console.html")
 async def serve_nav_console():
     """Serve navigation console HTML page."""
-    return FileResponse(os.path.join(STATIC_DIR, "nav_console.html"))
+    path = os.path.join(STATIC_DIR, "nav_console.html")
+    if not os.path.isfile(path):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="nav_console.html not found")
+    return FileResponse(path)
 
 
 @app.get("/teleop_console.html")
 async def serve_teleop_console():
     """Serve teleop (joystick/keyboard) console HTML page."""
-    return FileResponse(os.path.join(STATIC_DIR, "teleop_console.html"))
+    path = os.path.join(STATIC_DIR, "teleop_console.html")
+    if not os.path.isfile(path):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="teleop_console.html not found")
+    return FileResponse(path)
 
 if __name__ == "__main__":
     import uvicorn
+    if settings.uvicorn_workers != 1:
+        raise SystemExit(
+            f"UVICORN_WORKERS must be 1 (got {settings.uvicorn_workers}). "
+            "This app uses in-memory state and cannot run with multiple workers."
+        )
     uvicorn.run(
         "main:app", 
         host=settings.service_host, 

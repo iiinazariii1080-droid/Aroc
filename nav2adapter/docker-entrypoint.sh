@@ -1,5 +1,10 @@
 #!/bin/bash
-set -e
+set -eu
+
+if [ $# -eq 0 ]; then
+  echo "Error: no command specified" >&2
+  exit 1
+fi
 
 # Ensure /app/data directory exists and has correct permissions
 # This handles cases where volume mounts create the directory with wrong permissions

@@ -26,6 +26,7 @@ export interface DepthFrame {
   readonly width: number;
   readonly height: number;
   readonly timestamp: number;
+  readonly timestampSource: 'source' | 'local';
 }
 
 /** Raw RGB frame (RGB24 interleaved). */
@@ -43,6 +44,8 @@ export interface PointCloud {
   readonly colors: Float32Array;
   /** Number of valid points. */
   readonly count: number;
+  /** Capture timestamp of source depth frame (ms epoch). */
+  readonly timestampMs: number;
 }
 
 /** A single voxel entry in the accumulated world-frame map. */
@@ -53,6 +56,32 @@ export interface VoxelEntry {
   readonly r: number;  // 0..1
   readonly g: number;
   readonly b: number;
+  readonly mapId?: number;
+}
+
+export type FrameDropReason =
+  | 'skew'
+  | 'validation'
+  | 'empty'
+  | 'stale'
+  | 'map_id_mismatch';
+
+export interface DepthCameraRuntimeParams {
+  readonly intrinsics: {
+    readonly fx: number;
+    readonly fy: number;
+    readonly cx: number;
+    readonly cy: number;
+  };
+  readonly depthScale: number;
+  readonly depthCalibration: {
+    readonly k: number;
+    readonly b: number;
+  };
+  readonly frustum: {
+    readonly near: number;
+    readonly far: number;
+  };
 }
 
 /** Depth overlay configuration (controls frame processing behavior). */
@@ -61,6 +90,8 @@ export interface DepthOverlayConfig {
   readonly minRaw: number;
   readonly maxRaw: number;
   readonly minDistanceM: number;
+  readonly rejectNearBlackRgb?: boolean;
+  readonly nearBlackThreshold?: number;
   readonly pixelRotationDeg: number;
   readonly flipX: boolean;
   readonly flipY: boolean;
@@ -69,13 +100,6 @@ export interface DepthOverlayConfig {
   readonly cloudMirrorAxis: 'x' | 'y' | 'z';
   readonly cloudRotationDeg: { rx: number; ry: number; rz: number };
   readonly depthShotColor: readonly [number, number, number];
-}
-
-/** Depth map binary format header (DMP1). */
-export interface DepthMapHeader {
-  readonly magic: 'DMP1';
-  readonly version: 1;
-  readonly pointCount: number;
 }
 
 /** Voxel recording configuration. */

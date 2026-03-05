@@ -73,7 +73,7 @@
     // Rotation: rx=-90° rotates frustum to match physical D435 orientation
     //
     flangeToCamera: {
-      tx: 0.044, ty: -0.168, tz: -0.027,  // meters, in toolGroup local (Three.js)
+      tx: 0.030, ty: -0.15, tz: -0.030,  // meters, in toolGroup local (Three.js)
       rx: -90, ry: 0, rz: -90,              // degrees — measured from physical mount
       _status: "KNOWN",
       _note: "Calibrated 2026-02-20. P:44/-168/-27 mm  R:-90/0/-90 deg.",

@@ -65,17 +65,72 @@ class TestJanusProxy:
 class TestClientConfig:
     @pytest.mark.asyncio
     @patch("app.routes.janus.load_nat_config")
-    async def test_returns_config(self, mock_nat, client, settings):
-        mock_nat.return_value = MagicMock(
-            stun_server=None,
-            turn_server=None,
+    @patch("app.routes.janus.get_settings")
+    async def test_returns_config(self, mock_settings, mock_nat, client, settings):
+        mock_settings.return_value = MagicMock(
+            camera_type="color_camera",
             ice_policy="all",
-            model_dump=lambda exclude_none=True: {"ice_policy": "all"},
+            turn_shared_secret="",
+            turn_cred_ttl=86400,
         )
+        mock_nat.return_value = JanusNatConfig()
         resp = await client.get("/client-config")
         assert resp.status_code == 200
         body = resp.json()
-        assert "janus_ws" in body or "iceServers" in body or "janus_url" in body
+        assert "iceServers" in body
+
+    @pytest.mark.asyncio
+    @patch("app.routes.janus.load_nat_config")
+    @patch("app.routes.janus.get_settings")
+    async def test_depth_camera_forces_relay_policy(self, mock_settings, mock_nat, client):
+        """Depth camera behind double NAT must always return iceTransportPolicy=relay."""
+        mock_settings.return_value = MagicMock(
+            camera_type="depth_camera",
+            ice_policy="all",  # env says "all", but depth must override to "relay"
+            turn_shared_secret="",
+            turn_cred_ttl=86400,
+        )
+        mock_nat.return_value = JanusNatConfig()
+        resp = await client.get("/client-config")
+        assert resp.status_code == 200
+        assert resp.json()["iceTransportPolicy"] == "relay"
+
+    @pytest.mark.asyncio
+    @patch("app.routes.janus.load_nat_config")
+    @patch("app.routes.janus.get_settings")
+    async def test_color_camera_respects_env_policy(self, mock_settings, mock_nat, client):
+        """Color camera uses the ICE_POLICY env var as-is."""
+        mock_settings.return_value = MagicMock(
+            camera_type="color_camera",
+            ice_policy="all",
+            turn_shared_secret="",
+            turn_cred_ttl=86400,
+        )
+        mock_nat.return_value = JanusNatConfig()
+        resp = await client.get("/client-config")
+        assert resp.status_code == 200
+        assert resp.json()["iceTransportPolicy"] == "all"
+
+    @pytest.mark.asyncio
+    @patch("app.routes.janus.load_nat_config")
+    @patch("app.routes.janus.get_settings")
+    async def test_ephemeral_turn_creds_when_shared_secret_set(self, mock_settings, mock_nat, client):
+        """When TURN_SHARED_SECRET is set, /client-config returns time-limited HMAC credentials."""
+        mock_settings.return_value = MagicMock(
+            camera_type="color_camera",
+            ice_policy="all",
+            turn_shared_secret="test-secret-abc",
+            turn_cred_ttl=3600,
+        )
+        mock_nat.return_value = JanusNatConfig()
+        resp = await client.get("/client-config")
+        assert resp.status_code == 200
+        body = resp.json()
+        # TURN server entry should have ephemeral username (timestamp:user format)
+        turn_entry = [s for s in body["iceServers"] if s.get("username")]
+        assert len(turn_entry) == 1
+        assert ":" in turn_entry[0]["username"]  # "expiry:webrtc"
+        assert len(turn_entry[0]["credential"]) > 10  # base64 HMAC
 
 
 # ── Helper function tests (no HTTP client needed) ───────────────────

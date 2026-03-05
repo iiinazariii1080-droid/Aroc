@@ -64,14 +64,19 @@ class EventDispatcher:
                 except asyncio.TimeoutError:
                     # Timeout is expected - just check _running and continue
                     continue
-                except Exception:
-                    reliability_metrics.inc("event_dispatcher.consume.failed")
+                except asyncio.CancelledError:
                     raise
+                except Exception:
+                    # P1-2 fix: do NOT re-raise — one bad event must not kill the
+                    # entire dispatcher loop.  Log, count, and continue.
+                    reliability_metrics.inc("event_dispatcher.consume.failed")
+                    _LOGGER.exception("EventDispatcher: failed to process event, skipping")
+                    continue
         except asyncio.CancelledError:
             pass
         except Exception as e:
             reliability_metrics.inc("event_dispatcher.runtime.failed")
-            _LOGGER.error(f"EventDispatcher failed: {e}", exc_info=True)
+            _LOGGER.error("EventDispatcher failed: %s", e, exc_info=True)
         finally:
             await self.bus.unsubscribe(q)
 

@@ -59,6 +59,9 @@
       if (this._ensurePromise) return this._ensurePromise;
 
       const that = this;
+      const initGen = this._gen;
+      const INIT_TIMEOUT_MS = 8000;
+
       this._ensurePromise = (async () => {
         const cfg = that.cfg;
         const servers = [cfg.janusWs, cfg.janusRest].filter(Boolean);
@@ -72,7 +75,9 @@
         const iceServers = that._rtcConfig.iceServers;
         const iceTransportPolicy = that._rtcConfig.iceTransportPolicy || 'all';
 
-        await new Promise((resolve, reject) => {
+        let initTimeoutId = null;
+
+        const janusPromise = new Promise((resolve, reject) => {
           try {
             that.janus = new Janus({
               server,
@@ -99,8 +104,31 @@
             reject(e);
           }
         });
+
+        const timeoutPromise = new Promise((_, reject) => {
+          initTimeoutId = setTimeout(() => {
+            // Only clean up if no destroy() was called since this init started.
+            if (that._gen === initGen) {
+              const zombie = that.janus;
+              that.janus = null;
+              if (zombie) {
+                try { zombie.destroy({ asyncRequest: true }); } catch (_) {}
+              }
+            }
+            reject(new Error('janus_init_timeout'));
+          }, INIT_TIMEOUT_MS);
+        });
+
+        try {
+          await Promise.race([janusPromise, timeoutPromise]);
+        } finally {
+          if (initTimeoutId != null) clearTimeout(initTimeoutId);
+        }
       })().finally(() => {
-        that._ensurePromise = null;
+        // Only clear if no destroy()+init() happened since this init started.
+        if (that._gen === initGen) {
+          that._ensurePromise = null;
+        }
       });
 
       return this._ensurePromise;
@@ -130,37 +158,60 @@
       });
     }
 
+    /**
+     * Returns true if the Janus session exists and its underlying WebSocket is connected.
+     * Used to short-circuit SOFT_RESTART / REATTACH attempts when the server is unreachable.
+     */
+    isAlive(){
+      return !!(this.janus && typeof this.janus.isConnected === 'function' && this.janus.isConnected());
+    }
+
     async destroy(){
       const j = this.janus;
       this.janus = null;
       this._gen += 1;
+      const destroyGen = this._gen;
+      this._ensurePromise = null;
 
       if (!j) {
-        this._emit('SESSION_DESTROYED', { gen: this._gen });
+        this._emit('SESSION_DESTROYED', { gen: destroyGen });
         return;
       }
 
       this._destroyingByUs = true;
       try {
-        await new Promise((resolve) => {
+        const DESTROY_TIMEOUT_MS = 5000;
+        const destroyPromise = new Promise((resolve) => {
           try {
             j.destroy({ success: () => resolve(true), error: () => resolve(true) });
           } catch (_) {
             resolve(true);
           }
         });
-        this._emit('SESSION_DESTROYED', { gen: this._gen });
+        const timeoutPromise = new Promise((resolve) => {
+          setTimeout(() => resolve(true), DESTROY_TIMEOUT_MS);
+        });
+        await Promise.race([destroyPromise, timeoutPromise]);
+        // Only emit if no newer destroy happened while we were waiting.
+        if (this._gen === destroyGen) {
+          this._emit('SESSION_DESTROYED', { gen: destroyGen });
+        }
       } finally {
         this._destroyingByUs = false;
       }
     }
 
     async recreate(rtcConfig){
+      const beforeGen = this._gen;
       // increments generation inside destroy()
       await this.destroy();
+      const expectedGen = beforeGen + 1;
       if (rtcConfig) this.setRtcConfig(rtcConfig);
       await this.init();
-      this._emit('SESSION_RECREATED', { gen: this._gen });
+      // Only emit if no concurrent recreate happened.
+      if (this._gen === expectedGen) {
+        this._emit('SESSION_RECREATED', { gen: this._gen });
+      }
     }
   }
 

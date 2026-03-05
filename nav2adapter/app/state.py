@@ -46,9 +46,15 @@ def _spawn_bg_task(app: FastAPI, coro, name: str) -> asyncio.Task:
         try:
             _ = t.result()
         except asyncio.CancelledError:
-            return
-        except BaseException:
+            pass
+        except Exception:
             _LOGGER.error("Background task %s failed", name, exc_info=True)
+        # Remove finished task from internal list to avoid memory leak
+        if hasattr(app.state, "_bg_tasks"):
+            try:
+                app.state._bg_tasks.remove(t)
+            except ValueError:
+                pass
 
     task.add_done_callback(_done)
     # Keep an internal list for cancellation during shutdown.
@@ -106,19 +112,20 @@ async def startup(app: FastAPI) -> None:
                 app_config.settings.mqtt_use_tls,
             )
         except Exception as e:
-            _LOGGER.error("Failed to initialize MQTT: %s", e, exc_info=True)
-            _LOGGER.warning("Continuing without MQTT (HTTP-only / SSE-only mode)")
-            try:
-                await mqtt_adapter.disconnect()
-            except Exception:
-                pass
-            mqtt_adapter = None
+            _LOGGER.error("Failed to connect MQTT at startup: %s", e, exc_info=True)
+            _LOGGER.warning(
+                "MQTT will keep retrying in background via command consumer reconnect loop"
+            )
+            # Do NOT set mqtt_adapter = None — keep it alive so the consumer
+            # reconnect loop can establish the connection later.
     elif app_config.settings.mqtt_broker_host and not AIOMQTT_AVAILABLE:
         _LOGGER.warning("aiomqtt not available; running without MQTT")
 
-    # Command handler and consumers (only when MQTT is connected)
+    # Command handler and consumers — create even if MQTT is not yet connected.
+    # The consumer's internal reconnect loop will establish MQTT when the broker
+    # becomes reachable, so commands arriving via HTTP can wait for reconnection.
     command_handler: Optional[CommandHandler] = None
-    if mqtt_adapter is not None and getattr(mqtt_adapter, "is_connected", False):
+    if mqtt_adapter is not None:
         command_handler = CommandHandler(
             symovo_client=symovo_client,
             transport_orchestrator=transport_orchestrator,
@@ -225,6 +232,15 @@ async def startup(app: FastAPI) -> None:
 
 async def shutdown(app: FastAPI) -> None:
     """Stop background tasks and disconnect resources."""
+    # Cancel orphan background tasks not tracked by AppServices.
+    from app.cache import cancel_eviction_task
+    cancel_eviction_task()
+    try:
+        from routes.aehub import cancel_poll_cleanup_task
+        cancel_poll_cleanup_task()
+    except ImportError:
+        pass
+
     # Container-based shutdown if available.
     services: Optional[AppServices] = getattr(app.state, "services", None)
 
@@ -307,6 +323,18 @@ async def _recover_state(symovo_client: SymovoAgvClient) -> None:
                     return (command_id, "terminal", {"state": state})
 
                 if NavigationStateMachine.is_active_state(state):
+                    # P1-3 fix: if a new navigateTo was received during startup,
+                    # skip recovery of old commands to prevent overwriting
+                    # _current_command_id and confusing the StatusPublisher.
+                    current = await state_store.get_current_command_id()
+                    if current is not None and current != command_id:
+                        _LOGGER.info(
+                            "Skipping recovery of %s: a new command (%s) is already active",
+                            command_id, current,
+                        )
+                        await state_store.clear_transport(command_id)
+                        return (command_id, "skipped_new_active", {"state": state})
+
                     await state_store.register_command(
                         command_id=command_id,
                         transport_id=cmd.transport_id,

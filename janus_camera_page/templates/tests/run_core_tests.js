@@ -308,6 +308,281 @@ function main(){
   const rOfferReconn = Canonical.transition({ type: CE.STREAMING_OFFER_RECEIVED }, snap(S.RECONNECTING, { reconnectAttempts: 1 }));
   assert(rOfferReconn.next.state === S.RECONNECTING, 'RECONNECTING + STREAMING_OFFER_RECEIVED -> state unchanged');
 
+  // ═══════════════════════════════════════════════════════════════════
+  // Extended coverage: connection_policy.decide() — all 13 event types
+  // ═══════════════════════════════════════════════════════════════════
+
+  // ICE_DISCONNECTED_GRACE_TIMEOUT — fresh frames → MARK_DEGRADED
+  dec = AP.Core.ConnectionPolicy.decide(E.ICE_DISCONNECTED_GRACE_TIMEOUT, {
+    state: S.PLAYING, webrtcUp: false, firstFrameReceived: true, desiredPlaying: true, lastFrameAgeMs: 500,
+  });
+  assert(dec.action === PA.MARK_DEGRADED, 'ICE_DISCONNECTED_GRACE_TIMEOUT fresh frame → MARK_DEGRADED');
+
+  // ICE_DISCONNECTED_GRACE_TIMEOUT — stale frames (>2000ms) → REQUEST_RECOVERY
+  dec = AP.Core.ConnectionPolicy.decide(E.ICE_DISCONNECTED_GRACE_TIMEOUT, {
+    state: S.PLAYING, webrtcUp: false, firstFrameReceived: true, desiredPlaying: true, lastFrameAgeMs: 3000,
+  });
+  assert(dec.action === PA.REQUEST_RECOVERY, 'ICE_DISCONNECTED_GRACE_TIMEOUT stale → REQUEST_RECOVERY');
+  assert(dec.reason === RR.ICE_DISCONNECTED_GRACE, 'ICE_DISCONNECTED_GRACE_TIMEOUT stale → reason ICE_DISCONNECTED_GRACE');
+  assert(dec.severity === RS.MEDIUM, 'ICE_DISCONNECTED_GRACE_TIMEOUT stale → severity MEDIUM');
+
+  // ICE_DISCONNECTED_GRACE_TIMEOUT — no firstFrame → REQUEST_RECOVERY
+  dec = AP.Core.ConnectionPolicy.decide(E.ICE_DISCONNECTED_GRACE_TIMEOUT, {
+    state: S.CONNECTING, firstFrameReceived: false, desiredPlaying: true, lastFrameAgeMs: 0,
+  });
+  assert(dec.action === PA.REQUEST_RECOVERY, 'ICE_DISCONNECTED_GRACE_TIMEOUT no firstFrame → REQUEST_RECOVERY');
+
+  // TRACK_MUTE_TIMEOUT → REQUEST_RECOVERY(TRACK_MUTED, MEDIUM)
+  dec = AP.Core.ConnectionPolicy.decide(E.TRACK_MUTE_TIMEOUT, {
+    state: S.PLAYING, firstFrameReceived: true, desiredPlaying: true,
+  });
+  assert(dec.action === PA.REQUEST_RECOVERY, 'TRACK_MUTE_TIMEOUT → REQUEST_RECOVERY');
+  assert(dec.reason === RR.TRACK_MUTED, 'TRACK_MUTE_TIMEOUT → reason TRACK_MUTED');
+  assert(dec.severity === RS.MEDIUM, 'TRACK_MUTE_TIMEOUT → severity MEDIUM');
+
+  // TRACK_ENDED → REQUEST_RECOVERY(NO_FRAMES, MEDIUM)
+  dec = AP.Core.ConnectionPolicy.decide(E.TRACK_ENDED, {
+    state: S.PLAYING, firstFrameReceived: true, desiredPlaying: true,
+  });
+  assert(dec.action === PA.REQUEST_RECOVERY, 'TRACK_ENDED → REQUEST_RECOVERY');
+  assert(dec.reason === RR.NO_FRAMES, 'TRACK_ENDED → reason NO_FRAMES');
+
+  // SESSION_RESET → REQUEST_RECOVERY(SESSION_RESET, HARD)
+  dec = AP.Core.ConnectionPolicy.decide(E.SESSION_RESET, {
+    state: S.PLAYING, firstFrameReceived: true, desiredPlaying: true,
+  });
+  assert(dec.action === PA.REQUEST_RECOVERY, 'SESSION_RESET → REQUEST_RECOVERY');
+  assert(dec.reason === RR.SESSION_RESET, 'SESSION_RESET → reason SESSION_RESET');
+  assert(dec.severity === RS.HARD, 'SESSION_RESET → severity HARD');
+
+  // JANUS_ERROR → REQUEST_RECOVERY(JANUS_ERROR, MEDIUM)
+  dec = AP.Core.ConnectionPolicy.decide(E.JANUS_ERROR, {
+    state: S.PLAYING, firstFrameReceived: true, desiredPlaying: true,
+  });
+  assert(dec.action === PA.REQUEST_RECOVERY, 'JANUS_ERROR → REQUEST_RECOVERY');
+  assert(dec.reason === RR.JANUS_ERROR, 'JANUS_ERROR → reason JANUS_ERROR');
+  assert(dec.severity === RS.MEDIUM, 'JANUS_ERROR → severity MEDIUM');
+
+  // FPS_DROP → REQUEST_RECOVERY(FPS_DROP, MEDIUM)
+  dec = AP.Core.ConnectionPolicy.decide(E.FPS_DROP, {
+    state: S.PLAYING, firstFrameReceived: true, desiredPlaying: true,
+  });
+  assert(dec.action === PA.REQUEST_RECOVERY, 'FPS_DROP → REQUEST_RECOVERY');
+  assert(dec.reason === RR.FPS_DROP, 'FPS_DROP → reason FPS_DROP');
+  assert(dec.severity === RS.MEDIUM, 'FPS_DROP → severity MEDIUM');
+
+  // VIDEO_STALLED → REQUEST_RECOVERY(VIDEO_STALLED, MEDIUM)
+  dec = AP.Core.ConnectionPolicy.decide(E.VIDEO_STALLED, {
+    state: S.PLAYING, firstFrameReceived: true, desiredPlaying: true,
+  });
+  assert(dec.action === PA.REQUEST_RECOVERY, 'VIDEO_STALLED → REQUEST_RECOVERY');
+  assert(dec.reason === RR.VIDEO_STALLED, 'VIDEO_STALLED → reason VIDEO_STALLED');
+  assert(dec.severity === RS.MEDIUM, 'VIDEO_STALLED → severity MEDIUM');
+
+  // WEBRTC_DOWN — no "ice" in reason → MEDIUM (not HARD)
+  dec = AP.Core.ConnectionPolicy.decide(E.WEBRTC_DOWN, {
+    state: S.PLAYING, webrtcUp: false, firstFrameReceived: true, desiredPlaying: true, webrtcDownReason: 'server closed',
+  });
+  assert(dec.action === PA.REQUEST_RECOVERY, 'WEBRTC_DOWN no-ice → REQUEST_RECOVERY');
+  assert(dec.reason === RR.WEBRTC_DOWN, 'WEBRTC_DOWN no-ice → reason WEBRTC_DOWN');
+  assert(dec.severity === RS.MEDIUM, 'WEBRTC_DOWN no-ice → severity MEDIUM');
+
+  // WEBRTC_DOWN — "ice" in reason + no media → HARD
+  dec = AP.Core.ConnectionPolicy.decide(E.WEBRTC_DOWN, {
+    state: S.CONNECTING, webrtcUp: false, firstFrameReceived: false, desiredPlaying: true, webrtcDownReason: 'ice failed',
+  });
+  assert(dec.severity === RS.HARD, 'WEBRTC_DOWN ice+no-media → severity HARD');
+
+  // HANGUP — no "ice" in reason → MEDIUM
+  dec = AP.Core.ConnectionPolicy.decide(E.HANGUP, {
+    state: S.PLAYING, firstFrameReceived: true, desiredPlaying: true, hangupReason: 'server hangup',
+  });
+  assert(dec.action === PA.REQUEST_RECOVERY, 'HANGUP no-ice → REQUEST_RECOVERY');
+  assert(dec.reason === RR.HANGUP, 'HANGUP no-ice → reason HANGUP');
+  assert(dec.severity === RS.MEDIUM, 'HANGUP no-ice → severity MEDIUM');
+
+  // HANGUP — "ice" in reason + no media → HARD
+  dec = AP.Core.ConnectionPolicy.decide(E.HANGUP, {
+    state: S.CONNECTING, firstFrameReceived: false, desiredPlaying: true, hangupReason: 'ice connection',
+  });
+  assert(dec.severity === RS.HARD, 'HANGUP ice+no-media → severity HARD');
+
+  // Unknown event → NO_OP
+  dec = AP.Core.ConnectionPolicy.decide('TOTALLY_UNKNOWN', {
+    state: S.PLAYING, firstFrameReceived: true, desiredPlaying: true,
+  });
+  assert(dec.action === PA.NO_OP, 'unknown event → NO_OP');
+
+  // desiredPlaying false in non-active state → NO_OP (already tested once, adding for coverage completeness)
+  dec = AP.Core.ConnectionPolicy.decide(E.VIDEO_STALLED, {
+    state: S.PLAYING, firstFrameReceived: true, desiredPlaying: false,
+  });
+  assert(dec.action === PA.NO_OP, 'VIDEO_STALLED + desiredPlaying false → NO_OP');
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Extended coverage: StateMachineCanonical — handleActiveCommon events
+  // ═══════════════════════════════════════════════════════════════════
+
+  // WEBRTC_REPORT from CONNECTING → updates webrtcUp, emits RENDER
+  let rReport = Canonical.transition({ type: CE.WEBRTC_REPORT, webrtcUp: true }, snap(S.CONNECTING));
+  assert(rReport.next.state === S.CONNECTING, 'CONNECTING + WEBRTC_REPORT → state unchanged');
+  assert(rReport.next.webrtcUp === true, 'CONNECTING + WEBRTC_REPORT → webrtcUp updated');
+  assert(rReport.actions.some((a) => a.type === CA.RENDER), 'CONNECTING + WEBRTC_REPORT → RENDER');
+
+  // WEBRTC_REPORT from PLAYING
+  rReport = Canonical.transition({ type: CE.WEBRTC_REPORT, webrtcUp: false }, snap(S.PLAYING));
+  assert(rReport.next.state === S.PLAYING, 'PLAYING + WEBRTC_REPORT → state unchanged');
+  assert(rReport.next.webrtcUp === false, 'PLAYING + WEBRTC_REPORT → webrtcUp updated to false');
+
+  // WEBRTC_REPORT from RECONNECTING
+  rReport = Canonical.transition({ type: CE.WEBRTC_REPORT, webrtcUp: true }, snap(S.RECONNECTING, { reconnectAttempts: 1 }));
+  assert(rReport.next.state === S.RECONNECTING, 'RECONNECTING + WEBRTC_REPORT → state unchanged');
+  assert(rReport.next.webrtcUp === true, 'RECONNECTING + WEBRTC_REPORT → webrtcUp true');
+
+  // ICE_REPORT disconnected → ARM_ICE_GRACE
+  let rIce = Canonical.transition({ type: CE.ICE_REPORT, iceState: 'disconnected' }, snap(S.PLAYING));
+  assert(rIce.next.state === S.PLAYING, 'PLAYING + ICE_REPORT disconnected → state unchanged');
+  assert(rIce.next.iceState === 'disconnected', 'PLAYING + ICE_REPORT → iceState updated');
+  assert(rIce.actions.some((a) => a.type === CA.ARM_ICE_GRACE), 'ICE_REPORT disconnected → ARM_ICE_GRACE');
+
+  // ICE_REPORT connected → CANCEL_ICE_GRACE
+  rIce = Canonical.transition({ type: CE.ICE_REPORT, iceState: 'connected' }, snap(S.PLAYING));
+  assert(rIce.actions.some((a) => a.type === CA.CANCEL_ICE_GRACE), 'ICE_REPORT connected → CANCEL_ICE_GRACE');
+
+  // ICE_REPORT completed → CANCEL_ICE_GRACE
+  rIce = Canonical.transition({ type: CE.ICE_REPORT, iceState: 'completed' }, snap(S.PLAYING));
+  assert(rIce.actions.some((a) => a.type === CA.CANCEL_ICE_GRACE), 'ICE_REPORT completed → CANCEL_ICE_GRACE');
+
+  // ICE_REPORT other (e.g. 'checking') → only RENDER
+  rIce = Canonical.transition({ type: CE.ICE_REPORT, iceState: 'checking' }, snap(S.PLAYING));
+  assert(!rIce.actions.some((a) => a.type === CA.ARM_ICE_GRACE), 'ICE_REPORT checking → no ARM_ICE_GRACE');
+  assert(!rIce.actions.some((a) => a.type === CA.CANCEL_ICE_GRACE), 'ICE_REPORT checking → no CANCEL_ICE_GRACE');
+  assert(rIce.actions.some((a) => a.type === CA.RENDER), 'ICE_REPORT checking → RENDER');
+
+  // TRACK_MUTED → ARM_TRACK_MUTE_TIMER with trackId
+  let rTrack = Canonical.transition({ type: CE.TRACK_MUTED, trackId: 'v0' }, snap(S.PLAYING));
+  assert(rTrack.next.state === S.PLAYING, 'PLAYING + TRACK_MUTED → state unchanged');
+  assert(rTrack.actions.some((a) => a.type === CA.ARM_TRACK_MUTE_TIMER && a.trackId === 'v0'), 'TRACK_MUTED → ARM_TRACK_MUTE_TIMER with trackId');
+
+  // TRACK_UNMUTED → DISARM_TRACK_MUTE_TIMER
+  rTrack = Canonical.transition({ type: CE.TRACK_UNMUTED, trackId: 'v0' }, snap(S.PLAYING));
+  assert(rTrack.actions.some((a) => a.type === CA.DISARM_TRACK_MUTE_TIMER && a.trackId === 'v0'), 'TRACK_UNMUTED → DISARM_TRACK_MUTE_TIMER');
+
+  // TRACK_READY → BIND_STREAM + RENDER
+  rTrack = Canonical.transition({ type: CE.TRACK_READY }, snap(S.CONNECTING));
+  assert(rTrack.actions.some((a) => a.type === CA.BIND_STREAM), 'TRACK_READY → BIND_STREAM');
+  assert(rTrack.actions.some((a) => a.type === CA.RENDER), 'TRACK_READY → RENDER');
+
+  // POLICY_MARK_DEGRADED → MARK_DEGRADED + RENDER
+  let rDeg = Canonical.transition({ type: CE.POLICY_MARK_DEGRADED }, snap(S.PLAYING));
+  assert(rDeg.actions.some((a) => a.type === CA.MARK_DEGRADED), 'POLICY_MARK_DEGRADED → MARK_DEGRADED');
+  assert(rDeg.actions.some((a) => a.type === CA.RENDER), 'POLICY_MARK_DEGRADED → RENDER');
+
+  // PLAYING + ICE_FAILED → RECONNECTING (was only tested from CONNECTING)
+  let rIceF = Canonical.transition({ type: CE.ICE_FAILED }, snap(S.PLAYING));
+  assert(rIceF.next.state === S.RECONNECTING, 'PLAYING + ICE_FAILED → RECONNECTING');
+  assert(rIceF.actions.some((a) => a.type === CA.START_RECONNECT_TIMER), 'PLAYING + ICE_FAILED → START_RECONNECT_TIMER');
+
+  // RECONNECTING + STREAMING_OFFER_RECEIVED → START_RECONNECT_SETTLE
+  let rOfferReconnSO = Canonical.transition({ type: CE.STREAMING_OFFER_RECEIVED }, snap(S.RECONNECTING, { reconnectAttempts: 1 }));
+  assert(rOfferReconnSO.actions.some((a) => a.type === CA.START_RECONNECT_SETTLE), 'RECONNECTING + STREAMING_OFFER_RECEIVED → START_RECONNECT_SETTLE');
+
+  // PLAYING + STREAMING_OFFER_RECEIVED → RENDER (no START_RECONNECT_SETTLE)
+  let rOfferPlay = Canonical.transition({ type: CE.STREAMING_OFFER_RECEIVED }, snap(S.PLAYING));
+  assert(rOfferPlay.next.state === S.PLAYING, 'PLAYING + STREAMING_OFFER_RECEIVED → state unchanged');
+  assert(rOfferPlay.actions.some((a) => a.type === CA.RENDER), 'PLAYING + STREAMING_OFFER_RECEIVED → RENDER');
+  assert(!rOfferPlay.actions.some((a) => a.type === CA.START_RECONNECT_SETTLE), 'PLAYING + STREAMING_OFFER_RECEIVED → no START_RECONNECT_SETTLE');
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Extended coverage: backoff edge cases
+  // ═══════════════════════════════════════════════════════════════════
+
+  // Attempt 0 → treated as attempt 1
+  const b0 = AP.Core.computeBackoffMs(0, cfg);
+  assert(b0 === b1, 'attempt 0 → same as attempt 1 (floor)');
+
+  // Negative attempt → treated as attempt 1
+  const bNeg = AP.Core.computeBackoffMs(-5, cfg);
+  assert(bNeg === b1, 'negative attempt → same as attempt 1');
+
+  // Jitter with ratio > 0 → result ≥ backoffMinMs
+  const cfgHighJitter = { backoffBaseMs: 300, backoffFactor: 1.8, backoffMinMs: 150, backoffMaxMs: 15000, backoffJitterRatio: 0.5 };
+  for (let a = 1; a <= 10; a++) {
+    const bjResult = AP.Core.computeBackoffMs(a, cfgHighJitter, 999);
+    assert(bjResult >= 150, `jitter attempt ${a}: result ${bjResult} >= backoffMinMs 150`);
+  }
+
+  // Null config → uses defaults, no crash
+  const bNullCfg = AP.Core.computeBackoffMs(1, null);
+  assert(typeof bNullCfg === 'number' && Number.isFinite(bNullCfg), 'null cfg → returns finite number');
+  assert(bNullCfg === 500, 'null cfg → uses default backoffBaseMs 500 for attempt 1');
+
+  // Empty config → uses defaults
+  const bEmptyCfg = AP.Core.computeBackoffMs(1, {});
+  assert(bEmptyCfg === 500, 'empty cfg → uses default backoffBaseMs 500');
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Extended coverage: recovery_policy edge cases
+  // ═══════════════════════════════════════════════════════════════════
+
+  // MEDIUM severity → same as SOFT (stays within ladder)
+  assert(AP.Core.decideRecoveryAction(1, RS.MEDIUM, policy) === RA.SOFT_RESTART, 'medium attempt1 → soft restart');
+  assert(AP.Core.decideRecoveryAction(4, RS.MEDIUM, policy) === RA.REATTACH_PLUGIN, 'medium attempt4 → reattach');
+  assert(AP.Core.decideRecoveryAction(6, RS.MEDIUM, policy) === RA.RECREATE_SESSION, 'medium attempt6 → recreate');
+
+  // Attempt 0 → clamped to 1 → SOFT_RESTART
+  assert(AP.Core.decideRecoveryAction(0, RS.SOFT, policy) === RA.SOFT_RESTART, 'attempt 0 → clamped to 1 → soft restart');
+
+  // Negative attempt → clamped to 1
+  assert(AP.Core.decideRecoveryAction(-3, RS.SOFT, policy) === RA.SOFT_RESTART, 'negative attempt → clamped to 1');
+
+  // Null config → uses defaults (maxWatchRetries=3, maxReattachRetries=2)
+  assert(AP.Core.decideRecoveryAction(1, RS.SOFT, null) === RA.SOFT_RESTART, 'null cfg → default watch retries 3');
+  assert(AP.Core.decideRecoveryAction(4, RS.SOFT, null) === RA.REATTACH_PLUGIN, 'null cfg → default reattach at 4');
+  assert(AP.Core.decideRecoveryAction(6, RS.SOFT, null) === RA.RECREATE_SESSION, 'null cfg → default recreate at 6');
+
+  // Boundary: exactly at watchMax and reattachMax edges
+  const policyEdge = { maxWatchRetries: 2, maxReattachRetries: 1 };
+  assert(AP.Core.decideRecoveryAction(2, RS.SOFT, policyEdge) === RA.SOFT_RESTART, 'edge: attempt=watchMax → SOFT');
+  assert(AP.Core.decideRecoveryAction(3, RS.SOFT, policyEdge) === RA.REATTACH_PLUGIN, 'edge: attempt=watchMax+1 → REATTACH');
+  assert(AP.Core.decideRecoveryAction(4, RS.SOFT, policyEdge) === RA.RECREATE_SESSION, 'edge: attempt>watchMax+reattachMax → RECREATE');
+
+  // Severity NaN → clamped to SOFT
+  assert(AP.Core.decideRecoveryAction(1, NaN, policy) === RA.SOFT_RESTART, 'NaN severity → treated as SOFT');
+
+  // Severity > HARD → clamped to HARD → RECREATE
+  assert(AP.Core.decideRecoveryAction(1, 99, policy) === RA.RECREATE_SESSION, 'severity 99 → clamped to HARD → RECREATE');
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Extended coverage: statusTextFor()
+  // ═══════════════════════════════════════════════════════════════════
+
+  assert(AP.Core.statusTextFor(S.IDLE) === 'IDLE', 'statusTextFor IDLE');
+  assert(AP.Core.statusTextFor(S.CONNECTING) === 'CONNECTING…', 'statusTextFor CONNECTING');
+  assert(AP.Core.statusTextFor(S.PLAYING) === 'PLAYING', 'statusTextFor PLAYING');
+  assert(AP.Core.statusTextFor(S.RECONNECTING, 3) === 'RECONNECTING… (attempt 3)', 'statusTextFor RECONNECTING with attempt');
+  assert(AP.Core.statusTextFor(S.RECONNECTING) === 'RECONNECTING… (attempt 1)', 'statusTextFor RECONNECTING default attempt 1');
+  assert(AP.Core.statusTextFor(S.ERROR, 0, 'RECONNECT_EXHAUSTED') === 'ERROR: RECONNECT_EXHAUSTED', 'statusTextFor ERROR with code');
+  assert(AP.Core.statusTextFor(S.ERROR) === 'ERROR: unknown', 'statusTextFor ERROR default');
+  assert(AP.Core.statusTextFor('WEIRD_STATE') === 'WEIRD_STATE', 'statusTextFor unknown state → String(state)');
+  assert(AP.Core.statusTextFor(null) === 'UNKNOWN', 'statusTextFor null → UNKNOWN');
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Extended coverage: state_machine_legacy gaps
+  // ═══════════════════════════════════════════════════════════════════
+
+  // STREAM_LOST from PLAYING → RECONNECTING
+  assert(Simple.transition(S.PLAYING, DE.STREAM_LOST) === S.RECONNECTING, 'legacy: PLAYING + STREAM_LOST → RECONNECTING');
+
+  // RECONNECT_SUCCESS from RECONNECTING → PLAYING
+  assert(Simple.transition(S.RECONNECTING, DE.RECONNECT_SUCCESS) === S.PLAYING, 'legacy: RECONNECTING + RECONNECT_SUCCESS → PLAYING');
+
+  // Unknown state → null
+  assert(Simple.transition('GARBAGE', DE.USER_PLAY) === null, 'legacy: unknown state → null');
+
+  // Unknown event from valid state → null
+  assert(Simple.transition(S.IDLE, 'GARBAGE_EVENT') === null, 'legacy: unknown event → null');
+
   console.log('OK: core tests passed');
 }
 

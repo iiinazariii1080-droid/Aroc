@@ -40,6 +40,8 @@
       this._cleanupResolve = null;
       /** Serialize IO: only one of init/stop/watch/detach/recreate runs at a time. */
       this._io = Promise.resolve();
+      /** Generation counter for recreate; stale enqueued operations check this and bail out. */
+      this._ioGen = 0;
 
       // Invalidate handle if session is destroyed/recreated.
       this.session.onEvent((ev) => {
@@ -104,6 +106,14 @@
       return h && h.webrtcStuff ? h.webrtcStuff.pc : null;
     }
 
+    /**
+     * Returns true if the underlying Janus session WebSocket is still connected.
+     * Used to short-circuit SOFT_RESTART / REATTACH when the server is unreachable.
+     */
+    isSessionAlive(){
+      return this.session && typeof this.session.isAlive === 'function' && this.session.isAlive();
+    }
+
     async init(rtcConfig){
       return this._enqueue(() => this._ensureSessionAndHandle(rtcConfig));
     }
@@ -113,9 +123,16 @@
     }
 
     async recreate(rtcConfig){
+      const gen = ++this._ioGen;
+      // Flush stale queued operations from timed-out attempts.
+      // _handleGen guards against stale attach callbacks corrupting state.
+      this._io = Promise.resolve();
       return this._enqueue(async () => {
+        if (this._ioGen !== gen) return;
         await this._detachHandle();
+        if (this._ioGen !== gen) return;
         await this.session.recreate(rtcConfig);
+        if (this._ioGen !== gen) return;
         await this._ensureSessionAndHandle(rtcConfig);
       });
     }

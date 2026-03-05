@@ -2,12 +2,22 @@
  * depth-api.ts — HTTP client for depth camera endpoints.
  *
  * Data layer. Fetches depth frames and depth maps from the backend API.
+ * Emits raw data events; domain processing is handled by the orchestrator.
  */
 
 import type { EventBus } from '@/event-bus';
-import type { DepthFrame } from '@/types/depth';
-import { API, DEPTH_CAMERA, DEPTH_OVERLAY } from '@/config/scene-config';
-import { processDepthFrame } from '@/domain/depth-processor';
+import { API, VOXEL_RECORDING } from '@/config/scene-config';
+import { parseBase64Uint16, parseBase64Uint8 } from '@/domain/binary-parsers';
+import { encodeDMP1, decodeDMP1 } from '@/domain/depth-codec';
+import {
+  validateDepthPayload,
+  validateRgbPayload,
+  isReasonableTimestamp,
+} from '@/domain/validators';
+import type { VoxelEntry } from '@/types/depth';
+
+/** Fetch timeout in ms — prevents inFlight from locking permanently. */
+const FETCH_TIMEOUT_MS = 8_000;
 
 export interface DepthApiOptions {
   bus: EventBus;
@@ -17,12 +27,16 @@ export interface DepthApiOptions {
 
 export class DepthApi {
   private readonly bus: EventBus;
+  private readonly unsubFetchNow: () => void;
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight = false;
   private disposed = false;
 
   constructor(opts: DepthApiOptions) {
     this.bus = opts.bus;
+    this.unsubFetchNow = this.bus.on('depth:fetchNow', () => {
+      void this.fetchFrame();
+    });
 
     if (opts.pollIntervalMs && opts.pollIntervalMs > 0) {
       this.startPolling(opts.pollIntervalMs);
@@ -49,35 +63,69 @@ export class DepthApi {
     if (this.inFlight || this.disposed) return;
     this.inFlight = true;
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
     try {
-      const resp = await fetch(API.depthFrameColorOverlay);
+      const resp = await fetch(API.depthFrameColorOverlay, { signal: controller.signal });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
       const json = await resp.json();
 
-      // Parse depth data
-      const depthRaw = this.parseDepthArray(json.depth, json.width, json.height);
-      const rgbRaw = json.color ? this.parseRgbArray(json.color, json.width, json.height) : null;
+      // Schema v2 uses depth_data/rgb_data/mapped_color; v1 used depth/color/data
+      const depthAlias = json.depth_data != null ? 'depth_data' : json.depth != null ? 'depth' : 'data';
+      const colorAlias = json.mapped_color != null ? 'mapped_color' : json.rgb_data != null ? 'rgb_data' : 'color';
+      const depthField = json.depth_data ?? json.depth ?? json.data;
+      const colorField = json.mapped_color ?? json.rgb_data ?? json.color;
+      const w = Number(json.width) || 0;
+      const h = Number(json.height) || 0;
 
-      // Emit raw frame
-      const depthFrame: DepthFrame = {
-        raw: depthRaw,
-        width: json.width,
-        height: json.height,
-        timestamp: Date.now(),
-      };
-      this.bus.emit('depth:frame', depthFrame);
+      if (!depthField || !w || !h) {
+        throw new Error('Depth response missing depth_data or dimensions');
+      }
 
-      // Process into point cloud in domain layer
-      const cloud = processDepthFrame(
-        depthRaw, rgbRaw,
-        json.width, json.height,
-        DEPTH_CAMERA.intrinsics,
-        DEPTH_CAMERA.depthCalibration,
-        DEPTH_OVERLAY,
+      const depthRaw = parseBase64Uint16(depthField, w * h);
+      const rgbRaw = colorField ? parseBase64Uint8(colorField, w * h * 3) : null;
+
+      const depthValid = validateDepthPayload(depthRaw, w, h);
+      if (!depthValid.ok) {
+        this.bus.emit('depth:dropped', { reason: 'validation', detail: depthValid.reason });
+        throw new Error(depthValid.reason);
+      }
+
+      const rgbValid = validateRgbPayload(rgbRaw, w, h);
+      if (!rgbValid.ok) {
+        this.bus.emit('depth:dropped', { reason: 'validation', detail: rgbValid.reason });
+        throw new Error(rgbValid.reason);
+      }
+
+      const sourceTs = Number(
+        json.depth_capture_ts_ms
+        ?? json.timestamp_ms
+        ?? json.timestamp
+        ?? json.ts_ms
+        ?? json.ts,
       );
+      const timestampSource = isReasonableTimestamp(sourceTs) ? 'source' : 'local';
+      const timestamp = timestampSource === 'source' ? sourceTs : Date.now();
 
-      this.bus.emit('depth:cloud', cloud);
+      console.debug('[DepthApi] frame schema', {
+        depthAlias,
+        colorAlias: colorField ? colorAlias : null,
+        width: w,
+        height: h,
+        timestampSource,
+      });
+
+      // Emit raw frame — orchestrator handles domain processing
+      this.bus.emit('raw:depthFrame', {
+        depthRaw,
+        rgbRaw,
+        width: w,
+        height: h,
+        timestamp,
+        timestampSource,
+      });
 
     } catch (err) {
       this.bus.emit('error', {
@@ -86,21 +134,75 @@ export class DepthApi {
         detail: err,
       });
     } finally {
+      clearTimeout(timeout);
       this.inFlight = false;
     }
   }
 
-  // ─── Depth map save/load ──────────────────────
+  // ─── Depth map load ────────────────────────────
 
-  async saveDepthMap(data: ArrayBuffer): Promise<void> {
+  async saveVoxelMap(voxels: readonly VoxelEntry[]): Promise<{ ok: boolean; message: string }> {
+    if (voxels.length === 0) {
+      return { ok: false, message: 'Nothing to save (map empty)' };
+    }
+
     try {
-      await fetch(API.depthMap.save, {
+      const body = encodeDMP1(voxels);
+      const resp = await fetch(API.depthMap.save, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: data,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Depth-Map-Voxel-Size-Mm': String(VOXEL_RECORDING.voxelSizeMm),
+        },
+        body,
       });
+
+      if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        return { ok: false, message: `Save failed: ${resp.status} ${detail}`.trim() };
+      }
+
+      return { ok: true, message: `Saved ${voxels.length} voxels` };
     } catch (err) {
       this.bus.emit('error', { source: 'DepthApi', message: 'Failed to save depth map', detail: err });
+      return { ok: false, message: `Save error: ${String(err)}` };
+    }
+  }
+
+  async loadVoxelMap(): Promise<{ ok: boolean; message: string; voxels: VoxelEntry[]; version?: number }> {
+    try {
+      const resp = await fetch(API.depthMap.load);
+      if (resp.status === 404) {
+        return { ok: false, message: 'No saved map on server', voxels: [] };
+      }
+      if (!resp.ok) {
+        return { ok: false, message: `Load failed: ${resp.status}`, voxels: [] };
+      }
+
+      const buffer = await resp.arrayBuffer();
+      const result = decodeDMP1(buffer);
+      return {
+        ok: true,
+        message: `Loaded ${result.voxels.length} voxels (v${result.version})`,
+        voxels: result.voxels,
+        version: result.version,
+      };
+    } catch (err) {
+      this.bus.emit('error', { source: 'DepthApi', message: 'Failed to load depth map', detail: err });
+      return { ok: false, message: `Load error: ${String(err)}`, voxels: [] };
+    }
+  }
+
+  async deleteVoxelMap(): Promise<{ ok: boolean; message: string }> {
+    try {
+      const resp = await fetch(API.depthMap.delete, { method: 'DELETE' });
+      if (!resp.ok) {
+        return { ok: false, message: `Delete failed: ${resp.status}` };
+      }
+      return { ok: true, message: 'Deleted from server' };
+    } catch (err) {
+      this.bus.emit('error', { source: 'DepthApi', message: 'Failed to delete depth map', detail: err });
+      return { ok: false, message: `Delete error: ${String(err)}` };
     }
   }
 
@@ -115,39 +217,11 @@ export class DepthApi {
     }
   }
 
-  // ─── Parsers ──────────────────────────────────
-
-  private parseDepthArray(data: number[] | string, w: number, h: number): Uint16Array {
-    if (Array.isArray(data)) {
-      return new Uint16Array(data);
-    }
-    // Base64 encoded
-    if (typeof data === 'string') {
-      const binary = atob(data);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      return new Uint16Array(bytes.buffer);
-    }
-    return new Uint16Array(w * h);
-  }
-
-  private parseRgbArray(data: number[] | string, w: number, h: number): Uint8Array {
-    if (Array.isArray(data)) {
-      return new Uint8Array(data);
-    }
-    if (typeof data === 'string') {
-      const binary = atob(data);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      return bytes;
-    }
-    return new Uint8Array(w * h * 3);
-  }
-
   // ─── Dispose ──────────────────────────────────
 
   dispose(): void {
     this.disposed = true;
     this.stopPolling();
+    this.unsubFetchNow();
   }
 }

@@ -6,11 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 import aiohttp
 
-from app.teleop_server import teleop_app, _robot_url, _ssl_context, _get_session, _session
+from app.teleop_server import teleop_app, _robot_url, _ssl_context
 
 
 @pytest.fixture
 def client():
+    # Pre-set a mock session on app.state so tests don't need the lifespan
+    teleop_app.state.session = MagicMock()
     return TestClient(teleop_app, raise_server_exceptions=False)
 
 
@@ -46,12 +48,12 @@ def test_move_speed_success(client):
     mock_session.put = MagicMock(return_value=mock_resp)
     mock_session.closed = False
 
-    with patch("app.teleop_server._get_session", new_callable=AsyncMock, return_value=mock_session):
-        resp = client.put("/move/speed", json={
-            "speed": 0.5, "angular_speed": 0.0, "duration": 0.25
-        })
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
+    teleop_app.state.session = mock_session
+    resp = client.put("/move/speed", json={
+        "speed": 0.5, "angular_speed": 0.0, "duration": 0.25
+    })
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
 
 
 def test_move_speed_202(client):
@@ -65,9 +67,9 @@ def test_move_speed_202(client):
     mock_session.put = MagicMock(return_value=mock_resp)
     mock_session.closed = False
 
-    with patch("app.teleop_server._get_session", new_callable=AsyncMock, return_value=mock_session):
-        resp = client.put("/move/speed", json={"speed": 0.1})
-        assert resp.status_code == 200
+    teleop_app.state.session = mock_session
+    resp = client.put("/move/speed", json={"speed": 0.1})
+    assert resp.status_code == 200
 
 
 def test_move_speed_backend_error(client):
@@ -81,9 +83,9 @@ def test_move_speed_backend_error(client):
     mock_session.put = MagicMock(return_value=mock_resp)
     mock_session.closed = False
 
-    with patch("app.teleop_server._get_session", new_callable=AsyncMock, return_value=mock_session):
-        resp = client.put("/move/speed", json={"speed": 0.1})
-        assert resp.status_code == 502
+    teleop_app.state.session = mock_session
+    resp = client.put("/move/speed", json={"speed": 0.1})
+    assert resp.status_code == 502
 
 
 def test_move_speed_connection_error(client):
@@ -91,9 +93,9 @@ def test_move_speed_connection_error(client):
     mock_session.put = MagicMock(side_effect=aiohttp.ClientError("timeout"))
     mock_session.closed = False
 
-    with patch("app.teleop_server._get_session", new_callable=AsyncMock, return_value=mock_session):
-        resp = client.put("/move/speed", json={"speed": 0.1})
-        assert resp.status_code == 503
+    teleop_app.state.session = mock_session
+    resp = client.put("/move/speed", json={"speed": 0.1})
+    assert resp.status_code == 503
 
 
 def test_move_speed_defaults(client):
@@ -108,9 +110,9 @@ def test_move_speed_defaults(client):
     mock_session.put = MagicMock(return_value=mock_resp)
     mock_session.closed = False
 
-    with patch("app.teleop_server._get_session", new_callable=AsyncMock, return_value=mock_session):
-        resp = client.put("/move/speed", json={})
-        assert resp.status_code == 200
+    teleop_app.state.session = mock_session
+    resp = client.put("/move/speed", json={})
+    assert resp.status_code == 200
 
 
 def test_move_speed_post(client):
@@ -125,9 +127,9 @@ def test_move_speed_post(client):
     mock_session.put = MagicMock(return_value=mock_resp)
     mock_session.closed = False
 
-    with patch("app.teleop_server._get_session", new_callable=AsyncMock, return_value=mock_session):
-        resp = client.post("/move/speed", json={"linear_dir": 1, "angular_dir": -1})
-        assert resp.status_code == 200
+    teleop_app.state.session = mock_session
+    resp = client.post("/move/speed", json={"linear_dir": 1, "angular_dir": -1})
+    assert resp.status_code == 200
 
 
 def test_move_speed_non_dict_response(client):
@@ -142,10 +144,10 @@ def test_move_speed_non_dict_response(client):
     mock_session.put = MagicMock(return_value=mock_resp)
     mock_session.closed = False
 
-    with patch("app.teleop_server._get_session", new_callable=AsyncMock, return_value=mock_session):
-        resp = client.put("/move/speed", json={"speed": 0.1})
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
+    teleop_app.state.session = mock_session
+    resp = client.put("/move/speed", json={"speed": 0.1})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
 
 
 def test_move_speed_json_parse_error(client):
@@ -160,7 +162,7 @@ def test_move_speed_json_parse_error(client):
     mock_session.put = MagicMock(return_value=mock_resp)
     mock_session.closed = False
 
-    with patch("app.teleop_server._get_session", new_callable=AsyncMock, return_value=mock_session):
-        resp = client.put("/move/speed", json={"speed": 0.1})
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "ok"
+    teleop_app.state.session = mock_session
+    resp = client.put("/move/speed", json={"speed": 0.1})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"

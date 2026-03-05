@@ -136,7 +136,8 @@ async def test_cleanup_failure_does_not_mask_original_error(event_bus_instance):
         status = await handler.handle_navigate_to(_CMD)
 
     assert status.status == NavigationStatusEnum.ERROR
-    assert "start boom" in (status.error_reason or "")
+    # P2-19: error_reason is sanitized (no raw exception strings)
+    assert status.error_reason == "transport_creation_failed"
     orch.delete_transport.assert_awaited_once_with("t-99")
 
 

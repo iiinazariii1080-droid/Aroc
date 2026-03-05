@@ -1,7 +1,7 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
-addopts = "--ignore=tests/test_property_based.py -q --tb=short"
+addopts = "-q --tb=short"
 
 [tool.coverage.run]
 source = [".", "app"]

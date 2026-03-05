@@ -2,6 +2,8 @@
 State store for command registry and status tracking.
 """
 import asyncio
+import logging
+import threading
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 import json
@@ -10,6 +12,26 @@ from domain.models import ActiveTransport, NavigationStatus, PositionStatus, Nav
 from app.config import settings
 from services.persistence_store import JsonPersistenceStore, PersistedCommand, PersistedSession
 from services.reliability_metrics import reliability_metrics
+
+_LOGGER = logging.getLogger(__name__)
+
+# Thread that creates the StateStore instance — used for runtime assertion.
+_OWNER_THREAD: threading.Thread = threading.current_thread()
+
+
+def _assert_owner_thread() -> None:
+    """Raise if called from a thread other than the one that created the store.
+
+    asyncio.Lock is NOT cross-thread safe, so every public async method must
+    run in the same thread (the main event-loop thread).
+    """
+    current = threading.current_thread()
+    if current is not _OWNER_THREAD:
+        raise RuntimeError(
+            f"StateStore accessed from thread {current.name!r} "
+            f"but was created in {_OWNER_THREAD.name!r}. "
+            "asyncio.Lock does not protect across threads."
+        )
 
 
 class StateStore:
@@ -44,6 +66,7 @@ class StateStore:
     
     async def start_persistence(self) -> None:
         """Start background persistence writer task."""
+        _assert_owner_thread()
         if not self._persistence or self._persistence_running:
             return
         self._persistence_running = True
@@ -51,8 +74,36 @@ class StateStore:
         self._persistence_task = asyncio.create_task(self._persistence_writer_loop())
 
     async def stop_persistence(self) -> None:
-        """Stop background persistence writer task."""
+        """Stop background persistence writer task, draining any pending writes first."""
         self._persistence_running = False
+        if self._persistence_task and self._persistence_queue:
+            # Drain remaining operations (best-effort, bounded by timeout).
+            try:
+                deadline = 3.0  # seconds
+                import time as _time
+                t0 = _time.monotonic()
+                while not self._persistence_queue.empty() and (_time.monotonic() - t0) < deadline:
+                    try:
+                        op = self._persistence_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    try:
+                        op_type = op.get("type")
+                        if op_type == "upsert" and self._persistence:
+                            await self._persistence.upsert(op["data"])
+                        elif op_type == "upsert_session" and self._persistence:
+                            await self._persistence.upsert_session(op["data"])
+                        elif op_type == "delete" and self._persistence:
+                            await self._persistence.delete(op["command_id"])
+                        elif op_type == "delete_session" and self._persistence:
+                            await self._persistence.delete_session(op["command_id"])
+                    except Exception:
+                        _LOGGER.debug("Persistence drain: failed to flush op", exc_info=True)
+                remaining = self._persistence_queue.qsize()
+                if remaining:
+                    _LOGGER.warning("Persistence shutdown: %d ops could not be flushed", remaining)
+            except Exception:
+                _LOGGER.debug("Persistence drain failed", exc_info=True)
         if self._persistence_task:
             self._persistence_task.cancel()
             try:
@@ -109,7 +160,7 @@ class StateStore:
                 except Exception:
                     # Never allow persistence failures to break runtime
                     reliability_metrics.inc("persistence.writer.failed")
-                    pass
+                    _LOGGER.warning("Persistence write failed", exc_info=True)
         except asyncio.CancelledError:
             pass
     
@@ -177,18 +228,18 @@ class StateStore:
         state: int,
         target_id: Optional[str] = None
     ) -> ActiveTransport:
-        """
-        Register a new command with its transport.
-        
+        """Register a new command with its transport.
+
         Args:
             command_id: Command ID
             transport_id: Symovo transport ID
             state: Initial transport state
             target_id: Target position ID
-            
+
         Returns:
             ActiveTransport instance
         """
+        _assert_owner_thread()
         async with self._lock:
             # Increment generation if command_id already exists (reuse case)
             existing = self._command_registry.get(command_id)
@@ -198,7 +249,7 @@ class StateStore:
                 command_id=command_id,
                 transport_id=transport_id,
                 state=state,
-                created_at=datetime.now(),
+                created_at=datetime.now(timezone.utc),
                 target_id=target_id,
                 generation=generation
             )
@@ -255,6 +306,7 @@ class StateStore:
     
     async def update_transport_state(self, command_id: str, state: int) -> Optional[ActiveTransport]:
         """Update transport state for a command_id."""
+        _assert_owner_thread()
         transport: Optional[ActiveTransport] = None
         async with self._lock:
             if command_id in self._command_registry:
@@ -278,6 +330,7 @@ class StateStore:
 
     async def set_last_result(self, command_id: str, result: Dict[str, Any]) -> None:
         """Persist last terminal result for command_id."""
+        _assert_owner_thread()
         transport = await self.get_active_transport(command_id)
         if not self._persistence or not transport:
             return
@@ -297,6 +350,7 @@ class StateStore:
     
     async def clear_transport(self, command_id: str) -> bool:
         """Clear transport for a command_id."""
+        _assert_owner_thread()
         async with self._lock:
             if command_id in self._command_registry:
                 del self._command_registry[command_id]
@@ -313,8 +367,8 @@ class StateStore:
                 cleared = False
         # Enqueue persistence operations (non-blocking, best-effort)
         if cleared and self._persistence:
+            # delete() already removes both command and session from persistence
             self._enqueue_persistence({"type": "delete", "command_id": command_id})
-            self._enqueue_persistence({"type": "delete_session", "command_id": command_id})
         return cleared
 
     async def clear_all_commands(self) -> int:
@@ -330,6 +384,7 @@ class StateStore:
             self._current_command_id = None
             # Drop last navigation status so UI doesn't keep showing an old goal_id
             self._last_navigation_status = None
+            self._last_navigation_status_ts = 0.0
 
         # Enqueue persistence operations (non-blocking, best-effort)
         if self._persistence:
@@ -339,6 +394,7 @@ class StateStore:
         return len(command_ids)
 
     async def upsert_session(self, session: NavigationSession) -> None:
+        _assert_owner_thread()
         async with self._lock:
             self._sessions[session.command_id] = session
         # Enqueue persistence operation (non-blocking, best-effort)
@@ -363,6 +419,7 @@ class StateStore:
             return self._sessions.get(command_id)
 
     async def clear_session(self, command_id: str) -> None:
+        _assert_owner_thread()
         async with self._lock:
             self._sessions.pop(command_id, None)
         # Enqueue persistence operation (non-blocking, best-effort)
@@ -442,7 +499,10 @@ class StateStore:
         """Clear all stored state (for testing/restart)."""
         async with self._lock:
             self._command_registry.clear()
+            self._sessions.clear()
+            self._current_command_id = None
             self._last_navigation_status = None
+            self._last_navigation_status_ts = 0.0
             self._last_position_status = None
             self._last_raw_pose = None
             self._last_raw_pose_ts = 0.0

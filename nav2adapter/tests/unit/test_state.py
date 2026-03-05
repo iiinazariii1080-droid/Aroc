@@ -21,7 +21,8 @@ async def test_spawn_bg_task_success():
     await task
     assert task.done()
     assert task.result() == "done"
-    assert task in app.state._bg_tasks
+    # Completed tasks are auto-removed from _bg_tasks to avoid memory leaks
+    assert task not in app.state._bg_tasks
 
 
 @pytest.mark.asyncio

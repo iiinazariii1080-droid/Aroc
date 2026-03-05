@@ -14,13 +14,15 @@ from typing import Dict, Any
 
 
 class ReliabilityMetrics:
+    _MAX_METRIC_KEYS = 500
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._counters: Dict[str, int] = defaultdict(int)
         self._duration_count: Dict[str, int] = defaultdict(int)
         self._duration_sum_s: Dict[str, float] = defaultdict(float)
         self._duration_max_s: Dict[str, float] = defaultdict(float)
-        self._events: Dict[str, deque[tuple[float, int]]] = defaultdict(deque)
+        self._events: Dict[str, deque[tuple[float, int]]] = defaultdict(lambda: deque(maxlen=50000))
         self._rate_window_max_s = 300.0
         self._started_at = time.time()
 
@@ -30,6 +32,9 @@ class ReliabilityMetrics:
         now = time.time()
         d = int(delta)
         with self._lock:
+            # Prevent unbounded key growth from dynamic metric names
+            if key not in self._counters and len(self._counters) >= self._MAX_METRIC_KEYS:
+                return
             self._counters[key] += d
             q = self._events[key]
             q.append((now, d))

@@ -81,6 +81,16 @@
     }
 
     /**
+     * Escalate the severity of the current pending request (e.g. after long tab-hide the Janus session
+     * is likely dead, so we want RECREATE_SESSION immediately). No-op if nothing is pending.
+     * @param {number} severity
+     */
+    escalateSeverity(severity){
+      if (!this._pending) return;
+      this._pending.severity = Math.max(this._pending.severity, Number(severity) || 1);
+    }
+
+    /**
      * Called by the controller when recovery condition is met (webrtc up + data plane healthy).
      * If we are waiting after an attempt (settle window), completes successfully and clears state.
      * Idempotent if not in that state.
@@ -189,15 +199,17 @@
 
     /**
      * Request recovery (idempotent & coalescing).
+     * ALWAYS records _pending (reason + severity) so that a later resumeIfPending() can
+     * pick it up — e.g. when the tab was hidden at the time of the request.
+     * Scheduling only happens when shouldContinue() is true.
      * @param {string} reason
      * @param {number} severity
      */
     request(reason, severity){
-      if (!this._ctx.shouldContinue()) return;
-
       const r = String(reason || 'unknown');
       const sev = Number(severity) || 1;
 
+      // Always record intent — even when scheduling is blocked (tab hidden).
       if (!this._pending) {
         this._pending = { reason: r, severity: sev };
       } else {
@@ -205,6 +217,9 @@
         this._pending.severity = Math.max(this._pending.severity, sev);
         this._pending.reason = r || this._pending.reason;
       }
+
+      // Only schedule when predicate allows (tab visible, autonomous, desired, not ERROR).
+      if (!this._ctx.shouldContinue()) return;
 
       // Already scheduled or running (latch: at most one reconnect in progress).
       if (this._inFlight || this._scheduleTimer) {
@@ -325,7 +340,12 @@
         }, settleStartTimeoutMs);
       } catch (e) {
         if (timeoutId != null) this.clock.clearTimeout(timeoutId);
-        this.log.warn('reconnect_attempt_failed', { attempt: this._attempt, error: String(e?.message || e), token });
+        const errMsg = String(e?.message || e);
+        this.log.warn('reconnect_attempt_failed', { attempt: this._attempt, error: errMsg, token });
+        // On timeout, escalate to HARD so next attempt skips straight to RECREATE_SESSION.
+        if (errMsg === 'reconnect_attempt_timeout' && this._pending) {
+          this._pending.severity = Math.max(this._pending.severity, 3); // RecoverySeverity.HARD
+        }
         this._inFlight = false;
         this._scheduleNext();
       }

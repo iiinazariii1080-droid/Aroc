@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     symovo_car_ip: str = Field(default="192.168.1.100")
     symovo_robot_number: int = Field(default=15)
     symovo_timeout_seconds: int = Field(default=10)
-    symovo_operation_timeout_seconds: Optional[float] = Field(default=None)
+    symovo_operation_timeout_seconds: Optional[float] = Field(default=30.0)
     symovo_motion_timeout_seconds: Optional[float] = Field(default=None)
     symovo_allow_invalid_certs: bool = Field(default=True)
     # If true, backend will try to call Symovo "drive_mode" endpoint when drive_ready is false
@@ -26,6 +26,19 @@ class Settings(BaseSettings):
     # If true, backend will clear ALL transports on the controller right before starting *each* new navigateTo
     # (destructive). This keeps Symovo "history" clean and avoids stale transports affecting UI/recovery.
     symovo_clear_transports_before_navigate: bool = Field(default=False)
+
+    # When laser_timeout or waiting_for_scanner is active at navigation start,
+    # wait up to this many seconds for the flag to clear before failing.
+    # New commands arriving during the wait replace the pending one (no queue).
+    laser_timeout_wait_s: float = Field(default=30.0)
+    # Polling interval while waiting for scanner flags to clear.
+    laser_timeout_poll_interval_s: float = Field(default=2.0)
+
+    # When an HTTP command arrives but MQTT is temporarily disconnected,
+    # wait up to this many seconds for the background reconnect to succeed
+    # before returning 503.  Set to 0 to fail immediately (old behaviour).
+    mqtt_command_retry_wait_s: float = Field(default=15.0)
+    mqtt_command_retry_poll_s: float = Field(default=0.5)
 
     # If true, backend will consider navigation "arrived" when robot is near goal for a while,
     # even if Symovo transport never transitions to FINISHED (prevents infinite 99%).
@@ -96,7 +109,7 @@ class Settings(BaseSettings):
 
     # Teleop (joystick/keyboard): отдельный HTTP‑сервер в потоке для управления по speed/angular_speed.
     teleop_enabled: bool = Field(default=True)
-    teleop_host: str = Field(default="0.0.0.0")
+    teleop_host: str = Field(default="127.0.0.1")
     teleop_port: int = Field(default=7906)
     teleop_default_linear_speed: float = Field(default=0.1)
     teleop_default_angular_speed: float = Field(default=0.5)
@@ -120,9 +133,68 @@ class Settings(BaseSettings):
         """Resolve events topic using current robot_id."""
         base = self.mqtt_events_prefix.replace("{robot_id}", self.robot_id)
         return f"{base}/{kind}"
-    
+
+
+class TeleopConfig:
+    """Thread-safe container for mutable teleop parameters.
+
+    Reads/writes are protected by a threading.Lock so they can be safely
+    accessed from both the main event-loop thread and the teleop server thread.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        import threading
+        self._lock = threading.Lock()
+        self._duration = float(settings.teleop_default_duration)
+        self._linear_speed = float(settings.teleop_default_linear_speed)
+        self._angular_speed = float(settings.teleop_default_angular_speed)
+
+    # -- atomic getters ------------------------------------------------
+    @property
+    def duration(self) -> float:
+        with self._lock:
+            return self._duration
+
+    @property
+    def linear_speed(self) -> float:
+        with self._lock:
+            return self._linear_speed
+
+    @property
+    def angular_speed(self) -> float:
+        with self._lock:
+            return self._angular_speed
+
+    # -- atomic setters ------------------------------------------------
+    @duration.setter
+    def duration(self, v: float) -> None:
+        with self._lock:
+            self._duration = float(v)
+
+    @linear_speed.setter
+    def linear_speed(self, v: float) -> None:
+        with self._lock:
+            self._linear_speed = float(v)
+
+    @angular_speed.setter
+    def angular_speed(self, v: float) -> None:
+        with self._lock:
+            self._angular_speed = float(v)
+
+    def snapshot(self) -> dict:
+        """Return current values as a dict (single lock acquisition)."""
+        with self._lock:
+            return {
+                "duration": self._duration,
+                "linear_m_s": self._linear_speed,
+                "angular_rad_s": self._angular_speed,
+            }
+
 # Глобальный экземпляр настроек
 settings = Settings()
+
+# Thread-safe mutable teleop parameters (shared between main loop and teleop thread)
+teleop_config = TeleopConfig(settings)
 
 
 def log_config_summary() -> None:

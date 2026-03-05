@@ -358,6 +358,13 @@ class GripperStatusResponse(BaseModel):
     active: bool
     feedback: str
     vacuum_level: Optional[float] = None
+    part_present: bool = False
+    part_secured: bool = False
+    energy_saving: bool = False
+    motor_stall: bool = False
+    pcb_temperature: int = 0
+    membrane_hours: int = 0
+    membrane_warn: bool = False
     sensor_supported: bool = True
     sensor_disabled_reason: Optional[str] = None
     activated_at: Optional[float] = None
@@ -437,6 +444,13 @@ async def gripper_status(request: Request):
         active=snap.get("active", False),
         feedback=snap.get("feedback", "UNKNOWN"),
         vacuum_level=snap.get("vacuum_level"),
+        part_present=bool(snap.get("part_present", False)),
+        part_secured=bool(snap.get("part_secured", False)),
+        energy_saving=bool(snap.get("energy_saving", False)),
+        motor_stall=bool(snap.get("motor_stall", False)),
+        pcb_temperature=int(snap.get("pcb_temperature", 0) or 0),
+        membrane_hours=int(snap.get("membrane_hours", 0) or 0),
+        membrane_warn=bool(snap.get("membrane_warn", False)),
         sensor_supported=bool(snap.get("sensor_supported", True)),
         sensor_disabled_reason=snap.get("sensor_disabled_reason"),
         activated_at=snap.get("activated_at"),

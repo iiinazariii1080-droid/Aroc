@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import ssl
 import time
 from typing import Optional, Callable, Any, Awaitable, Dict
@@ -41,7 +42,7 @@ class MqttAdapter:
         self,
         robot_id: Optional[str] = None,
         broker_host: Optional[str] = None,
-        broker_port: int = 8883,
+        broker_port: Optional[int] = None,
         username: Optional[str] = None,
         password: Optional[str] = None,
         use_tls: bool = False,
@@ -53,17 +54,18 @@ class MqttAdapter:
             )
         self.robot_id = robot_id or settings.robot_id
         self.broker_host = broker_host or settings.mqtt_broker_host
-        # Default port: 1883 (non-TLS) or 8883 (TLS)
+        # Port resolution: explicit arg > settings > auto-detect from TLS
+        effective_tls = use_tls if broker_host else settings.mqtt_use_tls
         if broker_port is not None:
             self.broker_port = broker_port
         elif settings.mqtt_broker_port is not None:
             self.broker_port = settings.mqtt_broker_port
         else:
             # Auto-detect based on TLS
-            self.broker_port = 8883 if (use_tls if broker_host else settings.mqtt_use_tls) else 1883
+            self.broker_port = 8883 if effective_tls else 1883
         self.username = username or settings.mqtt_username
-        self.password = password or settings.mqtt_password
-        self.use_tls = use_tls if broker_host else settings.mqtt_use_tls
+        self._password = password or settings.mqtt_password
+        self.use_tls = effective_tls
         self.client_id = client_id or settings.mqtt_client_id or f"aehub_backend_{self.robot_id}"
         
         self.client: Optional[Client] = None
@@ -81,6 +83,17 @@ class MqttAdapter:
         """Get MQTT topic for a command."""
         return f"aroc/robot/{self.robot_id}/commands/{command}"
     
+    @property
+    def password(self) -> Optional[str]:
+        """Backward-compatible accessor (private storage keeps it out of repr)."""
+        return self._password
+
+    def __repr__(self) -> str:
+        return (
+            f"MqttAdapter(broker={self.broker_host}:{self.broker_port}, "
+            f"tls={self.use_tls}, robot_id={self.robot_id!r})"
+        )
+
     def _get_status_topic(self, status_type: str) -> str:
         """Get MQTT topic for a status."""
         return f"aroc/robot/{self.robot_id}/status/{status_type}"
@@ -108,8 +121,15 @@ class MqttAdapter:
         self.client = None
         if old_client is not None:
             try:
-                # Schedule cleanup in a fire-and-forget task to avoid blocking
-                asyncio.get_event_loop().create_task(self._safe_close_client(old_client))
+                # Schedule cleanup in a tracked task to avoid blocking
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None:
+                    task = loop.create_task(self._safe_close_client(old_client))
+                    self._subscribe_tasks.append(task)
+                    task.add_done_callback(lambda t: self._subscribe_tasks.remove(t) if t in self._subscribe_tasks else None)
             except RuntimeError:
                 pass  # No running loop (shutdown)
         
@@ -117,7 +137,6 @@ class MqttAdapter:
             return  # Already logged
         
         # Rate-limited logging to avoid spam
-        import time
         now = time.time()
         if now - self._last_disconnect_log_time >= self._disconnect_log_interval:
             if exc:
@@ -148,11 +167,12 @@ class MqttAdapter:
             _LOGGER.warning("MQTT broker host not configured, skipping connection")
             return
         
-        # Auto-detect TLS requirement for common ports
+        # Warn about TLS mismatch but don't silently override user config
         if self.broker_port == 8883 and not self.use_tls:
-            _LOGGER.warning("Port 8883 typically requires TLS. Setting MQTT_USE_TLS=true is recommended.")
-            # Force TLS for port 8883 even if not explicitly set
-            self.use_tls = True
+            _LOGGER.warning(
+                "Port 8883 typically requires TLS but MQTT_USE_TLS is false. "
+                "Set MQTT_USE_TLS=true if broker requires TLS."
+            )
         
         try:
             reliability_metrics.inc("mqtt.connect.attempt")
@@ -169,11 +189,11 @@ class MqttAdapter:
                     default_ca_path = os.path.join(project_root, "ca.crt")
                     if os.path.exists(default_ca_path):
                         ca_cert_path = default_ca_path
-                        _LOGGER.info(f"Auto-detected CA certificate: {ca_cert_path}")
+                        _LOGGER.info("Auto-detected CA certificate: %s", ca_cert_path)
                 
                 if ca_cert_path and os.path.exists(ca_cert_path):
                     # Use CA certificate for validation (preferred method)
-                    _LOGGER.info(f"Using CA certificate for MQTT TLS: {ca_cert_path}")
+                    _LOGGER.info("Using CA certificate for MQTT TLS: %s", ca_cert_path)
                     tls_ctx = ssl.create_default_context(cafile=ca_cert_path)
                     # Keep default verification (verify_mode=CERT_REQUIRED, check_hostname=True)
                 elif settings.mqtt_tls_insecure:
@@ -208,8 +228,8 @@ class MqttAdapter:
             # Add credentials only if provided
             if self.username:
                 base_kwargs["username"] = self.username
-            if self.password:
-                base_kwargs["password"] = self.password
+            if self._password:
+                base_kwargs["password"] = self._password
 
             # aiomqtt API differs between versions. Try common parameter names.
             try:
@@ -224,7 +244,7 @@ class MqttAdapter:
             tls_info = f"TLS: {self.use_tls}"
             if self.use_tls and tls_ctx:
                 tls_info += f", verify_mode={tls_ctx.verify_mode}, check_hostname={tls_ctx.check_hostname}"
-            _LOGGER.info(f"Attempting to connect to MQTT broker at {self.broker_host}:{self.broker_port} ({tls_info})")
+            _LOGGER.info("Attempting to connect to MQTT broker at %s:%s (%s)", self.broker_host, self.broker_port, tls_info)
             
             # Try connection with current TLS settings
             try:
@@ -232,59 +252,40 @@ class MqttAdapter:
                 await asyncio.wait_for(self.client.__aenter__(), timeout=self._connect_timeout_s)
                 self._connected = True
                 reliability_metrics.inc("mqtt.connect.success")
-                _LOGGER.info(f"Successfully connected to MQTT broker at {self.broker_host}:{self.broker_port}")
+                _LOGGER.info("Successfully connected to MQTT broker at %s:%s", self.broker_host, self.broker_port)
             except Exception as ssl_error:
-                # If CA cert was used but failed, try fallback to insecure mode
+                # If CA cert was used but failed, log clear error and DO NOT auto-fallback.
+                # Auto-fallback to insecure mode is a MITM vector in production.
+                # Users must explicitly set MQTT_TLS_INSECURE=true to disable verification.
                 error_str = str(ssl_error).lower()
                 if (ca_cert_path and os.path.exists(ca_cert_path) and 
                     not tls_insecure and 
                     ("certificate verify failed" in error_str or "ssl" in error_str or "cert" in error_str)):
-                    _LOGGER.warning(
-                        f"CA certificate validation failed ({ssl_error}), falling back to insecure mode. "
-                        "Set MQTT_TLS_INSECURE=true explicitly to suppress this warning."
+                    _LOGGER.error(
+                        "CA certificate validation failed: %s. "
+                        "To disable verification, set MQTT_TLS_INSECURE=true explicitly. "
+                        "Auto-fallback to insecure mode is disabled for security.",
+                        ssl_error,
                     )
-                    # Retry with insecure mode
-                    tls_ctx = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
-                    tls_ctx.check_hostname = False
-                    tls_ctx.verify_mode = ssl.CERT_NONE
-                    tls_insecure = True
-                    
-                    # Recreate client with insecure TLS
-                    base_kwargs["tls_context"] = tls_ctx
-                    try:
-                        base_kwargs["tls_insecure"] = True
-                    except TypeError:
-                        pass
-                    
-                    try:
-                        self.client = Client(**base_kwargs, client_id=self.client_id)  # type: ignore[arg-type]
-                    except TypeError:
-                        try:
-                            self.client = Client(**base_kwargs, identifier=self.client_id)  # type: ignore[arg-type]
-                        except TypeError:
-                            self.client = Client(**base_kwargs)  # type: ignore[arg-type]
-                    
-                    _LOGGER.info(f"Retrying connection with insecure TLS (verify_mode=CERT_NONE)")
-                    await asyncio.wait_for(self.client.__aenter__(), timeout=self._connect_timeout_s)
-                    self._connected = True
-                    reliability_metrics.inc("mqtt.connect.success")
-                    _LOGGER.warning(f"Connected to MQTT broker with certificate verification disabled")
+                    reliability_metrics.inc("mqtt.connect.tls_validation_failed")
+                    self._connected = False
+                    raise
                 else:
                     # Re-raise if not an SSL/cert error or if already in insecure mode
                     raise
         except asyncio.TimeoutError:
             reliability_metrics.inc("mqtt.connect.failure")
-            _LOGGER.error(f"MQTT connection timeout to {self.broker_host}:{self.broker_port}. Check if broker is running and accessible.")
+            _LOGGER.error("MQTT connection timeout to %s:%s. Check if broker is running and accessible.", self.broker_host, self.broker_port)
             self._connected = False
             raise
         except ConnectionRefusedError:
             reliability_metrics.inc("mqtt.connect.failure")
-            _LOGGER.error(f"MQTT broker refused connection at {self.broker_host}:{self.broker_port}. Check credentials and port.")
+            _LOGGER.error("MQTT broker refused connection at %s:%s. Check credentials and port.", self.broker_host, self.broker_port)
             self._connected = False
             raise
         except Exception as e:
             reliability_metrics.inc("mqtt.connect.failure")
-            _LOGGER.error(f"Failed to connect to MQTT broker at {self.broker_host}:{self.broker_port}: {type(e).__name__}: {e}")
+            _LOGGER.error("Failed to connect to MQTT broker at %s:%s: %s", self.broker_host, self.broker_port, e)
             self._connected = False
             raise
     
@@ -308,13 +309,13 @@ class MqttAdapter:
         
         try:
             await self.client.__aexit__(None, None, None)
-            self._connected = False
             reliability_metrics.inc("mqtt.disconnect.success")
             _LOGGER.info("Disconnected from MQTT broker")
         except Exception as e:
             reliability_metrics.inc("mqtt.disconnect.failure")
-            _LOGGER.error(f"Error disconnecting from MQTT broker: {e}")
+            _LOGGER.error("Error disconnecting from MQTT broker: %s", e)
         finally:
+            self._connected = False
             self.client = None
     
     def _decode_json_payload(self, payload: Any, *, topic: str) -> Optional[dict]:
@@ -391,9 +392,8 @@ class MqttAdapter:
                                     "(retrying in %.1fs)",
                                     consecutive_failures, e, backoff,
                                 )
-                            await asyncio.sleep(backoff)
+                            await asyncio.sleep(backoff * random.uniform(0.75, 1.25))
                             backoff = min(backoff * 2, max_backoff)
-                            continue
                     
                     # ── subscribe ──────────────────────────────────
                     try:
@@ -452,6 +452,8 @@ class MqttAdapter:
                     backoff = min(backoff * 2, max_backoff)
 
         self._command_consumer_task = asyncio.create_task(message_handler())
+        # P3-14: prune finished tasks before appending to avoid unbounded growth.
+        self._subscribe_tasks = [t for t in self._subscribe_tasks if not t.done()]
         self._subscribe_tasks.append(self._command_consumer_task)
     
     async def publish_navigation_status(self, status: dict) -> None:
@@ -480,7 +482,7 @@ class MqttAdapter:
                 "mqtt.publish.navigation.latency_s",
                 time.perf_counter() - started,
             )
-            _LOGGER.debug(f"[MQTT OUT] {topic} -> {payload}")
+            _LOGGER.debug("[MQTT OUT] %s -> %s", topic, payload)
         except (MqttCodeError, OSError) as e:
             # Connection lost - mark disconnected and silently return (telemetry can be lost)
             reliability_metrics.inc("mqtt.publish.navigation.failure")
@@ -517,7 +519,7 @@ class MqttAdapter:
                 "mqtt.publish.position.latency_s",
                 time.perf_counter() - started,
             )
-            _LOGGER.debug(f"[MQTT OUT] {topic} -> {payload}")
+            _LOGGER.debug("[MQTT OUT] %s -> %s", topic, payload)
         except (MqttCodeError, OSError) as e:
             # Connection lost - mark disconnected and silently return (telemetry can be lost)
             reliability_metrics.inc("mqtt.publish.position.failure")
@@ -549,7 +551,7 @@ class MqttAdapter:
                 "mqtt.publish.event.latency_s",
                 time.perf_counter() - started,
             )
-            _LOGGER.debug(f"[MQTT OUT] {topic} -> {payload}")
+            _LOGGER.debug("[MQTT OUT] %s -> %s", topic, payload)
         except (MqttCodeError, OSError) as e:
             # Connection lost - mark disconnected and silently return (events can be lost)
             reliability_metrics.inc("mqtt.publish.event.failure")
@@ -582,7 +584,7 @@ class MqttAdapter:
                 "mqtt.publish.command.latency_s",
                 time.perf_counter() - started,
             )
-            _LOGGER.debug(f"[MQTT OUT] {topic} -> {payload}")
+            _LOGGER.debug("[MQTT OUT] %s -> %s", topic, payload)
         except MqttCodeError as e:
             # rc=4: not connected
             reliability_metrics.inc("mqtt.publish.command.failure")

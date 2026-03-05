@@ -38,9 +38,14 @@ class AppServices:
 
     # Background tasks spawned during startup (recovery, destructive cleanup, etc.)
     bg_tasks: list[asyncio.Task]
+    _stopped: bool = False
 
     async def stop(self) -> None:
         """Best-effort stop of all services owned by the container."""
+        if self._stopped:
+            _LOGGER.debug("AppServices.stop() called again — skipping")
+            return
+        self._stopped = True
         # Cancel background tasks first (they often call symovo/mqtt).
         for t in list(self.bg_tasks):
             if not t.done():
@@ -50,7 +55,7 @@ class AppServices:
                 await t
             except asyncio.CancelledError:
                 pass
-            except BaseException:
+            except Exception:
                 _LOGGER.debug("Background task failed during shutdown", exc_info=True)
 
         # Stop publisher/dispatcher.

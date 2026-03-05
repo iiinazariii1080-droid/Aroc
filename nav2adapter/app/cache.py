@@ -16,9 +16,10 @@ T = TypeVar('T')
 class SimpleCache:
     """Простой in-memory кеш с TTL."""
     
-    def __init__(self, default_ttl: int = 300):
+    def __init__(self, default_ttl: int = 300, max_size: int = 10_000):
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._default_ttl = default_ttl
+        self._max_size = max_size
         self._lock = asyncio.Lock()
     
     async def get(self, key: str) -> Optional[Any]:
@@ -35,6 +36,10 @@ class SimpleCache:
     async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         """Установить значение в кеш."""
         async with self._lock:
+            # Evict oldest entry if at capacity and this is a new key
+            if key not in self._cache and len(self._cache) >= self._max_size:
+                oldest_key = min(self._cache, key=lambda k: self._cache[k]['expires_at'])
+                del self._cache[oldest_key]
             ttl = ttl or self._default_ttl
             self._cache[key] = {
                 'value': value,
@@ -55,6 +60,46 @@ class SimpleCache:
 # Глобальный экземпляр кеша
 cache = SimpleCache(default_ttl=settings.cache_ttl_seconds)
 
+# Background eviction task (started lazily on first use)
+_eviction_task: Any = None
+
+
+async def _eviction_loop() -> None:
+    """Periodically remove expired cache entries to prevent unbounded memory growth."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            now = time.time()
+            async with cache._lock:
+                expired = [k for k, v in cache._cache.items() if now >= v['expires_at']]
+                for k in expired:
+                    cache._cache.pop(k, None)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass  # best-effort
+
+
+def ensure_eviction_task() -> None:
+    """Start the background eviction task if not already running."""
+    global _eviction_task
+    if _eviction_task is None or (hasattr(_eviction_task, 'done') and _eviction_task.done()):
+        try:
+            _eviction_task = asyncio.create_task(_eviction_loop())
+        except RuntimeError:
+            pass  # No running loop
+
+
+def cancel_eviction_task() -> None:
+    """Cancel the background eviction task (call during shutdown)."""
+    global _eviction_task
+    if _eviction_task is not None and not _eviction_task.done():
+        try:
+            _eviction_task.cancel()
+        except RuntimeError:
+            pass  # Event loop already closed
+    _eviction_task = None
+
 
 def cached(ttl: Optional[int] = None, key_prefix: str = ""):
     """
@@ -67,6 +112,7 @@ def cached(ttl: Optional[int] = None, key_prefix: str = ""):
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @wraps(func)
         async def wrapper(*args, **kwargs) -> T:
+            ensure_eviction_task()
             # Создаем устойчивый ключ кеша:
             # - не используем встроенный hash() (salted per-process)
             # - не включаем repr(self) (адрес в памяти) как часть ключа

@@ -76,9 +76,9 @@ class StatusPublisher:
             self._tasks.append(status_task)
             _LOGGER.debug("Status cache watcher task created")
             
-            _LOGGER.info(f"Status publisher started with {len(self._tasks)} background task(s)")
+            _LOGGER.info("Status publisher started with %d background task(s)", len(self._tasks))
         except Exception as e:
-            _LOGGER.error(f"Failed to start status publisher tasks: {e}", exc_info=True)
+            _LOGGER.error("Failed to start status publisher tasks: %s", e, exc_info=True)
             self._running = False
             raise
     
@@ -183,20 +183,20 @@ class StatusPublisher:
                                     )
                                 )
                         except Exception as e:
-                            _LOGGER.warning(f"Failed to publish idle heartbeat: {e}")
+                            _LOGGER.warning("Failed to publish idle heartbeat: %s", e)
                         last_idle = now
 
-                # Check more frequently to catch cancellations quickly
-                await asyncio.sleep(0.1)
+                # Adaptive sleep: poll fast when commands are active, slow when idle.
+                await asyncio.sleep(0.1 if active_commands else 1.0)
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                _LOGGER.error(f"Transport manager error: {e}", exc_info=True)
+                _LOGGER.error("Transport manager error: %s", e, exc_info=True)
                 await asyncio.sleep(1.0)
 
     async def _watch_transport(self, *, command_id: str, transport_id: str) -> None:
         """Long-poll a single transport and emit AE.HUB events + status updates."""
-        _LOGGER.info(f"Watching transport {transport_id} for command {command_id}")
+        _LOGGER.info("Watching transport %s for command %s", transport_id, command_id)
         progress_heartbeat_interval = 1.0 / max(settings.navigation_status_hz, 0.1)
         last_progress = 0.0
         # If long-poll never returns a terminal state, we still need a periodic refresh.
@@ -213,11 +213,11 @@ class StatusPublisher:
         # Capture generation token at start to prevent stale publications
         initial_transport = await state_store.get_active_transport(command_id)
         if not initial_transport or initial_transport.transport_id != transport_id:
-            _LOGGER.info(f"Transport {transport_id} for command {command_id} is not active, stopping watcher")
+            _LOGGER.info("Transport %s for command %s is not active, stopping watcher", transport_id, command_id)
             return
         expected_generation = initial_transport.generation
 
-        async def _normalize_transport_payload(payload: Any) -> Dict[str, Any]:
+        def _normalize_transport_payload(payload: Any) -> Dict[str, Any]:
             if isinstance(payload, dict) and "result" in payload and isinstance(payload["result"], dict):
                 return payload["result"]
             return payload if isinstance(payload, dict) else {}
@@ -229,6 +229,29 @@ class StatusPublisher:
                 # Symovo expects string cursor
                 since_token = str(ts)
 
+        # ── Initial state fetch ──────────────────────────────────────
+        # Seed current state + since_token BEFORE entering the long-poll loop.
+        # Without this, a transport that transitions (e.g. → ERROR) between
+        # transport_start() and the watcher's first poll (since="now") would
+        # go unnoticed for up to transport_watch_timeout (30 s).
+        try:
+            init_resp = await self.symovo_client.transport_get_uncached(transport_id)
+            init_data = _normalize_transport_payload(init_resp)
+            if isinstance(init_data, dict) and init_data:
+                _maybe_update_since_from_transport(init_data)
+                init_state = init_data.get("state")
+                if isinstance(init_state, int):
+                    await state_store.update_transport_state(command_id, init_state)
+                    if NavigationStateMachine.is_terminal_state(init_state):
+                        _LOGGER.info(
+                            "Transport %s already terminal (state=%s) at watcher start",
+                            transport_id, init_state,
+                        )
+                        # Fall through to the main loop which will process terminal on first iteration.
+                last_state_refresh = time.time()
+        except Exception as e:
+            _LOGGER.debug("Initial transport fetch failed for %s: %s (will rely on long-poll)", transport_id, e)
+
         while self._running:
             try:
                 # CRITICAL: Check if transport is still active before each long-poll.
@@ -236,10 +259,10 @@ class StatusPublisher:
                 # Also check generation token to prevent stale publications.
                 active_transport = await state_store.get_active_transport(command_id)
                 if not active_transport or active_transport.transport_id != transport_id:
-                    _LOGGER.info(f"Transport {transport_id} for command {command_id} is no longer active, stopping watcher")
+                    _LOGGER.info("Transport %s for command %s is no longer active, stopping watcher", transport_id, command_id)
                     break
                 if active_transport.generation != expected_generation:
-                    _LOGGER.info(f"Transport {transport_id} for command {command_id} generation changed ({expected_generation} -> {active_transport.generation}), stopping watcher")
+                    _LOGGER.info("Transport %s for command %s generation changed (%s -> %s), stopping watcher", transport_id, command_id, expected_generation, active_transport.generation)
                     break
 
                 # P0-1 fix: Check if position-watcher flagged force-arrival.
@@ -313,7 +336,7 @@ class StatusPublisher:
                     if now - last_state_refresh >= state_refresh_interval_s:
                         try:
                             refreshed = await self.symovo_client.transport_get_uncached(transport_id)
-                            refreshed_data = await _normalize_transport_payload(refreshed)
+                            refreshed_data = _normalize_transport_payload(refreshed)
                             if refreshed_data == {}:
                                 await state_store.clear_transport(command_id)
                                 break
@@ -335,10 +358,10 @@ class StatusPublisher:
                         # Also check generation token to prevent stale publications
                         active_transport = await state_store.get_active_transport(command_id)
                         if not active_transport or active_transport.transport_id != transport_id:
-                            _LOGGER.info(f"Transport {transport_id} for command {command_id} is no longer active during heartbeat, stopping watcher")
+                            _LOGGER.info("Transport %s for command %s is no longer active during heartbeat, stopping watcher", transport_id, command_id)
                             break
                         if active_transport.generation != expected_generation:
-                            _LOGGER.info(f"Transport {transport_id} for command {command_id} generation changed during heartbeat ({expected_generation} -> {active_transport.generation}), stopping watcher")
+                            _LOGGER.info("Transport %s for command %s generation changed during heartbeat (%s -> %s), stopping watcher", transport_id, command_id, expected_generation, active_transport.generation)
                             break
                         
                         if now - last_progress >= progress_heartbeat_interval:
@@ -366,7 +389,7 @@ class StatusPublisher:
                             last_progress = now
                         continue
 
-                resp = await _normalize_transport_payload(resp)
+                resp = _normalize_transport_payload(resp)
 
                 if resp == {}:
                     # deleted
@@ -378,10 +401,10 @@ class StatusPublisher:
                 # Also check generation token to prevent stale publications
                 active_transport = await state_store.get_active_transport(command_id)
                 if not active_transport or active_transport.transport_id != transport_id:
-                    _LOGGER.info(f"Transport {transport_id} for command {command_id} was cancelled during long-poll, stopping watcher")
+                    _LOGGER.info("Transport %s for command %s was cancelled during long-poll, stopping watcher", transport_id, command_id)
                     break
                 if active_transport.generation != expected_generation:
-                    _LOGGER.info(f"Transport {transport_id} for command {command_id} generation changed during long-poll ({expected_generation} -> {active_transport.generation}), stopping watcher")
+                    _LOGGER.info("Transport %s for command %s generation changed during long-poll (%s -> %s), stopping watcher", transport_id, command_id, expected_generation, active_transport.generation)
                     break
 
                 transport_data = resp if isinstance(resp, dict) else {}
@@ -401,7 +424,7 @@ class StatusPublisher:
                         state_flags = agv_status.get("state_flags", {}) if isinstance(agv_status, dict) else {}
                         error_reason = ErrorMapper.get_error_reason(transport_data=transport_data, state_flags=state_flags)
                     except Exception as e:
-                        _LOGGER.warning(f"Failed to fetch status for error details: {e}")
+                        _LOGGER.warning("Failed to fetch status for error details: %s", e)
                         error_reason = ErrorMapper.get_error_reason(transport_data=transport_data, state_flags=None)
 
                 await self._publish_navigation_status(
@@ -519,7 +542,8 @@ class StatusPublisher:
 
                 backoff = min(base_backoff * (2 ** min(consecutive_errors - 1, 5)), max_backoff)
                 _LOGGER.warning(
-                    f"Transport watcher error for {transport_id} (attempt {consecutive_errors}), backing off {backoff:.1f}s: {e}"
+                    "Transport watcher error for %s (attempt %d), backing off %.1fs: %s",
+                    transport_id, consecutive_errors, backoff, e,
                 )
                 await asyncio.sleep(backoff)
 
@@ -537,23 +561,32 @@ class StatusPublisher:
         Caches raw data in state_store as a side-effect.
         """
         try:
-            pose_data = await self.symovo_client.pose_uncached()
+            pose_data = await asyncio.wait_for(
+                self.symovo_client.pose_uncached(),
+                timeout=settings.symovo_timeout_seconds,
+            )
             await state_store.set_last_raw_pose(pose_data if isinstance(pose_data, dict) else {})
             return pose_data
+        except asyncio.TimeoutError:
+            _LOGGER.warning("pose_uncached() timed out after %ss", settings.symovo_timeout_seconds)
+            raise
         except Exception as e:
             error_str = str(e).lower()
             is_expected = any(s in error_str for s in ("404", "empty response", "not found"))
             if is_expected:
                 try:
                     _LOGGER.debug("pose() endpoint failed, trying status() as fallback")
-                    status_data = await self.symovo_client.status_uncached()
+                    status_data = await asyncio.wait_for(
+                        self.symovo_client.status_uncached(),
+                        timeout=settings.symovo_timeout_seconds,
+                    )
                     if isinstance(status_data, dict):
                         _LOGGER.debug("Successfully retrieved pose from status() endpoint")
                         await state_store.set_last_raw_status(status_data)
                         await state_store.set_last_raw_pose(status_data)
                         return status_data
                 except Exception:
-                    pass
+                    _LOGGER.debug("status() fallback also failed", exc_info=True)
             raise
 
     @staticmethod
@@ -594,12 +627,21 @@ class StatusPublisher:
         if (not isinstance(pose, dict) or not pose) and isinstance(raw.get("pose"), dict):
             norm_pose = raw["pose"]
             if "x_m" in norm_pose or "y_m" in norm_pose:
-                theta = norm_pose.get("theta_deg") or norm_pose.get("theta")
+                theta = norm_pose.get("theta_deg")
+                if theta is None:
+                    theta = norm_pose.get("theta")
                 if norm_pose.get("theta_deg") is not None:
                     theta = math.radians(float(norm_pose["theta_deg"]))
+                # Use 'is None' to avoid falsy-zero bug (0.0 is a valid coordinate)
+                nx = norm_pose.get("x_m")
+                if nx is None:
+                    nx = norm_pose.get("x")
+                ny = norm_pose.get("y_m")
+                if ny is None:
+                    ny = norm_pose.get("y")
                 pose = {
-                    "x": norm_pose.get("x_m") or norm_pose.get("x"),
-                    "y": norm_pose.get("y_m") or norm_pose.get("y"),
+                    "x": nx,
+                    "y": ny,
                     "theta": theta,
                 }
 
@@ -608,8 +650,13 @@ class StatusPublisher:
             return None
 
         # ── Extract x / y / theta with format normalization ──
-        x_val = pose.get("x") or pose.get("x_m")
-        y_val = pose.get("y") or pose.get("y_m")
+        # Use 'is None' checks to avoid falsy-zero bug (0.0 is a valid coordinate)
+        x_val = pose.get("x")
+        if x_val is None:
+            x_val = pose.get("x_m")
+        y_val = pose.get("y")
+        if y_val is None:
+            y_val = pose.get("y_m")
         theta_val = pose.get("theta")
         if theta_val is None:
             theta_deg = pose.get("theta_deg")
@@ -625,183 +672,207 @@ class StatusPublisher:
     # ── Main position-watcher loop ───────────────────────────────────
 
     async def _watch_position_longpoll(self) -> None:
-        """Prefer AMR wait_for_changes; fallback to polling pose."""
-        try:
-            _LOGGER.info("Position watcher (long-poll) started")
-            rate_hz = float(settings.position_status_hz) if settings.position_status_hz else 2.0
-            rate_hz = max(0.1, min(100.0, rate_hz))
-            interval = 1.0 / rate_hz
-            _LOGGER.info(f"Position update interval: {interval:.2f}s (target rate: {rate_hz} Hz, from env: {settings.position_status_hz})")
-            use_longpoll = True
-            consecutive_errors = 0
-            max_backoff = 30.0
-            last_publish_time = 0.0
-            first_publish = True
-            since_token: str = "now"
+        """Prefer AMR wait_for_changes; fallback to polling pose.
 
-            while self._running:
-                try:
-                    now = time.time()
-                    should_publish = first_publish or (now - last_publish_time) >= interval
+        P2-6: wrapped in an outer restart-loop so a single fatal error
+        does not permanently kill position publishing.
+        """
+        while self._running:
+            try:
+                _LOGGER.info("Position watcher (long-poll) started")
+                rate_hz = float(settings.position_status_hz) if settings.position_status_hz else 2.0
+                rate_hz = max(0.1, min(100.0, rate_hz))
+                interval = 1.0 / rate_hz
+                _LOGGER.info("Position update interval: %.2fs (target rate: %s Hz, from env: %s)", interval, rate_hz, settings.position_status_hz)
+                use_longpoll = True
+                consecutive_errors = 0
+                max_backoff = 30.0
+                last_publish_time = 0.0
+                first_publish = True
+                since_token: str = "now"
+                _longpoll_fallback_time: float = 0.0
+                _LONGPOLL_RETRY_INTERVAL: float = 300.0  # retry long-poll every 5 min
 
-                    # ── Long-poll branch ──
-                    if use_longpoll:
-                        try:
-                            poll_timeout = min(settings.transport_watch_timeout, interval * 2)
-                            resp = await asyncio.wait_for(
-                                self.symovo_client.amr_wait_for_changes(since=since_token, timeout=poll_timeout),
-                                timeout=poll_timeout + 2.0,
-                            )
-                            consecutive_errors = 0
-                            if isinstance(resp, dict) and "result" in resp and resp["result"] is None:
-                                since_token = str(int(time.time()))
-                                if not should_publish:
-                                    sleep_time = interval - (time.time() - last_publish_time)
-                                    if sleep_time > 0:
-                                        await asyncio.sleep(min(sleep_time, 0.5))
-                                    continue
-                            else:
-                                if isinstance(resp, dict):
-                                    result = resp.get("result")
-                                    if isinstance(result, dict):
-                                        ts = result.get("timestamp") or result.get("last_update_epoch")
-                                        if isinstance(ts, (int, float)) and ts > 0:
-                                            since_token = str(int(ts))
-                                        elif isinstance(ts, str) and ts.isdigit():
-                                            since_token = ts
-                                    if since_token == "now":
-                                        since_token = str(int(time.time()))
-                        except asyncio.TimeoutError:
-                            if not should_publish:
-                                continue
-                        except Exception as e:
-                            from exceptions import DeviceError, DeviceConnectionError
-                            error_str = str(e).lower()
-                            is_endpoint_error = isinstance(e, (DeviceError, DeviceConnectionError)) and (
-                                "404" in error_str or "empty response" in error_str or "not found" in error_str
-                            )
-                            if is_endpoint_error:
-                                _LOGGER.warning(f"AMR wait_for_changes endpoint not available ({e}), falling back to polling")
-                                use_longpoll = False
-                                should_publish = True
+                while self._running:
+                    try:
+                        now = time.time()
+                        should_publish = first_publish or (now - last_publish_time) >= interval
+
+                        # Periodically retry long-poll after transient fallback
+                        if not use_longpoll and _longpoll_fallback_time > 0 and (now - _longpoll_fallback_time) >= _LONGPOLL_RETRY_INTERVAL:
+                            use_longpoll = True
+                            since_token = "now"
+                            _longpoll_fallback_time = 0.0
+                            _LOGGER.info("Retrying AMR long-poll endpoint after %.0fs polling fallback", _LONGPOLL_RETRY_INTERVAL)
+
+                        # ── Long-poll branch ──
+                        if use_longpoll:
+                            try:
+                                poll_timeout = min(settings.transport_watch_timeout, interval * 2)
+                                resp = await asyncio.wait_for(
+                                    self.symovo_client.amr_wait_for_changes(since=since_token, timeout=poll_timeout),
+                                    timeout=poll_timeout + 2.0,
+                                )
                                 consecutive_errors = 0
-                            else:
-                                consecutive_errors += 1
-                                if consecutive_errors >= 3:
-                                    _LOGGER.warning(f"Long-poll failed {consecutive_errors} times, falling back to polling: {e}")
+                                if isinstance(resp, dict) and "result" in resp and resp["result"] is None:
+                                    since_token = str(int(time.time()))
+                                    if not should_publish:
+                                        sleep_time = interval - (time.time() - last_publish_time)
+                                        if sleep_time > 0:
+                                            await asyncio.sleep(min(sleep_time, 0.5))
+                                        continue
+                                else:
+                                    if isinstance(resp, dict):
+                                        result = resp.get("result")
+                                        if isinstance(result, dict):
+                                            ts = result.get("timestamp") or result.get("last_update_epoch")
+                                            if isinstance(ts, (int, float)) and ts > 0:
+                                                since_token = str(int(ts))
+                                            elif isinstance(ts, str) and ts.isdigit():
+                                                since_token = ts
+                                        if since_token == "now":
+                                            since_token = str(int(time.time()))
+                            except asyncio.TimeoutError:
+                                if not should_publish:
+                                    continue
+                            except Exception as e:
+                                from exceptions import DeviceError, DeviceConnectionError
+                                error_str = str(e).lower()
+                                is_endpoint_error = isinstance(e, (DeviceError, DeviceConnectionError)) and (
+                                    "404" in error_str or "empty response" in error_str or "not found" in error_str
+                                )
+                                if is_endpoint_error:
+                                    _LOGGER.warning("AMR wait_for_changes endpoint not available (%s), falling back to polling", e)
                                     use_longpoll = False
+                                    _longpoll_fallback_time = time.time()
                                     should_publish = True
                                     consecutive_errors = 0
                                 else:
-                                    backoff = min(interval * (2 ** min(consecutive_errors, 5)), max_backoff)
-                                    _LOGGER.warning(f"Long-poll error (attempt {consecutive_errors}), backing off {backoff:.1f}s: {e}")
-                                    await asyncio.sleep(backoff)
-                                    if first_publish or (time.time() - last_publish_time) >= interval:
+                                    consecutive_errors += 1
+                                    if consecutive_errors >= 3:
+                                        _LOGGER.warning("Long-poll failed %d times, falling back to polling: %s", consecutive_errors, e)
+                                        use_longpoll = False
+                                        _longpoll_fallback_time = time.time()
                                         should_publish = True
+                                        consecutive_errors = 0
                                     else:
-                                        continue
+                                        backoff = min(interval * (2 ** min(consecutive_errors, 5)), max_backoff)
+                                        _LOGGER.warning("Long-poll error (attempt %d), backing off %.1fs: %s", consecutive_errors, backoff, e)
+                                        await asyncio.sleep(backoff)
+                                        if first_publish or (time.time() - last_publish_time) >= interval:
+                                            should_publish = True
+                                        else:
+                                            continue
 
-                    # ── Fetch + parse + publish ──
-                    if should_publish or not use_longpoll or first_publish:
-                        _LOGGER.debug(f"Fetching pose (should_publish={should_publish}, use_longpoll={use_longpoll}, first_publish={first_publish})")
-                        try:
-                            pose_data = await self._fetch_pose_with_fallback()
-                            consecutive_errors = 0
-                        except Exception as fetch_err:
-                            consecutive_errors += 1
-                            backoff = min(interval * (2 ** min(consecutive_errors, 5)), max_backoff)
-                            error_str = str(fetch_err).lower()
-                            is_expected = any(s in error_str for s in ("404", "empty response", "not found"))
-                            if is_expected:
-                                _LOGGER.debug("Pose endpoint temporarily unavailable (attempt %d): %s", consecutive_errors, error_str[:100])
-                            else:
-                                _LOGGER.warning("Pose fetch error (attempt %d), backing off %.1fs: %s", consecutive_errors, backoff, fetch_err)
-                            await asyncio.sleep(backoff)
-                            continue
+                        # ── Fetch + parse + publish ──
+                        if should_publish or not use_longpoll or first_publish:
+                            _LOGGER.debug("Fetching pose (should_publish=%s, use_longpoll=%s, first_publish=%s)", should_publish, use_longpoll, first_publish)
+                            try:
+                                pose_data = await self._fetch_pose_with_fallback()
+                                consecutive_errors = 0
+                            except Exception as fetch_err:
+                                consecutive_errors += 1
+                                backoff = min(interval * (2 ** min(consecutive_errors, 5)), max_backoff)
+                                error_str = str(fetch_err).lower()
+                                is_expected = any(s in error_str for s in ("404", "empty response", "not found"))
+                                if is_expected:
+                                    _LOGGER.debug("Pose endpoint temporarily unavailable (attempt %d): %s", consecutive_errors, error_str[:100])
+                                else:
+                                    _LOGGER.warning("Pose fetch error (attempt %d), backing off %.1fs: %s", consecutive_errors, backoff, fetch_err)
+                                await asyncio.sleep(backoff)
+                                continue
 
-                        position = self._parse_pose_data(pose_data)
-                        if position is not None:
-                            await self._publish_position_status(position)
-                            last_publish_time = time.time()
-                            first_publish = False
-                            _LOGGER.debug("Published position: x=%.2f, y=%.2f, theta=%.3f rad", position.x, position.y, position.theta)
+                            position = self._parse_pose_data(pose_data)
+                            if position is not None:
+                                await self._publish_position_status(position)
+                                last_publish_time = time.time()
+                                first_publish = False
+                                _LOGGER.debug("Published position: x=%.2f, y=%.2f, theta=%.3f rad", position.x, position.y, position.theta)
 
-                    # Sleep until next interval
-                    elapsed = time.time() - last_publish_time
-                    sleep_time = max(0, interval - elapsed)
-                    if sleep_time > 0:
-                        await asyncio.sleep(sleep_time)
-                except asyncio.CancelledError:
-                    _LOGGER.info("Position watcher cancelled")
-                    break
-                except Exception as e:
-                    consecutive_errors += 1
-                    backoff = min(interval * (2 ** min(consecutive_errors, 5)), max_backoff)
-                    _LOGGER.error(f"Unexpected error in position watcher (attempt {consecutive_errors}), backing off {backoff:.1f}s: {e}", exc_info=True)
-                    await asyncio.sleep(backoff)
-        except asyncio.CancelledError:
-            _LOGGER.info("Position watcher task cancelled")
-        except Exception as e:
-            _LOGGER.error(f"Fatal error in position watcher, task will stop: {e}", exc_info=True)
-            raise
+                        # Sleep until next interval
+                        elapsed = time.time() - last_publish_time
+                        sleep_time = max(0, interval - elapsed)
+                        if sleep_time > 0:
+                            await asyncio.sleep(sleep_time)
+                    except asyncio.CancelledError:
+                        _LOGGER.info("Position watcher cancelled")
+                        raise  # propagate to outer handler
+                    except Exception as e:
+                        consecutive_errors += 1
+                        backoff = min(interval * (2 ** min(consecutive_errors, 5)), max_backoff)
+                        _LOGGER.error("Unexpected error in position watcher (attempt %d), backing off %.1fs: %s", consecutive_errors, backoff, e, exc_info=True)
+                        await asyncio.sleep(backoff)
+            except asyncio.CancelledError:
+                _LOGGER.info("Position watcher task cancelled")
+                return
+            except Exception as e:
+                # P2-6 fix: restart the inner loop with backoff.
+                _LOGGER.error("Fatal error in position watcher, restarting in 5s: %s", e, exc_info=True)
+                await asyncio.sleep(5.0)
 
     async def _watch_status_loop(self) -> None:
         """Background loop that periodically fetches full AGV status and caches it in state_store.
 
         This feeds the ``/status`` HTTP route so it can respond from cache
         instead of hitting the Symovo controller on every request.
+
+        P2-6: wrapped in an outer restart-loop so a single fatal error
+        does not permanently kill status caching.
         """
-        rate_hz = float(settings.status_cache_hz) if settings.status_cache_hz else 0.5
-        rate_hz = max(0.1, min(10.0, rate_hz))
-        interval = 1.0 / rate_hz
-        consecutive_errors = 0
-        max_backoff = 30.0
+        while self._running:
+            rate_hz = float(settings.status_cache_hz) if settings.status_cache_hz else 0.5
+            rate_hz = max(0.1, min(10.0, rate_hz))
+            interval = 1.0 / rate_hz
+            consecutive_errors = 0
+            max_backoff = 30.0
 
-        _LOGGER.info(
-            "Status cache watcher started: interval=%.2fs (%.1f Hz)",
-            interval,
-            rate_hz,
-        )
+            _LOGGER.info(
+                "Status cache watcher started: interval=%.2fs (%.1f Hz)",
+                interval,
+                rate_hz,
+            )
 
-        try:
-            while self._running:
-                try:
-                    raw_status = await self.symovo_client.status_uncached()
-                    if isinstance(raw_status, dict):
-                        await state_store.set_last_raw_status(raw_status)
-                        _LOGGER.debug("Cached raw status from controller")
-                        consecutive_errors = 0
-                    else:
-                        _LOGGER.warning("status_uncached() returned non-dict: %s", type(raw_status))
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    consecutive_errors += 1
-                    error_str = str(e).lower()
-                    is_expected = "404" in error_str or "empty response" in error_str or "not found" in error_str
-                    if is_expected:
-                        _LOGGER.debug(
-                            "Status endpoint temporarily unavailable (attempt %d): %s",
-                            consecutive_errors,
-                            error_str[:120],
-                        )
-                    else:
-                        backoff = min(interval * (2 ** min(consecutive_errors, 5)), max_backoff)
-                        _LOGGER.warning(
-                            "Status fetch error (attempt %d), backing off %.1fs: %s",
-                            consecutive_errors,
-                            backoff,
-                            e,
-                        )
-                        await asyncio.sleep(backoff)
-                        continue
+            try:
+                while self._running:
+                    try:
+                        raw_status = await self.symovo_client.status_uncached()
+                        if isinstance(raw_status, dict):
+                            await state_store.set_last_raw_status(raw_status)
+                            _LOGGER.debug("Cached raw status from controller")
+                            consecutive_errors = 0
+                        else:
+                            _LOGGER.warning("status_uncached() returned non-dict: %s", type(raw_status))
+                    except asyncio.CancelledError:
+                        raise  # propagate to outer handler
+                    except Exception as e:
+                        consecutive_errors += 1
+                        error_str = str(e).lower()
+                        is_expected = "404" in error_str or "empty response" in error_str or "not found" in error_str
+                        if is_expected:
+                            _LOGGER.debug(
+                                "Status endpoint temporarily unavailable (attempt %d): %s",
+                                consecutive_errors,
+                                error_str[:120],
+                            )
+                        else:
+                            backoff = min(interval * (2 ** min(consecutive_errors, 5)), max_backoff)
+                            _LOGGER.warning(
+                                "Status fetch error (attempt %d), backing off %.1fs: %s",
+                                consecutive_errors,
+                                backoff,
+                                e,
+                            )
+                            await asyncio.sleep(backoff)
+                            continue
 
-                await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            _LOGGER.info("Status cache watcher cancelled")
-        except Exception as e:
-            _LOGGER.error("Fatal error in status cache watcher: %s", e, exc_info=True)
-            raise
+                    await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                _LOGGER.info("Status cache watcher cancelled")
+                return
+            except Exception as e:
+                # P2-6 fix: log and restart inner loop instead of dying permanently.
+                _LOGGER.error("Fatal error in status cache watcher, restarting in 5s: %s", e, exc_info=True)
+                await asyncio.sleep(5.0)
 
     def _calculate_progress(self, state: int, transport_data: Dict[str, Any]) -> int:
         """
@@ -839,14 +910,14 @@ class StatusPublisher:
         """Publish position status to MQTT."""
         try:
             await state_store.set_last_position_status(position)
-            _LOGGER.debug(f"Position saved to state_store: {position.model_dump()}")
+            _LOGGER.debug("Position saved to state_store: %s", position.model_dump())
             if self.mqtt_adapter:
                 await self.mqtt_adapter.publish_position_status(position.model_dump())
                 _LOGGER.debug("Position published to MQTT")
             # Drive distance-based progress updates from live position.
             await self._update_progress_from_position(position)
         except Exception as e:
-            _LOGGER.error(f"Failed to publish position status: {e}", exc_info=True)
+            _LOGGER.error("Failed to publish position status: %s", e, exc_info=True)
             raise
 
     async def _update_progress_from_position(self, position: PositionStatus) -> None:
@@ -901,7 +972,7 @@ class StatusPublisher:
                         self._at_goal_since.pop(command_id, None)
                 except Exception:
                     # Never let fallback logic break status publishing
-                    pass
+                    _LOGGER.debug("Force-arrival proximity check failed", exc_info=True)
 
             status_enum = TransportOrchestrator.map_symovo_to_aehub(t.state)
             await self._publish_navigation_status(

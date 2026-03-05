@@ -23,6 +23,8 @@
     WEBRTC_DOWN: 'webrtc_down',
     SESSION_RESET: 'session_reset',
     JANUS_ERROR: 'janus_error',
+    FPS_DROP: 'fps_drop',
+    VIDEO_STALLED: 'video_stalled',
     RECONNECT_SCHEDULED: 'reconnect_scheduled',
     RECONNECT_SUCCESS: 'reconnect_success',
     RECONNECT_EXHAUSTED: 'reconnect_exhausted',

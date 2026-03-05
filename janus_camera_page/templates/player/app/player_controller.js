@@ -78,12 +78,15 @@
       // latch: fire STREAM_RECOVERED at most once per connected period; reset when entering RECONNECTING.
       this._recoveryNotified = false;
 
+      // Tab visibility: record when tab was hidden so we can estimate hidden duration on resume.
+      this._tabHiddenAt = null;
+
       // ERROR auto-recovery: retry from ERROR state after increasing delay (autonomy guarantee).
       this._errorRetryTimer = null;
       this._errorRetryCount = 0;
 
       // watchdog (frame age + timeout callback; controller applies policy in callback)
-      this._watchdog = new AP.App.WatchdogService(cfg, clock, (ageMs) => this._onWatchdogTimeout(ageMs));
+      this._watchdog = new AP.App.WatchdogService(cfg, clock, (ageMs) => this._onWatchdogTimeout(ageMs), (fps) => this._onFpsDrop(fps));
 
       // Timers (ICE grace, track mute)
       this._timers = new AP.App.TimerCoordinator(clock);
@@ -108,6 +111,7 @@
 
       this._boundOnStreamEvent = (ev) => this._onStreamEvent(ev);
       this._boundOnVisibilityChange = () => this._onVisibilityChange();
+      this._boundOnOnline = () => this._onNetworkOnline();
 
       this._installIntents();
     }
@@ -118,14 +122,108 @@
       return document.visibilityState === 'visible';
     }
 
-    /** On tab visible again: auto-retry if ERROR (exhausted); resume scheduling if RECONNECTING was paused. */
+    /**
+     * On visibility change: track hidden timestamp; on visible, recover based on state and hidden duration.
+     * When hidden > Janus session_timeout (30s), the server-side session is likely dead — force HARD
+     * severity so the recovery ladder skips straight to RECREATE_SESSION.
+     */
     _onVisibilityChange(){
-      if (!this._isTabVisible()) return;
+      const now = this.clock.nowMs();
+
+      if (!this._isTabVisible()) {
+        // Tab going hidden — record timestamp for duration tracking.
+        this._tabHiddenAt = now;
+        return;
+      }
+
+      // --- Tab became visible ---
+      const hiddenDurationMs = this._tabHiddenAt ? (now - this._tabHiddenAt) : 0;
+      this._tabHiddenAt = null;
+      this.log.info('tab_visible', { hiddenDurationMs, state: this.state, token: this._sessionToken });
+
+      // ERROR: unconditional retry (resets all state).
       if (this.state === PlayerState.ERROR) {
         this.retry();
         return;
       }
-      if (this.state === PlayerState.RECONNECTING) this._reconnect.resumeIfPending();
+
+      // RECONNECTING: resume or force retry if stuck.
+      if (this.state === PlayerState.RECONNECTING) {
+        // If hidden long enough that Janus session is dead, escalate to HARD before resuming.
+        const sessionTimeout = this.cfg.sessionTimeoutMs || 30000;
+        if (hiddenDurationMs > sessionTimeout && this._reconnect.pending()) {
+          this._reconnect.escalateSeverity(RecoverySeverity.HARD);
+        }
+        this._reconnect.resumeIfPending();
+        // Safety net: if still stuck (no pending, no timer, no in-flight), force full retry.
+        if (!this._reconnect.pending() && !this._reconnect.inFlight()) {
+          this.log.warn('tab_resume_stuck_reconnecting', { hiddenDurationMs, token: this._sessionToken });
+          this.retry();
+        }
+        return;
+      }
+
+      // PLAYING / CONNECTING: check if data plane died while tab was hidden.
+      if (this.state === PlayerState.PLAYING || this.state === PlayerState.CONNECTING) {
+        const sessionTimeout = this.cfg.sessionTimeoutMs || 30000;
+        if (hiddenDurationMs > sessionTimeout) {
+          // Session almost certainly dead server-side — force HARD recovery (RECREATE_SESSION).
+          this.log.warn('tab_resume_session_likely_dead', { hiddenDurationMs, sessionTimeout, token: this._sessionToken });
+          this.requestRecovery('tab_resume_stale', RecoverySeverity.HARD);
+          return;
+        }
+        // Short/medium hide (< session timeout): the WebRTC connection and Janus session
+        // are still alive; the browser just paused requestVideoFrameCallback while the tab
+        // was hidden.  Reset the watchdog timestamp to give the stream noFrameThresholdMs
+        // to resume delivering frames.  If frames don't arrive in time, the regular watchdog
+        // will catch it — no need for immediate aggressive recovery that causes reconnection
+        // cascades during driving (tab switches between camera view and controls).
+        this._watchdog.resetAfterTabResume();
+        this.log.info('tab_resume_grace', { hiddenDurationMs, token: this._sessionToken });
+      }
+    }
+
+    /**
+     * Called when `navigator.onLine` transitions to true (browser regained internet).
+     * Triggers an immediate HARD recovery so we skip the SOFT/REATTACH ladder
+     * and jump straight to RECREATE_SESSION — no point in gentle steps after
+     * a full network outage.
+     */
+    _onNetworkOnline(){
+      this.log.info('network_online', { state: this.state, token: this._sessionToken });
+
+      // Fresh start: reset accumulated error-retry backoff so that if the first
+      // reconnect attempt fails (server not fully reachable yet), the next auto-retry
+      // fires quickly (10 s) instead of at the tail of the old backoff ladder (up to 120 s).
+      this._errorRetryCount = 0;
+
+      if (this.state === PlayerState.ERROR) {
+        // Browser fires 'online' before the network stack is truly usable — DNS, TCP,
+        // and WebSocket handshakes can still fail for 1–3 s.  Schedule a delayed retry
+        // instead of retrying immediately (which would fail with "Is the server down?").
+        this._clearErrorAutoRetry();
+        const settleMs = this.cfg.networkOnlineDelayMs || 2000;
+        this.log.info('network_online_deferred_retry', { settleMs, token: this._sessionToken });
+        this._errorRetryTimer = this.clock.setTimeout(() => {
+          this._errorRetryTimer = null;
+          if (this.state !== PlayerState.ERROR) return;
+          this.retry();
+        }, settleMs);
+        return;
+      }
+
+      if (this.state === PlayerState.RECONNECTING) {
+        // Network just came back — reset attempt counter so the full budget is available,
+        // escalate to HARD so RECREATE_SESSION fires immediately.
+        this._reconnect.reset();
+        this._reconnect.request('network_restored', RecoverySeverity.HARD);
+        return;
+      }
+
+      // PLAYING / CONNECTING — verify data plane is still healthy.
+      if (this.state === PlayerState.PLAYING && !this._isDataPlaneHealthy()) {
+        this.requestRecovery('network_restored', RecoverySeverity.HARD);
+      }
     }
 
     _installIntents(){
@@ -143,8 +241,16 @@
       // frame clock (installed once; safe against reconnect loops)
       this.ui.startFrameClock(() => this._onFrameReceived());
 
+      // video stall detection (browser buffer starved)
+      this.ui.onVideoStalled(() => this._onVideoStalled());
+
       if (this.cfg.visibilityAwareReconnect && typeof document !== 'undefined') {
         document.addEventListener('visibilitychange', this._boundOnVisibilityChange);
+      }
+
+      // Network connectivity: restart recovery from scratch when browser regains internet.
+      if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+        window.addEventListener('online', this._boundOnOnline);
       }
 
       // joystick
@@ -231,6 +337,7 @@
       // When entering PLAYING successfully, reset error retry counter (clean slate).
       if (next.state === PlayerState.PLAYING && prev !== PlayerState.PLAYING) {
         this._errorRetryCount = 0;
+        this._watchdog.resetFpsTracking();
       }
       // When leaving RECONNECTING for PLAYING, reset coordinator to prevent stale attempt state
       // (e.g. false exhaustion if STREAM_RECOVERED bypassed coordinator's notifyRecovered).
@@ -296,6 +403,12 @@
       }
       this._applySnapshot(result.next, result.next.state === PlayerState.ERROR ? this.errCode : undefined);
       this._executeActions(result.actions);
+      // Ensure watchdog runs whenever we enter an active playback state.
+      // CANCEL_ALL_TIMERS (fired by STREAM_RECOVERED / RECONNECT_SUCCESS transitions)
+      // stops the watchdog, but PLAYING still needs frame-loss monitoring.
+      if (result.next.state === PlayerState.PLAYING || result.next.state === PlayerState.CONNECTING) {
+        this._startWatchdog();
+      }
     }
 
     async _ensureStreamSelected(){
@@ -590,6 +703,13 @@
           } else if (canReport) {
             this.handleEvent({ type: EventType.ICE_REPORT, iceState: p.state, generation: gen });
           }
+          // When ICE reaches connected/completed the media path is ready.
+          // Reset the watchdog origin so the no-frame budget starts from
+          // this point, not from the earlier SDP exchange.  This prevents
+          // false no_frames timeouts caused by TURN relay allocation latency.
+          if (p.state === 'connected' || p.state === 'completed') {
+            this._watchdog.resetOrigin();
+          }
           break;
         case 'WEBRTC_STATE':
           this.log.debug('webrtc_state', { up: !!p.up, reason: p.reason });
@@ -672,6 +792,37 @@
       }
     }
 
+    /**
+     * Called by WatchdogService when FPS has been below minAcceptableFps for fpsDropThresholdMs.
+     * This detects the "degraded stream" scenario where frames trickle in just often enough
+     * to prevent the no-frame watchdog from firing, but video appears frozen to the user.
+     */
+    _onFpsDrop(fps){
+      if (!this.desiredPlaying) return;
+      if (this.state !== PlayerState.PLAYING && this.state !== PlayerState.CONNECTING) return;
+      this.log.warn('fps_drop_detected', { fps, threshold: this.cfg.minAcceptableFps, token: this._sessionToken });
+      const snapshot = this._buildPolicySnapshot();
+      const decision = ConnectionPolicy.decide(DomainEventType.FPS_DROP, snapshot);
+      this._applyPolicyDecision(decision);
+    }
+
+    /**
+     * Called by DomUIAdapter when the video element fires 'stalled' or 'waiting' events,
+     * indicating the browser's media buffer is starved. Provides early detection of
+     * degraded connections before the watchdog timer fires.
+     */
+    _onVideoStalled(){
+      if (!this.desiredPlaying) return;
+      if (this.state !== PlayerState.PLAYING) return;
+      // Only act if we haven't received a frame for a meaningful period
+      const age = this._watchdog.getLastFrameAgeMs(this.clock.nowMs());
+      if (age < 2000) return; // transient stall, ignore
+      this.log.warn('video_stalled_detected', { lastFrameAgeMs: age, token: this._sessionToken });
+      const snapshot = this._buildPolicySnapshot();
+      const decision = ConnectionPolicy.decide(DomainEventType.VIDEO_STALLED, snapshot);
+      this._applyPolicyDecision(decision);
+    }
+
     _startWatchdog(){
       this._watchdog.start();
     }
@@ -735,10 +886,18 @@
       this._clearIceGrace();
       this._clearTrackMuteTimers();
 
+      // Short-circuit: if WS is dead, skip SOFT_RESTART / REATTACH — they can't work without a session.
+      let action = ctx.action;
+      if (action !== AP.Core.RecoveryAction.RECREATE_SESSION &&
+          typeof this.streaming.isSessionAlive === 'function' && !this.streaming.isSessionAlive()) {
+        this.log.warn('session_dead_upgrade', { from: action, to: AP.Core.RecoveryAction.RECREATE_SESSION, token });
+        action = AP.Core.RecoveryAction.RECREATE_SESSION;
+      }
+
       // Execute ladder action (side-effecting).
-      if (ctx.action === AP.Core.RecoveryAction.SOFT_RESTART) {
+      if (action === AP.Core.RecoveryAction.SOFT_RESTART) {
         await this.streaming.stop();
-      } else if (ctx.action === AP.Core.RecoveryAction.REATTACH_PLUGIN) {
+      } else if (action === AP.Core.RecoveryAction.REATTACH_PLUGIN) {
         await this.streaming.detach();
       } else {
         this._reconnect.expectSessionResetFromRecreate();
@@ -840,6 +999,7 @@
     _buildDebugText(){
       const now = this.clock.nowMs();
       const age = this._watchdog.getLastFrameAgeMs(now);
+      const fps = this._watchdog.getCurrentFps(now);
       const pending = this._reconnect.pending();
       const timers = (typeof this.clock.debugSnapshot === 'function') ? this.clock.debugSnapshot() : null;
 
@@ -854,6 +1014,7 @@
         `connected: ${this._isConnected()}`,
         `degraded: ${this._degraded}`,
         `lastFrameAge: ${age} ms`,
+        `fps: ${fps.toFixed(1)}`,
         `reconnectAttempt: ${this._reconnect.attempt()}`,
         `pending: ${pending ? `${pending.reason} sev=${pending.severity}` : 'none'}`,
         `recoveryInFlight: ${this._reconnect.inFlight()}`,
@@ -871,6 +1032,7 @@
         attempt: this._reconnect.attempt() || 0,
         desiredPlaying: this.desiredPlaying,
         errCode: this.errCode,
+        degraded: this._degraded,
         autoplayBlocked: !!(extra && extra.autoplayBlocked),
         debugText: this._buildDebugText(),
       });
@@ -889,6 +1051,11 @@
       // Remove visibility listener
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', this._boundOnVisibilityChange);
+      }
+
+      // Remove online listener
+      if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+        window.removeEventListener('online', this._boundOnOnline);
       }
 
       // Stop frame clock

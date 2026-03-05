@@ -22,6 +22,10 @@
     [RecoveryReason.JANUS_ERROR]: RecoverySeverity.MEDIUM,
     [RecoveryReason.ALREADY_WATCHING]: RecoverySeverity.HARD,
     [RecoveryReason.SESSION_RESET]: RecoverySeverity.HARD,
+    [RecoveryReason.FPS_DROP]: RecoverySeverity.MEDIUM,
+    [RecoveryReason.VIDEO_STALLED]: RecoverySeverity.MEDIUM,
+    [RecoveryReason.TAB_RESUME_STALE]: RecoverySeverity.HARD,
+    [RecoveryReason.NETWORK_RESTORED]: RecoverySeverity.HARD,
   });
 
   function defaultSeverityForReason(reason, fallback){

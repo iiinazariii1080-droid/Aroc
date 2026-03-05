@@ -16,6 +16,22 @@
 
 import type { CameraIntrinsics, DepthCalibration, DepthOverlayConfig, PointCloud } from '@/types/depth';
 
+// ─── Near-black pixel filter ──────────────────────
+
+/** Default RGB threshold for near-black pixel rejection. */
+export const NEAR_BLACK_THRESHOLD = 12;
+/** Hard near-depth clamp to suppress zero/noise points close to camera. */
+export const HARD_MIN_DISTANCE_M = 0.05;
+
+/**
+ * Returns true if the RGB pixel is near-black (all channels ≤ threshold).
+ * Near-black pixels from the D435 typically indicate sensor noise or
+ * invalid readings and should be rejected before unprojection.
+ */
+export function isNearBlackRgb(r: number, g: number, b: number, threshold = NEAR_BLACK_THRESHOLD): boolean {
+  return r <= threshold && g <= threshold && b <= threshold;
+}
+
 // ─── Calibration ──────────────────────────────────
 
 /**
@@ -80,6 +96,7 @@ export function unprojectPixel(
  * @param intrinsics   - D435 camera intrinsics.
  * @param calibration  - Linear depth calibration.
  * @param overlay      - Depth overlay configuration.
+ * @param depthScale   - Raw uint16 → mm factor (default 1.0).
  * @returns PointCloud in camera-local frame (meters).
  */
 export function processDepthFrame(
@@ -90,18 +107,23 @@ export function processDepthFrame(
   intrinsics: CameraIntrinsics,
   calibration: DepthCalibration,
   overlay: DepthOverlayConfig,
+  depthScale: number = 1.0,
+  timestampMs: number = Date.now(),
 ): PointCloud {
   const stride = overlay.stridePx;
   const rotDeg = overlay.pixelRotationDeg;
+  const totalPixels = frameWidth * frameHeight;
+
+  // Guard: buffer must cover the full frame
+  if (depthRaw.length < totalPixels) {
+    return { positions: new Float32Array(0), colors: new Float32Array(0), count: 0, timestampMs };
+  }
 
   // Maximum possible points (pre-allocate)
   const maxPts = Math.ceil(frameWidth / stride) * Math.ceil(frameHeight / stride);
   const positions = new Float32Array(maxPts * 3);
   const colors = new Float32Array(maxPts * 3);
   let count = 0;
-
-  // Determine effective width/height after rotation (used for bounds)
-  rotatePixel(0, 0, frameWidth, frameHeight, rotDeg);
 
   // Pre-compute rotated intrinsics cx/cy
   // When rotating 90°: (cx,cy) maps to (h-1-cy, cx) in the rotated frame
@@ -131,14 +153,23 @@ export function processDepthFrame(
       const rawMm = depthRaw[idx];
 
       // Skip invalid pixels
+      if (rawMm === 0) continue;
       if (rawMm < overlay.minRaw || rawMm > overlay.maxRaw) continue;
 
-      // Apply calibration
-      const calMm = calibrateDepthMm(rawMm, calibration);
+      // Optional near-black RGB filter (disabled by default in MVP).
+      if (overlay.rejectNearBlackRgb && rgbRaw && idx * 3 + 2 < rgbRaw.length) {
+        const threshold = overlay.nearBlackThreshold ?? NEAR_BLACK_THRESHOLD;
+        if (isNearBlackRgb(rgbRaw[idx * 3], rgbRaw[idx * 3 + 1], rgbRaw[idx * 3 + 2], threshold)) continue;
+      }
+
+      // Apply depth scale (raw uint16 → mm) then calibration
+      const rawMmScaled = rawMm * depthScale;
+      const calMm = calibrateDepthMm(rawMmScaled, calibration);
+      if (!Number.isFinite(calMm) || calMm <= 0) continue;
       const depthM = calMm / 1000;
 
-      // Skip too close
-      if (depthM < overlay.minDistanceM) continue;
+      // Skip too close (hard floor 5cm regardless of runtime/config drift)
+      if (depthM < Math.max(overlay.minDistanceM, HARD_MIN_DISTANCE_M)) continue;
 
       // Rotate pixel coordinates
       const rot = rotatePixel(u, v, frameWidth, frameHeight, rotDeg);
@@ -184,5 +215,47 @@ export function processDepthFrame(
     positions: positions.subarray(0, count * 3),
     colors: colors.subarray(0, count * 3),
     count,
+    timestampMs,
+  };
+}
+
+/**
+ * Transform camera-local point cloud (meters) into world-frame points (Three.js world units).
+ *
+ * Local conversion matches legacy live-cloud behavior:
+ *   local = scale(S, S, -S) * cameraPointMeters
+ *   world = cameraWorldMatrix * local
+ */
+export function transformCloudToWorld(
+  cloud: PointCloud,
+  cameraWorldElements: ArrayLike<number>,
+  scaleFactor: number,
+): PointCloud {
+  const { positions, colors, count, timestampMs } = cloud;
+  if (count === 0) {
+    return { positions, colors, count, timestampMs };
+  }
+
+  const e = cameraWorldElements;
+  const s = scaleFactor;
+  const worldPositions = new Float32Array(count * 3);
+
+  for (let i = 0; i < count; i++) {
+    const off = i * 3;
+
+    const lx = positions[off] * s;
+    const ly = positions[off + 1] * s;
+    const lz = -positions[off + 2] * s;
+
+    worldPositions[off] = e[0] * lx + e[4] * ly + e[8] * lz + e[12];
+    worldPositions[off + 1] = e[1] * lx + e[5] * ly + e[9] * lz + e[13];
+    worldPositions[off + 2] = e[2] * lx + e[6] * ly + e[10] * lz + e[14];
+  }
+
+  return {
+    positions: worldPositions,
+    colors,
+    count,
+    timestampMs,
   };
 }

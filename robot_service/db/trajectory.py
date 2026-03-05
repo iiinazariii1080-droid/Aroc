@@ -7,10 +7,12 @@ DB_PATH = "database.db"
 def calibrate_distance(raw_distance):
     """
     Corrects measured distance using an empirical linear model.
-    Formula from calibration: true distance ≈ 0.937 * measured + 45.2
+    Calibrated from two reference points:
+      raw=397 -> real=425,  raw=530 -> real=577
+    Formula: true distance ≈ 1.1429 * measured - 28.7
     """
-    a = 0.957
-    b = 45.2
+    a = 1.1429
+    b = -28.7
     return a * raw_distance + b
     
 def init_trajectory_table():
@@ -28,8 +30,47 @@ def init_trajectory_table():
         default_config = json.dumps({
             "prefix": {"active": False, "posX": 0, "posY": 0, "posZ": 0, "speed": 100},
             "postfix": {"active": False, "posX": 0, "posY": 0, "posZ": 0, "speed": 100},
-            "gripper": {"active": False},
-            "return": {"active": False}
+            "baseMove": {"active": True, "posX": -30, "posY": 52, "posZ": -10, "speed": 100},
+            "gripper": {"active": True},
+            "gripperVerify": {"samples": 3, "required": 2, "intervalMs": 120, "maxReadErrors": 3},
+            "gripperVerifySecondChance": {
+                "enabled": True,
+                "delayMs": 180,
+                "samples": 2,
+                "required": 1,
+                "intervalMs": 90,
+                "maxReadErrors": 2,
+                "minPcs": 0.30
+            },
+            "gripperApproach": {
+                "stepMm": 2.0,
+                "fineStepMm": 1.0,
+                "detectConsecutive": 2,
+                "sampleIntervalMs": 80,
+                "maxReadErrors": 3,
+                "enableAtStage2": True,
+                "microSettleMm": 1.5,
+                "maxStage3TravelMm": 20.0,
+                "primaryBudgetRatio": 0.7
+            },
+            "xySearch": {
+                "enabled": True,
+                "amplitudeMm": 2.0,
+                "maxProbes": 4,
+                "zProbeMm": 1.5,
+                "velocityPercent": 15
+            },
+            "liftTest": {
+                "enabled": True,
+                "liftMm": 8.0,
+                "holdMs": 220,
+                "samples": 2,
+                "required": 2,
+                "intervalMs": 100,
+                "maxReadErrors": 2,
+                "velocityPercent": 20
+            },
+            "return": {"active": True}
         })
         c.execute("INSERT INTO trajectory (id, data) VALUES (1, ?)", (default_config,))
     conn.commit()

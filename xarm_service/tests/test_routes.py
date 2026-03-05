@@ -151,11 +151,47 @@ class TestRecoverStop:
 
 class TestGetStatus:
     def test_current_position(self, client, fake_svc):
-        # GET /current_position routes through command service with GET_STATUS
+        fake_svc.set_next_result(CommandResult(
+            command_id="status-1",
+            status=ResultStatus.SUCCEEDED,
+            telemetry_snapshot={"angles": [0, 0, 0, 0, 0, 0]},
+        ))
         r = client.get("/current_position")
-        # May succeed or return error depending on how result is processed
-        assert r.status_code in (200, 500, 503)
+        assert r.status_code == 200
+        body = r.json()
+        assert "name" in body
+        assert "joints" in body
+        assert set(body["joints"].keys()) == {"j1", "j2", "j3", "j4", "j5", "j6"}
 
     def test_status_endpoint(self, client, fake_svc):
+        fake_svc.set_next_result(CommandResult(
+            command_id="status-2",
+            status=ResultStatus.SUCCEEDED,
+            telemetry_snapshot={
+                "connected": True,
+                "state": 0,
+                "mode": 0,
+                "motion_enabled": True,
+                "ready": True,
+                "fault": False,
+                "warn_code": 0,
+                "error_code": 0,
+                "angles": [1, 2, 3, 4, 5, 6],
+                "pose": [0, 0, 0, 0, 0, 0],
+            },
+        ))
         r = client.get("/status")
-        assert r.status_code in (200, 500, 503)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["connected"] is True
+        assert body["motion_enabled"] is True
+        assert body["ready"] is True
+
+    def test_status_endpoint_rejected_returns_503(self, client, fake_svc):
+        fake_svc.set_next_result(CommandResult(
+            command_id="status-3",
+            status=ResultStatus.REJECTED,
+            error_message="busy",
+        ))
+        r = client.get("/status")
+        assert r.status_code == 503

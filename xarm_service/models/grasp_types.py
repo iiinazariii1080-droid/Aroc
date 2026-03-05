@@ -72,6 +72,14 @@ class GripperStatus:
     active: bool = False
     feedback: GripperFeedback = GripperFeedback.UNKNOWN
     vacuum_level: Optional[float] = None      # kPa, if readable
+    part_present: bool = False                 # PP setpoint achieved
+    part_secured: bool = False                 # PS setpoint achieved
+    energy_saving: bool = False                # ES setpoint achieved
+    motor_stall: bool = False                  # motor stall detected
+    pcb_temperature: int = 0                   # °C
+    membrane_hours: int = 0                    # hours to membrane service
+    membrane_warn: bool = False                # membrane service warning
+    sensor_supported: bool = False             # True if PDI reads work
     modbus_raw: Optional[List[int]] = None     # last raw response
 
 

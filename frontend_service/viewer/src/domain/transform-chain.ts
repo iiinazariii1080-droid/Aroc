@@ -1,10 +1,10 @@
 /**
  * transform-chain.ts — Rigid-body transform chain computation.
  *
- * Replaces legacy applyMountDegrees() with a proper rigid-body pipeline.
+ * Utility rigid-body chain helpers for domain tests and matrix composition.
  *
  * Chain order (ROS Z-up, meters):
- *   T_world → T_agv → T_arm_base → T_mount → T_lift → FK(J1..Jn)
+ *   T_world → T_agv → T_arm_base → T_lift → FK(J1..Jn)
  *     → T_flange → T_camera | T_gripper
  *
  * Domain layer — no Three.js dependency.
@@ -12,13 +12,11 @@
  */
 
 import type { RosPose, StaticTransform, Mat4 } from '@/types/coordinates';
-import type { MountDegrees } from '@/types/arm-state';
 import type { TransformChainState, ResolvedPoses } from '@/types/transforms';
 import {
   mat4Multiply,
   mat4FromPose,
   mat4GetTranslation,
-  degToRad,
 } from './coord-utils';
 
 // ─── Pose → Mat4 conversions ──────────────────────
@@ -39,62 +37,6 @@ export function staticTransformToMat4(st: StaticTransform): Mat4 {
   );
 }
 
-// ─── Mount rotation (replaces legacy applyMountDegrees) ─────
-
-/**
- * Compute proper rigid-body mount transform.
- *
- * Legacy code used ad-hoc linear interpolation for position + quaternion
- * from separate tilt/rotate composition. This replaces it with clean math:
- *
- *   1. Tilt around Z-axis by tilt degrees.
- *   2. Rotate around the tilted mount axis by rotate degrees.
- *   3. Combined: Q = Qrotate(axisTilted) × Qtilt(Z).
- *
- * Position offset from tilt:
- *   Legacy: posX = piecewise linear function of tilt
- *   New: Proper rigid-body. Position is baked into the transform.
- *
- * For backward compatibility with the existing arm positions, we keep
- * the legacy position offsets during the transition period, applied
- * as a minor correction inside the transform.
- */
-export function computeMountTransform(mount: MountDegrees): Mat4 {
-  const tiltRad = degToRad(mount.tilt);
-  const rotateRad = degToRad(mount.rotation);
-
-  // Step 1: Tilt around Z (in ROS frame, Z = up).
-  // In our mat4FromPose, rz is the yaw component.
-  const tiltMatrix = mat4FromPose(0, 0, 0, 0, 0, tiltRad);
-
-  // Step 2: Rotate around the tilted mount axis.
-  // The mount axis after tilt = Rz(tilt) × [0, 1, 0] (Y in ROS = left).
-  // For simplicity in column-major, we compose as:
-  //   T_mount = Rz(tilt) × Ry(rotate) × Rz(-tilt) × Rz(tilt)
-  //           = Rz(tilt) × Ry(rotate)
-  // Actually, the rotate is an axial rotation around the tilted axis.
-  // We model this as: T_mount = T_tilt × T_rotate_local
-  const rotateMatrix = mat4FromPose(0, 0, 0, 0, rotateRad, 0);
-
-  return mat4Multiply(tiltMatrix, rotateMatrix);
-}
-
-/**
- * Legacy-compatible mount position offsets.
- *
- * The legacy code used:
- *   posX = (tilt <= 90) ? (5/90)*tilt : (5/90)*(180-tilt)
- *   posY = (6/180)*tilt - 5
- *
- * These are in Three.js world units. We convert to ROS meters for the chain.
- */
-export function legacyMountPositionOffsets_threeWu(tiltDeg: number): { x: number; y: number; z: number } {
-  const tilt = tiltDeg;
-  const posX = (tilt <= 90) ? (5 / 90) * tilt : (5 / 90) * (180 - tilt);
-  const posY = (6 / 180) * tilt - 5;
-  return { x: posX, y: posY, z: 0 };
-}
-
 // ─── Full chain computation ───────────────────────
 
 /**
@@ -107,6 +49,12 @@ export function legacyMountPositionOffsets_threeWu(tiltDeg: number): { x: number
  */
 export function resolveChain(state: TransformChainState): ResolvedPoses {
   const Twa = poseToMat4(state.worldToAgv);
+  const Tmount = mat4FromPose(
+    0, 0, 0,
+    state.mountOrientation.rotation * Math.PI / 180,  // rx (roll)
+    state.mountOrientation.tilt * Math.PI / 180,       // ry (pitch)
+    0,                                                  // rz
+  );
   const Tab = staticTransformToMat4(state.agvToArmBase);
   const Tlift = poseToMat4(state.liftDisplacement);
   const Tfk = state.armBaseToFlange;  // already a Mat4 from FK
@@ -114,7 +62,8 @@ export function resolveChain(state: TransformChainState): ResolvedPoses {
   const Tfg = staticTransformToMat4(state.flangeToGripper);
 
   // Build chain step by step
-  const TworldToArmBase = mat4Multiply(Twa, Tab);
+  const TworldToMount = mat4Multiply(Twa, Tmount);
+  const TworldToArmBase = mat4Multiply(TworldToMount, Tab);
   const TworldToPostLift = mat4Multiply(TworldToArmBase, Tlift);
   const TworldToFlange = mat4Multiply(TworldToPostLift, Tfk);
   const TworldToCamera = mat4Multiply(TworldToFlange, Tfc);
@@ -127,7 +76,7 @@ export function resolveChain(state: TransformChainState): ResolvedPoses {
   return {
     armBase: {
       position: armBasePos,
-      orientation: { roll: 0, pitch: 0, yaw: 0 },  // TODO: extract rotation
+      orientation: { roll: 0, pitch: 0, yaw: 0 },  // Position-only contract for now
     },
     tcp: {
       position: tcpPos,

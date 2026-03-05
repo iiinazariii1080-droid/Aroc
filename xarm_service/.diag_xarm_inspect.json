@@ -1,0 +1,272 @@
+[
+    {
+        "Id": "582d2c1d664a2133dada4ac7bcb507230f9c2844292ea8525d60c190cc7bc8ea",
+        "Created": "2026-02-25T15:03:34.954004744Z",
+        "Path": "uvicorn",
+        "Args": [
+            "main:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8102"
+        ],
+        "State": {
+            "Status": "running",
+            "Running": true,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 95598,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-02-25T15:03:35.380711364Z",
+            "FinishedAt": "0001-01-01T00:00:00Z",
+            "Health": {
+                "Status": "healthy",
+                "FailingStreak": 0,
+                "Log": [
+                    {
+                        "Start": "2026-02-25T16:31:44.003254476+01:00",
+                        "End": "2026-02-25T16:31:44.066952832+01:00",
+                        "ExitCode": 0,
+                        "Output": "{\"status\":\"ok\"}"
+                    },
+                    {
+                        "Start": "2026-02-25T16:32:14.068354845+01:00",
+                        "End": "2026-02-25T16:32:14.129929594+01:00",
+                        "ExitCode": 0,
+                        "Output": "{\"status\":\"ok\"}"
+                    },
+                    {
+                        "Start": "2026-02-25T16:32:44.131152738+01:00",
+                        "End": "2026-02-25T16:32:44.188439911+01:00",
+                        "ExitCode": 0,
+                        "Output": "{\"status\":\"ok\"}"
+                    },
+                    {
+                        "Start": "2026-02-25T16:33:14.189195882+01:00",
+                        "End": "2026-02-25T16:33:14.250465604+01:00",
+                        "ExitCode": 0,
+                        "Output": "{\"status\":\"ok\"}"
+                    },
+                    {
+                        "Start": "2026-02-25T16:33:44.251046502+01:00",
+                        "End": "2026-02-25T16:33:44.312618869+01:00",
+                        "ExitCode": 0,
+                        "Output": "{\"status\":\"ok\"}"
+                    }
+                ]
+            }
+        },
+        "Image": "sha256:d590b90e64fb572632a2750cd74876f3e2d8190f8bef76aabc32883cec2b6d38",
+        "ResolvConfPath": "/var/lib/docker/containers/582d2c1d664a2133dada4ac7bcb507230f9c2844292ea8525d60c190cc7bc8ea/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/582d2c1d664a2133dada4ac7bcb507230f9c2844292ea8525d60c190cc7bc8ea/hostname",
+        "HostsPath": "/var/lib/docker/containers/582d2c1d664a2133dada4ac7bcb507230f9c2844292ea8525d60c190cc7bc8ea/hosts",
+        "LogPath": "/var/lib/docker/containers/582d2c1d664a2133dada4ac7bcb507230f9c2844292ea8525d60c190cc7bc8ea/582d2c1d664a2133dada4ac7bcb507230f9c2844292ea8525d60c190cc7bc8ea-json.log",
+        "Name": "/xarm_service",
+        "RestartCount": 0,
+        "Driver": "overlay2",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "docker-default",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": null,
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "json-file",
+                "Config": {
+                    "max-file": "3",
+                    "max-size": "10m"
+                }
+            },
+            "NetworkMode": "host",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "unless-stopped",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                18,
+                129
+            ],
+            "CapAdd": null,
+            "CapDrop": null,
+            "CgroupnsMode": "private",
+            "Dns": [],
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": false,
+            "SecurityOpt": null,
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 0,
+            "NanoCpus": 0,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": [],
+            "BlkioDeviceWriteBps": [],
+            "BlkioDeviceReadIOps": [],
+            "BlkioDeviceWriteIOps": [],
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 0,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": null,
+            "Ulimits": [],
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/asound",
+                "/proc/acpi",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/sys/firmware",
+                "/sys/devices/virtual/powercap"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "GraphDriver": {
+            "Data": {
+                "ID": "582d2c1d664a2133dada4ac7bcb507230f9c2844292ea8525d60c190cc7bc8ea",
+                "LowerDir": "/var/lib/docker/overlay2/0e11e6fc136d8685bff4ddc8e6c007505c45ef94e8ab3db369b91c308d0b02af-init/diff:/var/lib/docker/overlay2/karacpisp7dqxlea2o74jag2b/diff:/var/lib/docker/overlay2/jftkcy7ogg1z0d07cdiaiiahe/diff:/var/lib/docker/overlay2/lcv7mp68br4b2eifjv7bjx056/diff:/var/lib/docker/overlay2/cvb23e82xysrgbsclpp2o9prx/diff:/var/lib/docker/overlay2/4grn2iiea67cllf6b98ky6mbr/diff:/var/lib/docker/overlay2/e906f2e053f5f3e719967c394b0624564e48e8faaf63538c5fdad9b0f945d71a/diff:/var/lib/docker/overlay2/b7d905b5cf7165a5a4310846f542582842051ddfe5c29041f46e2b3163e7178c/diff:/var/lib/docker/overlay2/688b9b74553e1542e98dcd82f430ae0d23745adc25b7520a4dc28149872b47c2/diff:/var/lib/docker/overlay2/996e3a0f46a9120a561499df73076d9ca28f796552f73ab2067c180b6720d400/diff",
+                "MergedDir": "/var/lib/docker/overlay2/0e11e6fc136d8685bff4ddc8e6c007505c45ef94e8ab3db369b91c308d0b02af/merged",
+                "UpperDir": "/var/lib/docker/overlay2/0e11e6fc136d8685bff4ddc8e6c007505c45ef94e8ab3db369b91c308d0b02af/diff",
+                "WorkDir": "/var/lib/docker/overlay2/0e11e6fc136d8685bff4ddc8e6c007505c45ef94e8ab3db369b91c308d0b02af/work"
+            },
+            "Name": "overlay2"
+        },
+        "Mounts": [],
+        "Config": {
+            "Hostname": "raspberrypi",
+            "Domainname": "",
+            "User": "",
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "ExposedPorts": {
+                "8102/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "WS_CHECK_DISABLED=1",
+                "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "GPG_KEY=7169605F62C751356D054A26A821E680E5FA6305",
+                "PYTHON_VERSION=3.13.12",
+                "PYTHON_SHA256=2a84cd31dd8d8ea8aaff75de66fc1b4b0127dd5799aa50a64ae9a313885b4593",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "PYTHONUNBUFFERED=1",
+                "PIP_NO_CACHE_DIR=1",
+                "PIP_DISABLE_PIP_VERSION_CHECK=1",
+                "SERVICE_HOST=0.0.0.0",
+                "SERVICE_PORT=8102"
+            ],
+            "Cmd": [
+                "uvicorn",
+                "main:app",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8102"
+            ],
+            "Healthcheck": {
+                "Test": [
+                    "CMD-SHELL",
+                    "curl -fsS http://localhost:8102/healthz || exit 1"
+                ],
+                "Interval": 30000000000,
+                "Timeout": 5000000000,
+                "StartPeriod": 15000000000,
+                "Retries": 3
+            },
+            "Image": "xarm-service",
+            "Volumes": null,
+            "WorkingDir": "/app",
+            "Entrypoint": null,
+            "OnBuild": null,
+            "Labels": {}
+        },
+        "NetworkSettings": {
+            "Bridge": "",
+            "SandboxID": "c601a86fadb4d5e5b199c7f921784b38129d40ca807208e45f8240e1e7778769",
+            "SandboxKey": "/var/run/docker/netns/default",
+            "Ports": {},
+            "HairpinMode": false,
+            "LinkLocalIPv6Address": "",
+            "LinkLocalIPv6PrefixLen": 0,
+            "SecondaryIPAddresses": null,
+            "SecondaryIPv6Addresses": null,
+            "EndpointID": "",
+            "Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "IPAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "MacAddress": "",
+            "Networks": {
+                "host": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "MacAddress": "",
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "2e63bbd2e4d13938affc8029d9ce712265996a470452b4231bf18ef834b52a7d",
+                    "EndpointID": "588cefaa0c004103ecc30cfac75c8ff61e72a2116735d7ed4726fd943d510d12",
+                    "Gateway": "",
+                    "IPAddress": "",
+                    "IPPrefixLen": 0,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                }
+            }
+        }
+    }
+]

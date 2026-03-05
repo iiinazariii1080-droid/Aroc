@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
 import ssl
 import subprocess
+import time
 from pathlib import Path
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
 from fastapi.responses import Response
@@ -63,23 +66,52 @@ NAT_BEGIN_MARKER = "# BEGIN NAT AUTO"
 NAT_END_MARKER = "# END NAT AUTO"
 
 
+def _env(key: str, fallback: str = "") -> str:
+    """Read TURN/STUN defaults from env vars (same source as Settings)."""
+    return os.environ.get(key, fallback)
+
+
 class JanusNatConfig(BaseModel):
-    stun_server: str = Field(default="82.165.177.194")
+    stun_server: str = Field(default_factory=lambda: _env("TURN_HOST", "82.165.177.194"))
     stun_port: int = Field(default=3478)
 
-    turn_server: str = Field(default="82.165.177.194")
+    turn_server: str = Field(default_factory=lambda: _env("TURN_HOST", "82.165.177.194"))
     turn_port: int = Field(default=3478)
-    turn_type: Literal["udp", "tcp", "tls"] = Field(default="udp")
-    turn_user: str = Field(default="webrtc")
-    turn_pwd: str = Field(default="G456AH37gbc")
+    turn_type: Literal["udp", "tcp", "tls"] = Field(default="tcp")
+    turn_user: str = Field(default_factory=lambda: _env("TURN_USER", "webrtc"))
+    turn_pwd: str = Field(default_factory=lambda: _env("TURN_PASS", ""))
 
-    nat_1_1_mapping: str = Field(default="87.156.23.54")
+    nat_1_1_mapping: str = Field(default="")
 
-    ice_tcp: bool = Field(default=True)
+    ice_tcp: bool = Field(default=False)
     full_trickle: bool = Field(default=True)
+    keep_private_host: bool = Field(default=True)
 
     min_port: int = Field(default=40000)
     max_port: int = Field(default=41000)
+
+
+def generate_turn_credentials(
+    shared_secret: str,
+    user: str = "webrtc",
+    ttl: int = 86400,
+) -> Tuple[str, str]:
+    """Generate coturn TURN REST API ephemeral credentials.
+
+    Uses the same algorithm as coturn ``use-auth-secret`` /
+    ``static-auth-secret``:
+      username = "<unix-expiry>:<user>"
+      credential = Base64(HMAC-SHA1(username, shared_secret))
+
+    Returns (username, credential).
+    """
+    import base64
+
+    expiry = int(time.time()) + ttl
+    username = f"{expiry}:{user}"
+    mac = hmac.new(shared_secret.encode(), username.encode(), hashlib.sha1)
+    credential = base64.b64encode(mac.digest()).decode()
+    return username, credential
 
 def load_nat_config() -> JanusNatConfig:
     """
@@ -131,6 +163,7 @@ def render_nat_block(cfg: JanusNatConfig) -> str:
   full_trickle = {b(cfg.full_trickle)}
   ignore_mdns = true
   ice_ignore_list = [ "docker", "veth", "lo", "vmnet" ]
+  keep_private_host = {b(cfg.keep_private_host)}
 
   stun_server = "{cfg.stun_server}"
   stun_port   = {cfg.stun_port}
@@ -237,31 +270,57 @@ def get_client_rtc_config() -> ClientRtcConfig:
     stun_url = f"stun:{nat_cfg.stun_server}:{nat_cfg.stun_port}"
     ice_servers.append(IceServer(urls=[stun_url]))
 
-    # TURN (for relayed candidates)
-    turn_schemes: List[str] = []
-    if nat_cfg.turn_type in {"udp", "tcp"}:
-        # plain TURN, transport specified in the query string
-        turn_schemes.append("turn")
-    elif nat_cfg.turn_type == "tls":
-        # secured TURN over TLS
-        turn_schemes.append("turns")
+    # ── TURN (multi-transport failover) ──
+    # Provide UDP, TCP and TLS variants so the browser can fall back
+    # through progressively more firewall-friendly transports.
+    turn_host = nat_cfg.turn_server
+    turn_port = nat_cfg.turn_port
+    turn_tls_port = int(os.environ.get("TURN_TLS_PORT", "443"))
 
-    if turn_schemes:
-        turn_urls = [
-            f"{scheme}:{nat_cfg.turn_server}:{nat_cfg.turn_port}?transport={nat_cfg.turn_type}"
-            for scheme in turn_schemes
-        ]
-        ice_servers.append(
-            IceServer(
-                urls=turn_urls,
-                username=nat_cfg.turn_user,
-                credential=nat_cfg.turn_pwd,
+    turn_urls_all: List[str] = []
+    # Primary transport configured in Janus nat block
+    if nat_cfg.turn_type in {"udp", "tcp"}:
+        turn_urls_all.append(f"turn:{turn_host}:{turn_port}?transport=udp")
+        turn_urls_all.append(f"turn:{turn_host}:{turn_port}?transport=tcp")
+    if nat_cfg.turn_type == "tls" or turn_tls_port:
+        turn_urls_all.append(f"turns:{turn_host}:{turn_tls_port}?transport=tcp")
+
+    if turn_urls_all:
+        # Prefer ephemeral TURN REST API credentials when shared secret is configured
+        turn_shared_secret = settings.turn_shared_secret
+        if turn_shared_secret:
+            eph_user, eph_cred = generate_turn_credentials(
+                shared_secret=turn_shared_secret,
+                user=nat_cfg.turn_user,
+                ttl=settings.turn_cred_ttl,
             )
-        )
+            ice_servers.append(
+                IceServer(
+                    urls=turn_urls_all,
+                    username=eph_user,
+                    credential=eph_cred,
+                )
+            )
+        else:
+            ice_servers.append(
+                IceServer(
+                    urls=turn_urls_all,
+                    username=nat_cfg.turn_user,
+                    credential=nat_cfg.turn_pwd,
+                )
+            )
 
     policy: Literal["all", "relay"]
     policy_env = settings.ice_policy
-    if policy_env == "relay":
+
+    # Depth camera sits behind a double NAT (isolated router → color-camera
+    # host → corporate router → internet).  Direct host/srflx candidates
+    # advertised via nat_1_1_mapping will never reach it, so we force
+    # relay-only ICE to skip the fruitless connectivity checks and connect
+    # via TURN immediately.
+    if settings.camera_type == "depth_camera":
+        policy = "relay"
+    elif policy_env == "relay":
         policy = "relay"
     else:
         policy = "all"
@@ -373,8 +432,8 @@ async def janus_ws_proxy(client_ws: WebSocket) -> None:
 
     kwargs: Dict[str, object] = {
         "open_timeout": 5,
-        "ping_interval": 20,
-        "ping_timeout": 20,
+        "ping_interval": 10,
+        "ping_timeout": 10,
         "close_timeout": 3,
         "max_size": 2**20,
         "compression": None,

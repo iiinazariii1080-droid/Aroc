@@ -37,6 +37,7 @@ async def test_recover_active_command():
             return_value={"CMD1": _make_cmd("T1", "S1")}
         )
         ss.register_command = AsyncMock()
+        ss.get_current_command_id = AsyncMock(return_value=None)
         nsm.is_terminal_state.return_value = False
         nsm.is_active_state.return_value = True
 

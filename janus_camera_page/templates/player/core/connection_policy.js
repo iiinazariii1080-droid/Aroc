@@ -57,9 +57,13 @@
         // MARK_DEGRADED would leave the player stuck without video.
         return { action: PolicyAction.REQUEST_RECOVERY, reason: RecoveryReason.ICE_FAILED, severity: RecoverySeverity.HARD };
 
-      case DomainEventType.ICE_DISCONNECTED_GRACE_TIMEOUT:
-        if (mediaFlowing) return { action: PolicyAction.MARK_DEGRADED };
+      case DomainEventType.ICE_DISCONNECTED_GRACE_TIMEOUT: {
+        // If frames are flowing but stale (>2s old), treat as real disconnection
+        const frameAge = snapshot && snapshot.lastFrameAgeMs;
+        const staleFrame = typeof frameAge === 'number' && frameAge > 2000;
+        if (mediaFlowing && !staleFrame) return { action: PolicyAction.MARK_DEGRADED };
         return { action: PolicyAction.REQUEST_RECOVERY, reason: RecoveryReason.ICE_DISCONNECTED_GRACE, severity: RecoverySeverity.MEDIUM };
+      }
 
       case DomainEventType.MEDIA_SILENCE_TIMEOUT:
         return { action: PolicyAction.REQUEST_RECOVERY, reason: RecoveryReason.NO_FRAMES, severity: RecoverySeverity.MEDIUM };
@@ -96,6 +100,12 @@
 
       case DomainEventType.JANUS_ERROR:
         return { action: PolicyAction.REQUEST_RECOVERY, reason: RecoveryReason.JANUS_ERROR, severity: RecoverySeverity.MEDIUM };
+
+      case DomainEventType.FPS_DROP:
+        return { action: PolicyAction.REQUEST_RECOVERY, reason: RecoveryReason.FPS_DROP, severity: RecoverySeverity.MEDIUM };
+
+      case DomainEventType.VIDEO_STALLED:
+        return { action: PolicyAction.REQUEST_RECOVERY, reason: RecoveryReason.VIDEO_STALLED, severity: RecoverySeverity.MEDIUM };
 
       default:
         return { action: PolicyAction.NO_OP };

@@ -36,9 +36,9 @@ def guarded_async_call(lock: asyncio.Lock, *, timeout_s: float = 0.3):
                 await asyncio.wait_for(lock.acquire(), timeout=float(timeout_s))
                 wait_time = time.time() - start_wait
                 if wait_time > 0.1:  # Log if we had to wait more than 100ms
-                    _LOGGER.debug(f"Acquired lock for {func.__name__} after {wait_time:.3f}s wait")
+                    _LOGGER.debug("Acquired lock for %s after %.3fs wait", func.__name__, wait_time)
             except asyncio.TimeoutError:
-                _LOGGER.warning(f"Failed to acquire lock for {func.__name__} within {timeout_s}s timeout")
+                _LOGGER.warning("Failed to acquire lock for %s within %ss timeout", func.__name__, timeout_s)
                 raise DeviceBusyError("Device is busy")
             try:
                 return await _execute_robot_command(func, *args, **kwargs)

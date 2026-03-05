@@ -1,0 +1,75 @@
+{
+  "commit": "86e12af21cfb6ec6e4075513df30f7ef2180e617",
+  "report": [
+    {
+      "file": "xarm/x3/base.py",
+      "status": "different",
+      "diff_lines": 7,
+      "diff_head": [
+        "--- ",
+        "+++ ",
+        "@@ -2672,3 +2672,4 @@",
+        "         code, params = self.get_common_param(6)",
+        "         params = list(map(lambda x: float('{:.6f}'.format(x)), params))",
+        "         return code, params",
+        "+"
+      ]
+    },
+    {
+      "file": "xarm/x3/gpio.py",
+      "status": "different",
+      "diff_lines": 7,
+      "diff_head": [
+        "--- ",
+        "+++ ",
+        "@@ -453,3 +453,4 @@",
+        "         return False",
+        " ",
+        " ",
+        "+"
+      ]
+    },
+    {
+      "file": "xarm/x3/gripper.py",
+      "status": "different",
+      "diff_lines": 7,
+      "diff_head": [
+        "--- ",
+        "+++ ",
+        "@@ -914,3 +914,4 @@",
+        "             'API -> set_bio_gripper_g2_position(pos={}, speed={}, force={}, wait={}, timeout={}) -> code={}'.format(pos, speed, force, wait, timeout, code),",
+        "             code=code)",
+        "         return code",
+        "+"
+      ]
+    },
+    {
+      "file": "xarm/wrapper/xarm_api.py",
+      "status": "different",
+      "diff_lines": 7,
+      "diff_head": [
+        "--- ",
+        "+++ ",
+        "@@ -4509,3 +4509,4 @@",
+        "         if item in self.__attr_alias_map.keys():",
+        "             return self.__attr_alias_map[item]",
+        "         raise AttributeError('\\'{}\\' has not attribute \\'{}\\''.format(self.__class__.__name__, item))",
+        "+"
+      ]
+    },
+    {
+      "file": "xarm/core/config/x_code.py",
+      "status": "different",
+      "diff_lines": 7,
+      "diff_head": [
+        "--- ",
+        "+++ ",
+        "@@ -1427,3 +1427,4 @@",
+        "     def __init__(self, code, status=0):",
+        "         self._code_map = FtSensorErrorCodeMap",
+        "         super(FtSensorError, self).__init__(code, status=status)",
+        "+"
+      ]
+    }
+  ]
+}

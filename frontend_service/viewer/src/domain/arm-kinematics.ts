@@ -16,7 +16,14 @@
 
 import type { ArmSpec, ArmVariant } from '@/types/arm-state';
 import { ARM_SPECS, resolveVariant } from '@/config/arm-specs';
-import { degToRad } from './coord-utils';
+import type { Mat4 } from '@/types/coordinates';
+import {
+  degToRad,
+  mat4Identity,
+  mat4Multiply,
+  mat4FromPose,
+  mat4ThreeToRos,
+} from './coord-utils';
 
 // ─── FK result ────────────────────────────────────
 
@@ -83,6 +90,58 @@ export function computeFKForVariant(
   const variant = resolveVariant(axis, deviceType);
   const spec = ARM_SPECS[variant];
   return computeFK(jointsDeg, spec);
+}
+
+// ─── Cumulative FK matrix ─────────────────────────
+
+/**
+ * Compute the cumulative FK matrix: armBase → flange, in ROS convention.
+ *
+ * Chains all group translations and joint rotations in Three.js space
+ * (matching the scene-graph structure used by arm-visual.ts), then converts
+ * to ROS convention via COB⁻¹ × M_three × COB.
+ *
+ * Layout (for 6-axis):
+ *   groups[0] = base carrier (no joint rotation)
+ *   groups[1..6] = joints 0..5 (each has a rotation)
+ *
+ * M_three = T(gp[0]) × [T(gp[1])×R(j0)] × [T(gp[2])×R(j1)] × ... × [T(gp[N])×R(j[N-1])]
+ *
+ * @param jointsDeg - Joint angles in degrees (length = axisCount).
+ * @param spec - ArmSpec for the variant.
+ * @returns 4×4 column-major Mat4 in ROS frame (meters).
+ */
+export function computeFKMatrix(jointsDeg: readonly number[], spec: ArmSpec): Mat4 {
+  const nGroups = spec.groupsPosition.length;
+  const nJoints = spec.jointAxes.length;
+
+  let M = mat4Identity();
+
+  for (let i = 0; i < nGroups; i++) {
+    // Translation from groupsPosition (Three.js meters, pre-scale)
+    const [px, py, pz] = spec.groupsPosition[i];
+    const T = mat4FromPose(px, py, pz, 0, 0, 0);
+    M = mat4Multiply(M, T);
+
+    // Joint rotation: groups[1..nJoints] → joints[0..nJoints-1]
+    const jIdx = i - 1;
+    if (jIdx >= 0 && jIdx < nJoints) {
+      const rawDeg = (jIdx < jointsDeg.length ? jointsDeg[jIdx] : 0);
+      const offsetDeg = spec.jointOffsetsDeg[jIdx] ?? 0;
+      const sign = spec.jointSigns[jIdx] ?? 1;
+      const angle = degToRad((rawDeg + offsetDeg) * sign);
+      const axis = spec.jointAxes[jIdx].toLowerCase();
+
+      // Single-axis rotation: mat4FromPose with only one Euler angle
+      const R = axis === 'x'
+        ? mat4FromPose(0, 0, 0, angle, 0, 0)
+        : mat4FromPose(0, 0, 0, 0, angle, 0);
+      M = mat4Multiply(M, R);
+    }
+  }
+
+  // Convert Three.js → ROS: M_ros = COB⁻¹ × M_three × COB
+  return mat4ThreeToRos(M);
 }
 
 // ─── Group setup data ─────────────────────────────

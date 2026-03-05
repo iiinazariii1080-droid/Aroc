@@ -1,5 +1,5 @@
 # Легкий Dockerfile на базе Alpine
-FROM python:3.11-alpine
+FROM python:3.12-alpine
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -10,7 +10,8 @@ WORKDIR /app
 # Установка системных зависимостей
 RUN apk add --no-cache \
     curl \
-    ca-certificates
+    ca-certificates \
+    su-exec
 
 # Copy requirements and install
 COPY requirements.txt ./
@@ -19,9 +20,15 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 # Copy app
 COPY . ./
 
+# Copy entrypoint script
+COPY docker-entrypoint-alpine.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Non-root user (best practice)
 RUN adduser -D -u 10001 appuser && chown -R appuser:appuser /app
-USER appuser
+
+# Use entrypoint to handle permissions at runtime
+ENTRYPOINT ["docker-entrypoint.sh"]
 
 # Default envs
 ENV SERVICE_HOST=0.0.0.0 \
@@ -29,10 +36,11 @@ ENV SERVICE_HOST=0.0.0.0 \
     LOG_LEVEL=info \
     ROBOT_POSITIONS_DB_PATH=/app/data/database.db
 
-EXPOSE 7905
+EXPOSE 7905 7906
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
   CMD curl -fsS "http://localhost:${SERVICE_PORT}/livez" || exit 1
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7905", "--log-level", "info"]
+# Shell-form so SERVICE_PORT / LOG_LEVEL env vars are expanded at runtime.
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${SERVICE_PORT} --log-level ${LOG_LEVEL}"]
 

@@ -67,12 +67,22 @@ class EventBus:
         async with self._lock:
             self._subscribers.discard(q)
 
-    async def stream(self) -> AsyncIterator[AnyEvent]:
-        """Async iterator helper for SSE routes."""
+    async def stream(self, timeout: float = 30.0) -> AsyncIterator[AnyEvent]:
+        """Async iterator helper for SSE routes.
+
+        *timeout* caps how long we wait for a single event.  When it
+        expires the generator yields nothing (caller can send a keepalive
+        and call again).  This prevents orphaned subscribers when the
+        ASGI framework fails to close the generator on disconnect.
+        """
         q = await self.subscribe()
         try:
             while True:
-                yield await q.get()
+                try:
+                    yield await asyncio.wait_for(q.get(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    # Let caller handle keep-alive; we just re-loop
+                    continue
         finally:
             await self.unsubscribe(q)
 

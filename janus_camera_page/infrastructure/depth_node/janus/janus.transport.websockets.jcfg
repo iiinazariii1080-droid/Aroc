@@ -1,0 +1,14 @@
+general: {
+  ws = true
+  ws_port = 8188
+  ws_interface = "0.0.0.0"
+  wss_port = 8989
+  # уникальный путь, чтобы не конфликтовать с /janus у REST:
+  ws_path = "/janus-ws"
+  # subprotocol janus используется janus.js; оставим по умолчанию
+  # subprotocol = "janus-protocol"
+
+  # устойчивость
+  pingpong = true
+  timeout = 30
+}

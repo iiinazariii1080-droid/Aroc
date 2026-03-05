@@ -2,12 +2,16 @@
 Оптимизированные роуты для Symovo AGV.
 """
 from typing import Any
+import logging
 import math
 from fastapi import APIRouter, HTTPException, status, Path, Depends, Query
 from fastapi.responses import Response
 
+_logger = logging.getLogger(__name__)
+
 from routes.decorators import safe_getter
 from services.symovo_service import SymovoAgvClient, normalize_symovo_status
+from models.api_types import ErrorStatus
 from services.state_store import state_store
 from app.dependencies import SymovoClient
 from app.config import settings
@@ -31,7 +35,7 @@ router = APIRouter(
     },
 )
 
-@router.get(
+@router.post(
     "/fault_reset",
     response_model=GenericResponse,
     summary="Clear all transports",
@@ -80,6 +84,8 @@ async def get_pose(client: SymovoClient) -> Any:
 
     if isinstance(raw, dict):
         normalized = normalize_symovo_status(raw)
+        if isinstance(normalized, ErrorStatus):
+            raise HTTPException(status_code=502, detail=normalized.model_dump())
         if hasattr(normalized, 'dict'):
             return normalized.dict()
         elif hasattr(normalized, 'model_dump'):
@@ -119,6 +125,8 @@ async def get_status(client: SymovoClient) -> Any:
 
     if isinstance(raw, dict):
         normalized = normalize_symovo_status(raw)
+        if isinstance(normalized, ErrorStatus):
+            raise HTTPException(status_code=502, detail=normalized.model_dump())
         if hasattr(normalized, 'dict'):
             return normalized.dict()
         elif hasattr(normalized, 'model_dump'):
@@ -311,9 +319,10 @@ async def get_map_png(
             },
         )
     except Exception as e:
+        _logger.error("Error fetching map image for map_id=%s: %s", map_id, e)
         raise HTTPException(
             status_code=503,
-            detail={"error": {"type": type(e).__name__, "msg": f"Error fetching map image: {str(e)}"}}
+            detail={"error": {"type": "controller_error", "msg": "Controller communication error"}}
         )
 
 
@@ -340,6 +349,10 @@ async def go_to_pose(req: GoToPoseRequest, client: SymovoClient) -> Any:
         max_speed_m_s=req.max_speed_m_s,
         wait=req.wait,
     )
+    # P1-1: when wait=True, lock is already released; poll for completion outside it.
+    if isinstance(data, dict) and "_wait_transport_id" in data:
+        tid = data.pop("_wait_transport_id")
+        data = await client._poll_transport_completion(tid)
     if isinstance(data, dict):
         return data
     return {"result": data}
@@ -399,12 +412,16 @@ async def get_map_png_v1(
     client: SymovoClient,
     map_id: int = Path(..., description="Map ID"),
 ) -> Response:
-    image_data = await client.map_png(map_id)
-    return Response(
-        content=image_data,
-        media_type="image/png",
-        headers={"Cache-Control": "public, max-age=300"},
-    )
+    try:
+        image_data = await client.map_png(map_id)
+        return Response(
+            content=image_data,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=300"},
+        )
+    except Exception as e:
+        _logger.error("Error fetching map PNG v1 for map_id=%s: %s", map_id, e)
+        raise HTTPException(status_code=503, detail={"error": {"type": "controller_error", "msg": "Controller communication error"}})
 
 
 @router.get(
@@ -419,12 +436,16 @@ async def get_map_tile_png_v1(
     x: int = Path(..., ge=0, description="Tile X"),
     y: int = Path(..., ge=0, description="Tile Y"),
 ) -> Response:
-    image_data = await client.map_tile_png(map_id=map_id, zoom=zoom, x=x, y=y)
-    return Response(
-        content=image_data,
-        media_type="image/png",
-        headers={"Cache-Control": "public, max-age=60"},
-    )
+    try:
+        image_data = await client.map_tile_png(map_id=map_id, zoom=zoom, x=x, y=y)
+        return Response(
+            content=image_data,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=60"},
+        )
+    except Exception as e:
+        _logger.error("Error fetching map tile map_id=%s z=%s x=%s y=%s: %s", map_id, zoom, x, y, e)
+        raise HTTPException(status_code=503, detail={"error": {"type": "controller_error", "msg": "Controller communication error"}})
 
 
 @router.get(
@@ -433,12 +454,16 @@ async def get_map_tile_png_v1(
     description="Read-only: returns live SLAM map preview image.",
 )
 async def get_map_slam_png_v1(client: SymovoClient) -> Response:
-    image_data = await client.map_slam_png()
-    return Response(
-        content=image_data,
-        media_type="image/png",
-        headers={"Cache-Control": "no-cache"},
-    )
+    try:
+        image_data = await client.map_slam_png()
+        return Response(
+            content=image_data,
+            media_type="image/png",
+            headers={"Cache-Control": "no-cache"},
+        )
+    except Exception as e:
+        _logger.error("Error fetching SLAM PNG: %s", e)
+        raise HTTPException(status_code=503, detail={"error": {"type": "controller_error", "msg": "Controller communication error"}})
 
 
 @router.get(
@@ -447,12 +472,16 @@ async def get_map_slam_png_v1(client: SymovoClient) -> Response:
     description="Read-only: returns current lidar scan image from controller.",
 )
 async def get_lidar_scan_png_v1(client: SymovoClient) -> Response:
-    image_data = await client.scan_png()
-    return Response(
-        content=image_data,
-        media_type="image/png",
-        headers={"Cache-Control": "no-cache"},
-    )
+    try:
+        image_data = await client.scan_png()
+        return Response(
+            content=image_data,
+            media_type="image/png",
+            headers={"Cache-Control": "no-cache"},
+        )
+    except Exception as e:
+        _logger.error("Error fetching lidar scan PNG: %s", e)
+        raise HTTPException(status_code=503, detail={"error": {"type": "controller_error", "msg": "Controller communication error"}})
 
 
 @router.get(

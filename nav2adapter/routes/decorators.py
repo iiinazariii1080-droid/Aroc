@@ -75,7 +75,7 @@ def safe_getter(response_model: Type[Any]):
                 _LOGGER.error("Unhandled exception in %s: %s", getattr(fn, "__name__", "handler"), e, exc_info=True)
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=_err("Internal server error", err_type=type(e).__name__)
+                    detail=_err("Internal server error", err_type="InternalError")
                 )
         return wrapper
     return decorator

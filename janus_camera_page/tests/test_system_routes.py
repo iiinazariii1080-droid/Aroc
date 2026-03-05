@@ -9,10 +9,17 @@ import pytest
 
 class TestHealthz:
     @pytest.mark.asyncio
-    async def test_returns_ok(self, client):
+    async def test_returns_structured_response(self, client):
         resp = await client.get("/healthz")
         assert resp.status_code == 200
-        assert resp.json()["ok"] is True
+        body = resp.json()
+        # Deep healthz: in test env Janus is unavailable, so ok may be False
+        assert "ok" in body
+        assert "mode" in body
+        assert "janus_reachable" in body
+        assert "stream_active" in body
+        assert "details" in body
+        assert isinstance(body["ok"], bool)
 
 
 class TestRelayEndpoints:
@@ -143,3 +150,105 @@ class TestColorView:
             resp = await client.get("/color_view.html")
         assert resp.status_code == 200
         assert "rgb_camera" in resp.text
+
+
+class TestDepthMapLoad:
+    """Tests for /api/v1/depth_map/load and /depth_map/load proxy routes."""
+
+    @pytest.mark.asyncio
+    @patch("app.routes.system.get_settings")
+    async def test_depth_camera_node_proxies_locally(self, mock_settings, client):
+        """On a depth_camera node the request proxies to localhost:8000/depth_map."""
+        mock_settings.return_value = MagicMock(
+            camera_type="depth_camera",
+            depth_cam_url="http://192.168.1.55:8900",
+        )
+        fake_payload = {"width": 480, "height": 848, "dtype": "float32", "timestamp": 1.0, "data": "AAAA"}
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = fake_payload
+
+        with patch("requests.get", return_value=mock_resp) as mock_get:
+            resp = await client.get("/depth_map/load")
+
+        assert resp.status_code == 200
+        assert resp.json()["width"] == 480
+        mock_get.assert_called_once()
+        call_url = mock_get.call_args[0][0]
+        assert "localhost:8000/depth_map" in call_url
+
+    @pytest.mark.asyncio
+    @patch("app.routes.system.get_settings")
+    async def test_color_camera_node_proxies_remote(self, mock_settings, client):
+        """On a color_camera node the request proxies to the depth camera URL."""
+        mock_settings.return_value = MagicMock(
+            camera_type="color_camera",
+            depth_cam_url="http://192.168.1.55:8900",
+        )
+        fake_payload = {"width": 480, "height": 848, "dtype": "float32", "timestamp": 1.0, "data": "AAAA"}
+        mock_resp = MagicMock(status_code=200)
+        mock_resp.json.return_value = fake_payload
+
+        with patch("requests.get", return_value=mock_resp) as mock_get:
+            resp = await client.get("/depth_map/load")
+
+        assert resp.status_code == 200
+        assert resp.json()["dtype"] == "float32"
+        call_url = mock_get.call_args[0][0]
+        assert "192.168.1.55:8900" in call_url
+
+    @pytest.mark.asyncio
+    @patch("app.routes.system.get_settings")
+    async def test_upstream_error_returns_502(self, mock_settings, client):
+        """Network failure to upstream returns 502."""
+        import requests as _req
+
+        mock_settings.return_value = MagicMock(
+            camera_type="color_camera",
+            depth_cam_url="http://192.168.1.55:8900",
+        )
+        with patch("requests.get", side_effect=_req.ConnectionError("refused")) as _:
+            resp = await client.get("/depth_map/load")
+
+        assert resp.status_code == 502
+        assert "Depth map proxy error" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    @patch("app.routes.system.get_settings")
+    async def test_upstream_503_forwarded(self, mock_settings, client):
+        """Upstream 503 (no frame yet) is forwarded."""
+        mock_settings.return_value = MagicMock(
+            camera_type="depth_camera",
+            depth_cam_url="http://192.168.1.55:8900",
+        )
+        mock_resp = MagicMock(status_code=503, text='{"detail":"no depth frame yet"}')
+        with patch("requests.get", return_value=mock_resp):
+            resp = await client.get("/depth_map/load")
+
+        assert resp.status_code == 503
+
+    @pytest.mark.asyncio
+    @patch("app.routes.system.get_settings")
+    async def test_raw_format_passthrough(self, mock_settings, client):
+        """format=raw proxies binary content with headers."""
+        mock_settings.return_value = MagicMock(
+            camera_type="depth_camera",
+            depth_cam_url="http://192.168.1.55:8900",
+        )
+        mock_resp = MagicMock(
+            status_code=200,
+            content=b"\x00" * 16,
+            headers={
+                "X-Width": "4",
+                "X-Height": "1",
+                "X-Dtype": "float32",
+                "X-Timestamp": "1.0",
+            },
+        )
+        with patch("requests.get", return_value=mock_resp) as mock_get:
+            resp = await client.get("/depth_map/load?format=raw")
+
+        assert resp.status_code == 200
+        assert resp.headers["x-width"] == "4"
+        assert resp.headers["x-dtype"] == "float32"
+        call_url = mock_get.call_args[0][0]
+        assert "format=raw" in call_url

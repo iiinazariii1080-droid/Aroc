@@ -111,8 +111,7 @@ def streaming_info(session_id: int, handle_id: int, mount_id: int) -> Dict[str, 
 def janus_summary(mount_id: int | None = None) -> Dict[str, Any]:
     target_id = mount_id or get_settings().janus_mount_id
     data = streaming_info(target_id).get("data", {})
-    info = data.get("info", {})
-    mount = info.get("info", {})
+    mount = data.get("info", {})
     media = (mount.get("media") or [{}])[0]
     return {
         "mountpoint_id": mount.get("id"),

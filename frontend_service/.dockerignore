@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.vscode/
+node_modules/
+viewer/node_modules/
+viewer/dist/
+viewer/.vite/
+*.log
+*.tmp
+*.swp
+.DS_Store

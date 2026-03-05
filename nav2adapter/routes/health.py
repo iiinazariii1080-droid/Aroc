@@ -22,17 +22,31 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 # Health-check thresholds (env-configurable)
 # ---------------------------------------------------------------------------
-HEARTBEAT_STALE_S = float(os.getenv("HEALTH_HEARTBEAT_STALE_S", "10.0"))
-HEALTH_EVENTBUS_DROP_MAX = int(os.getenv("HEALTH_EVENTBUS_DROP_MAX", "0"))
-HEALTH_PERSISTENCE_DROP_MAX = int(os.getenv("HEALTH_PERSISTENCE_DROP_MAX", "0"))
-HEALTH_MQTT_EVENT_PUBLISH_FAIL_MAX = int(os.getenv("HEALTH_MQTT_EVENT_PUBLISH_FAIL_MAX", "0"))
-HEALTH_LATENCY_MIN_SAMPLES = int(os.getenv("HEALTH_LATENCY_MIN_SAMPLES", "10"))
-HEALTH_MQTT_EVENT_LATENCY_MAX_MS = float(os.getenv("HEALTH_MQTT_EVENT_LATENCY_MAX_MS", "1500"))
-HEALTH_SYMOVO_LONGPOLL_LATENCY_MAX_MS = float(os.getenv("HEALTH_SYMOVO_LONGPOLL_LATENCY_MAX_MS", "35000"))
-HEALTH_PERSISTENCE_WRITE_LATENCY_MAX_MS = float(os.getenv("HEALTH_PERSISTENCE_WRITE_LATENCY_MAX_MS", "250"))
-HEALTH_EVENTBUS_DROP_RATE_MAX_PER_S = float(os.getenv("HEALTH_EVENTBUS_DROP_RATE_MAX_PER_S", "0.01"))
-HEALTH_PERSISTENCE_DROP_RATE_MAX_PER_S = float(os.getenv("HEALTH_PERSISTENCE_DROP_RATE_MAX_PER_S", "0.005"))
-HEALTH_MQTT_EVENT_FAILURE_RATE_MAX_PER_S = float(os.getenv("HEALTH_MQTT_EVENT_FAILURE_RATE_MAX_PER_S", "0.01"))
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        _LOGGER.warning("Invalid env %s=%r, using default %s", name, os.getenv(name), default)
+        return default
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (ValueError, TypeError):
+        _LOGGER.warning("Invalid env %s=%r, using default %s", name, os.getenv(name), default)
+        return default
+
+HEARTBEAT_STALE_S = _env_float("HEALTH_HEARTBEAT_STALE_S", 10.0)
+HEALTH_EVENTBUS_DROP_MAX = _env_int("HEALTH_EVENTBUS_DROP_MAX", 0)
+HEALTH_PERSISTENCE_DROP_MAX = _env_int("HEALTH_PERSISTENCE_DROP_MAX", 0)
+HEALTH_MQTT_EVENT_PUBLISH_FAIL_MAX = _env_int("HEALTH_MQTT_EVENT_PUBLISH_FAIL_MAX", 0)
+HEALTH_LATENCY_MIN_SAMPLES = _env_int("HEALTH_LATENCY_MIN_SAMPLES", 10)
+HEALTH_MQTT_EVENT_LATENCY_MAX_MS = _env_float("HEALTH_MQTT_EVENT_LATENCY_MAX_MS", 1500.0)
+HEALTH_SYMOVO_LONGPOLL_LATENCY_MAX_MS = _env_float("HEALTH_SYMOVO_LONGPOLL_LATENCY_MAX_MS", 35000.0)
+HEALTH_PERSISTENCE_WRITE_LATENCY_MAX_MS = _env_float("HEALTH_PERSISTENCE_WRITE_LATENCY_MAX_MS", 250.0)
+HEALTH_EVENTBUS_DROP_RATE_MAX_PER_S = _env_float("HEALTH_EVENTBUS_DROP_RATE_MAX_PER_S", 0.01)
+HEALTH_PERSISTENCE_DROP_RATE_MAX_PER_S = _env_float("HEALTH_PERSISTENCE_DROP_RATE_MAX_PER_S", 0.005)
+HEALTH_MQTT_EVENT_FAILURE_RATE_MAX_PER_S = _env_float("HEALTH_MQTT_EVENT_FAILURE_RATE_MAX_PER_S", 0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -325,8 +339,11 @@ async def readyz(request: Request) -> Any:
     if ma is not None:
         connected = bool(getattr(ma, "is_connected", False) or getattr(ma, "_connected", False))
         if not connected:
-            _LOGGER.warning("Health check /readyz: not ready (mqtt_not_connected)")
-            raise HTTPException(status_code=503, detail={"error": {"type": "NotReady", "msg": "mqtt_not_connected"}})
+            # MQTT disconnect is degraded, not a readiness failure.
+            # HTTP API is fully functional without MQTT. The reconnect loop
+            # will restore MQTT automatically. Failing readiness here would
+            # cause K8s to remove the pod, which is worse than degraded mode.
+            _LOGGER.warning("Health check /readyz: MQTT disconnected (degraded mode)")
 
     _LOGGER.info("Health check /readyz OK")
     return {"status": "ok", "reliability": _reliability_health_summary()}

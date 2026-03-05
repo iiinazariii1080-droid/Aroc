@@ -70,6 +70,8 @@ def save_robot_position(new_position: Dict[str, Any]) -> bool:
     params: Optional[Dict[str, Any]] = new_position.get("params")
     name: Optional[str] = new_position.get("name")
 
+    ensure_initialized()
+
     if not position_id or not isinstance(position_id, str):
         raise ValueError("field 'id' (str) is required")
     if not isinstance(name, str) or not name.strip():
@@ -111,6 +113,7 @@ def save_robot_position(new_position: Dict[str, Any]) -> bool:
 
 def get_robot_positions_list() -> List[Dict[str, Any]]:
     """Return all saved positions as a list of objects {id, name, params}."""
+    ensure_initialized()
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
@@ -135,6 +138,7 @@ def get_robot_position(position_id: str) -> Optional[Dict[str, Any]]:
     """Return single position by id or None if not found."""
     if not position_id:
         return None
+    ensure_initialized()
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
@@ -158,6 +162,7 @@ def get_robot_position_by_name(name: str) -> Optional[Dict[str, Any]]:
     """Return single position by unique name (case-insensitive) or None if not found."""
     if not isinstance(name, str) or not name.strip():
         return None
+    ensure_initialized()
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
@@ -184,6 +189,7 @@ def delete_robot_position(position_id: str) -> bool:
     """Delete position by id."""
     if not position_id:
         raise ValueError("position_id is required")
+    ensure_initialized()
     conn = sqlite3.connect(DB_PATH)
     try:
         c = conn.cursor()
@@ -194,7 +200,19 @@ def delete_robot_position(position_id: str) -> bool:
         conn.close()
 
 
-# Ensure table exists on import
-init_robot_positions_table()
+_table_initialized = False
 
+
+def ensure_initialized() -> None:
+    """Ensure the robot_positions table exists (lazy, idempotent).
+
+    Called once on first DB access rather than at module import time
+    to avoid blocking I/O during imports and to allow the DB directory
+    to be created by the Docker entrypoint before we touch it.
+    """
+    global _table_initialized
+    if _table_initialized:
+        return
+    init_robot_positions_table()
+    _table_initialized = True
 

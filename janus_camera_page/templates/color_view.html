@@ -31,6 +31,7 @@
   <script src="/api/v1/__CAM_TYPE__/player/adapters/dom_ui_adapter.js"></script>
   <script src="/api/v1/__CAM_TYPE__/player/adapters/janus_streaming_adapter.js"></script>
   <script src="/api/v1/__CAM_TYPE__/player/adapters/janus_textroom_adapter.js"></script>
+  <script src="/api/v1/__CAM_TYPE__/player/adapters/telemetry.js"></script>
 
   <script src="/api/v1/__CAM_TYPE__/player/app/stats_service.js"></script>
   <script src="/api/v1/__CAM_TYPE__/player/app/joystick_service.js"></script>
@@ -200,6 +201,16 @@
       box-shadow: 0 0 4px rgba(48, 209, 88, 0.4);
     }
 
+    #statusPill[data-state="DEGRADED"]::before {
+      background: var(--clr-reconnecting);
+      box-shadow: 0 0 6px var(--clr-reconnecting);
+      animation: state-pulse 2s ease-in-out infinite;
+    }
+    #statusPill[data-state="DEGRADED"] {
+      background: rgba(255, 159, 10, 0.12);
+      border-color: rgba(255, 159, 10, 0.3);
+    }
+
     #statusPill[data-state="RECONNECTING"]::before {
       background: var(--clr-reconnecting);
       box-shadow: 0 0 6px var(--clr-reconnecting);
@@ -261,10 +272,15 @@
   data-debug-panel="0"
   data-auto-restart="local"
   data-joystick-mode="always"
-  data-no-frame-threshold-ms="5000"
+  data-no-frame-threshold-ms="8000"
   data-track-mute-ms="3000"
   data-watchdog-interval-ms="2000"
-  data-connect-settle-ms="3000"
+  data-connect-settle-ms="6000"
+  data-min-acceptable-fps="5"
+  data-fps-drop-threshold-ms="3000"
+  data-ice-disconnected-grace-ms="3000"
+  data-backoff-base-ms="300"
+  data-backoff-min-ms="150"
   data-client-config-path="/api/v1/__CAM_TYPE__/client-config"
 >
   <div id="statusPill" role="status" aria-live="polite"></div>

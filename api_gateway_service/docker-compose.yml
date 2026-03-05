@@ -19,6 +19,8 @@ services:
       # Camera pool (depth_camera polled ~3/sec by frontend)
       CAM_MAX_CONNECTIONS: 30
       CAM_MAX_KEEPALIVE: 25
+      # Route /api/v1/depth_map/* → color_camera node which proxies to .55
+      SERVICE_MAP_JSON: '{"depth_map":{"url":"http://192.168.1.10:8900","prefix":"/api/v1/depth_map"}}'
     ports:
       - "8201:8201"
     restart: unless-stopped

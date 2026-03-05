@@ -33,24 +33,24 @@ class BaseHttpClient(ABC):
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """Создает сессию если она не существует."""
-        if self._session is None or self._session.closed:
-            async with self._session_lock:
-                if self._session is None or self._session.closed:
-                    connector = self._create_connector()
-                    self._session = aiohttp.ClientSession(
-                        timeout=self._timeout,
-                        connector=connector
-                    )
-        return self._session
+        async with self._session_lock:
+            if self._session is None or self._session.closed:
+                connector = self._create_connector()
+                self._session = aiohttp.ClientSession(
+                    timeout=self._timeout,
+                    connector=connector
+                )
+            return self._session
 
     def _create_connector(self) -> aiohttp.TCPConnector:
         """Создает коннектор с нужными SSL настройками."""
+        kwargs = dict(limit=30, limit_per_host=20, enable_cleanup_closed=True)
         if self._allow_invalid_certs:
             ssl_ctx = ssl.create_default_context()
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
-            return aiohttp.TCPConnector(ssl=ssl_ctx)
-        return aiohttp.TCPConnector()
+            return aiohttp.TCPConnector(ssl=ssl_ctx, **kwargs)
+        return aiohttp.TCPConnector(**kwargs)
 
     async def _read_payload(self, resp: aiohttp.ClientResponse) -> Any:
         """Читает payload из ответа с обработкой ошибок."""
@@ -166,12 +166,10 @@ class BaseHttpClient(ABC):
             except DeviceError:
                 # Non-transient error; do not retry.
                 raise
-            except Exception as e:
-                last_exception = e
-                if attempt < effective_max_retries:
-                    await asyncio.sleep(self._retry_delay * (2 ** attempt))
-                    continue
-                raise DeviceError(f"Request failed: {str(e)}")
+            except Exception:
+                # Programming errors (TypeError, KeyError, etc.) are not transient.
+                # Don't waste time retrying — re-raise immediately.
+                raise
         
         # Should be unreachable, but keep a safe fallback.
         if last_exception:
@@ -242,22 +240,28 @@ class BaseHttpClient(ABC):
         if op_timeout is not None:
             effective_timeout = aiohttp.ClientTimeout(total=float(op_timeout))
 
-        async with session.request(
-            method="GET",
-            url=url,
-            params=params,
-            timeout=effective_timeout,
-        ) as resp:
-            if 200 <= resp.status < 300:
-                return await resp.read()
-            error_msg = f"{self.__class__.__name__}: HTTP {resp.status} GET {url}"
-            raise DeviceError(error_msg)
+        try:
+            async with session.request(
+                method="GET",
+                url=url,
+                params=params,
+                timeout=effective_timeout,
+            ) as resp:
+                if 200 <= resp.status < 300:
+                    return await resp.read()
+                error_msg = f"{self.__class__.__name__}: HTTP {resp.status} GET {url}"
+                raise DeviceError(error_msg)
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            raise DeviceConnectionError(
+                f"{self.__class__.__name__}: request timeout/connection error GET {url}: {e}"
+            ) from e
 
     async def close(self):
         """Закрывает HTTP сессию."""
-        if self._session and not self._session.closed:
-            await self._session.close()
-            self._session = None
+        async with self._session_lock:
+            if self._session and not self._session.closed:
+                await self._session.close()
+                self._session = None
 
     async def __aenter__(self):
         """Async context manager entry."""

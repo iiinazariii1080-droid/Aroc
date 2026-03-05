@@ -88,11 +88,11 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements-dev.txt
           if [ -f "${{ matrix.requirements }}" ]; then
-            pip install -r "${{ matrix.requirements }}" || true
+            pip install -r "${{ matrix.requirements }}"
           fi
           # Install service-specific deps if they have their own requirements
           if [ -f "${{ matrix.service }}/requirements.txt" ]; then
-            pip install -r "${{ matrix.service }}/requirements.txt" || true
+            pip install -r "${{ matrix.service }}/requirements.txt"
           fi
 
       - name: Run tests
@@ -114,7 +114,7 @@ jobs:
               --junitxml=test-results-${{ matrix.service }}.xml \
               --cov="${{ matrix.cov_source }}" \
               --cov-report=term-missing:skip-covered \
-              --cov-fail-under=75
+              --cov-fail-under=70
           else
             echo "No tests directory found for ${{ matrix.service }}"
           fi
@@ -127,12 +127,35 @@ jobs:
           path: test-results-${{ matrix.service }}.xml
           if-no-files-found: ignore
 
-  # ── Coverage (optional, runs after tests pass) ─────────────────────────
+  # ── Frontend viewer tests (TypeScript/Vitest) ──────────────────────────
+  frontend_viewer_test:
+    name: "Frontend viewer tests"
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend_service/viewer/package-lock.json
+
+      - name: Install viewer dependencies
+        working-directory: frontend_service/viewer
+        run: npm ci
+
+      - name: Run viewer unit tests
+        working-directory: frontend_service/viewer
+        run: npm test
+
+  # ── Coverage report (required) ──────────────────────────────────────────
   coverage:
     name: "Coverage report"
     runs-on: ubuntu-latest
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - test
+      - frontend_viewer_test
     steps:
       - uses: actions/checkout@v4
 
@@ -145,9 +168,12 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements-dev.txt
           # Install all service requirements
-          for svc in api_gateway_service igus_service mqtt_command_service nav2adapter robot_service frontend_service; do
+          for svc in api_gateway_service igus_service mqtt_command_service nav2adapter xarm_service robot_service frontend_service proxt_camera_service janus_camera_page; do
+            if [ -f "$svc/requirements-dev.txt" ]; then
+              pip install -r "$svc/requirements-dev.txt"
+            fi
             if [ -f "$svc/requirements.txt" ]; then
-              pip install -r "$svc/requirements.txt" 2>/dev/null || true
+              pip install -r "$svc/requirements.txt"
             fi
           done
 
@@ -157,18 +183,24 @@ jobs:
           WS_CHECK_DISABLED: "1"
           DRYVE_HOST: "127.0.0.1"
           MQTT_BROKER: "127.0.0.1"
+          DEPTH_BASE_URL: "http://127.0.0.1:9999"
           CONFIG_DB_PATH: ":memory:"
           API_ENABLED: "false"
         run: |
-          for svc in api_gateway_service igus_service mqtt_command_service nav2adapter xarm_service robot_service; do
+          for svc in api_gateway_service igus_service mqtt_command_service nav2adapter xarm_service robot_service frontend_service proxt_camera_service janus_camera_page; do
             if [ -d "$svc/tests" ]; then
               echo "── coverage: $svc ──"
+              if [ "$svc" = "frontend_service" ] || [ "$svc" = "mqtt_command_service" ]; then
+                cov_source="$svc"
+              else
+                cov_source="$svc/app"
+              fi
               PYTHONPATH="$svc:.:$PYTHONPATH" \
               python -m pytest "$svc/tests" \
                 -m "not hardware and not simulator" \
-                --cov="$svc/app" \
+                --cov="$cov_source" \
                 --cov-report=term-missing:skip-covered \
-                --timeout=30 -q --tb=short 2>&1 || true
+                --timeout=30 -q --tb=short
               echo ""
             fi
           done

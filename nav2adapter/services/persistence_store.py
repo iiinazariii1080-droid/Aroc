@@ -14,6 +14,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 
+import logging
+
+_LOGGER = logging.getLogger(__name__)
+
+
 @dataclass
 class PersistedCommand:
     command_id: str
@@ -39,9 +44,29 @@ class PersistedSession:
 
 
 class JsonPersistenceStore:
+    _MAX_COMMANDS = 200  # evict oldest entries above this threshold
+
     def __init__(self, path: str):
         self.path = path
         self._lock = asyncio.Lock()
+        self._cleanup_orphan_tmp_files()
+
+    def _cleanup_orphan_tmp_files(self) -> None:
+        """Remove orphan .tmp files left by SIGKILL during atomic writes."""
+        dir_name = os.path.dirname(self.path) or "."
+        base_name = os.path.basename(self.path) or "state.json"
+        prefix = f".{base_name}."
+        try:
+            for entry in os.listdir(dir_name):
+                if entry.startswith(prefix) and entry.endswith(".tmp"):
+                    tmp_path = os.path.join(dir_name, entry)
+                    try:
+                        os.remove(tmp_path)
+                        _LOGGER.info("Removed orphan persistence tmp file: %s", tmp_path)
+                    except OSError:
+                        pass
+        except OSError:
+            pass
 
     async def _read_file(self) -> Dict[str, Any]:
         def _sync_read() -> Dict[str, Any]:
@@ -161,6 +186,21 @@ class JsonPersistenceStore:
                 "created_at": cmd.created_at if cmd.created_at is not None else prev.get("created_at"),
                 "updated_at": cmd.updated_at if cmd.updated_at is not None else prev.get("updated_at"),
             }
+
+            # Evict oldest entries when exceeding max capacity
+            cmds = data["commands"]
+            if len(cmds) > self._MAX_COMMANDS:
+                # Sort by updated_at (or created_at) ascending; evict oldest
+                sorted_ids = sorted(
+                    cmds.keys(),
+                    key=lambda k: cmds[k].get("updated_at") or cmds[k].get("created_at") or "",
+                )
+                to_remove = sorted_ids[: len(cmds) - self._MAX_COMMANDS]
+                for rid in to_remove:
+                    cmds.pop(rid, None)
+                    # Also remove matching sessions
+                    if isinstance(data.get("sessions"), dict):
+                        data["sessions"].pop(rid, None)
 
             await self._atomic_write(data)
 

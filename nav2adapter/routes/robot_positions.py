@@ -3,6 +3,7 @@ Robot positions CRUD endpoints.
 
 Extracted from main.py (НАР-7) to reduce main module size.
 """
+import sqlite3
 import uuid
 
 from fastapi import APIRouter, HTTPException, status
@@ -33,8 +34,10 @@ class RobotPositionSaveRequest(BaseModel):
 
 
 @router.get("/list")
-def api_get_robot_positions_list():
+def api_get_robot_positions_list(limit: int = 500):
     result = get_robot_positions_list()
+    if isinstance(result, list) and len(result) > limit:
+        result = result[:limit]
     return result
 
 
@@ -49,6 +52,10 @@ def api_save_robot_position(req: RobotPositionSaveRequest):
             "params": req.params.model_dump(exclude_none=True),
         })
         return {"status": "ok", "message": "Robot position saved.", "id": position_id}
+    except HTTPException:
+        raise
+    except sqlite3.OperationalError as e:
+        raise HTTPException(status_code=503, detail=f"Database temporarily unavailable: {e}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -56,7 +63,13 @@ def api_save_robot_position(req: RobotPositionSaveRequest):
 @router.delete("/{position_id}", status_code=status.HTTP_200_OK)
 def api_delete_robot_position(position_id: str):
     try:
-        delete_robot_position(position_id)
+        deleted = delete_robot_position(position_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Position not found")
         return {"status": "ok", "message": "Robot position deleted."}
+    except HTTPException:
+        raise
+    except sqlite3.OperationalError as e:
+        raise HTTPException(status_code=503, detail=f"Database temporarily unavailable: {e}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -24,7 +24,11 @@ from app.services.v4l2 import v4l2_current
 router = APIRouter(tags=["system"])
 CAM_TYPE = get_settings().camera_type
 class HealthResponse(BaseModel):
-    ok: bool = Field(..., description="Application is up and serving requests.")
+    ok: bool = Field(..., description="All critical subsystems are healthy.")
+    mode: str = Field("nominal", description="Current system operating mode.")
+    janus_reachable: bool = Field(True, description="Janus REST API responds.")
+    stream_active: bool = Field(True, description="Primary mountpoint has recent video.")
+    details: Dict[str, Any] = Field(default_factory=dict, description="Per-check breakdown.")
 
 class CameraInfo(BaseModel):
     device: str
@@ -79,11 +83,42 @@ class ActionResponse(BaseModel):
 @router.get(
     "/healthz",
     response_model=HealthResponse,
-    summary="Service health probe",
-    description="Used by Kubernetes/NGINX probes or external health checks.",
+    summary="Service health probe (deep check)",
+    description="Checks Janus connectivity, stream freshness, and system mode. "
+    "Returns ok=false when critical subsystems are degraded.",
 )
 def healthz() -> HealthResponse:
-    return HealthResponse(ok=True)
+    from app.services import system_mode as smode
+
+    settings = get_settings()
+    details: Dict[str, Any] = {}
+
+    # Check 1: Janus REST API reachable + mountpoint has fresh video
+    janus_ok = False
+    stream_ok = False
+    try:
+        summary = janus.janus_summary(settings.janus_mount_id)
+        janus_ok = True
+        age = summary.get("video_age_ms")
+        stream_ok = age is not None and isinstance(age, (int, float)) and age <= settings.watchdog_stale_ms
+        details["video_age_ms"] = age
+        details["mountpoint_id"] = summary.get("mountpoint_id")
+    except Exception as exc:
+        details["janus_error"] = str(exc)
+
+    # Check 2: System mode
+    mode = smode.current_mode()
+    details["mode_info"] = smode.mode_info()
+
+    overall = janus_ok and stream_ok and mode != smode.SystemMode.SAFE
+
+    return HealthResponse(
+        ok=overall,
+        mode=mode.value,
+        janus_reachable=janus_ok,
+        stream_active=stream_ok,
+        details=details,
+    )
 
 
 # ── Relay proxy: joystick e2e latency measurement ──
@@ -193,6 +228,32 @@ def _render_template_response(filename: str) -> HTMLResponse:
         raise HTTPException(status_code=404, detail=f"{filename} not found")
     raw = html_path.read_text(encoding="utf-8")
     rendered = raw.replace("__CAM_TYPE__", settings.camera_type)
+    # Depth camera node has no relay/joystick — suppress to avoid 502 spam
+    if settings.camera_type == "depth_camera":
+        rendered = rendered.replace('data-joystick-mode="always"', 'data-joystick-mode="off"')
+    return HTMLResponse(rendered)
+
+
+def _render_color_view_variant(
+    stream_id: int,
+    stream_name: str,
+    joystick: bool = True,
+    depth_features: bool = False,
+) -> HTMLResponse:
+    settings = get_settings()
+    html_path = Path(settings.templates_dir) / "color_view.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="color_view.html not found")
+    raw = html_path.read_text(encoding="utf-8")
+    rendered = raw.replace("__CAM_TYPE__", settings.camera_type)
+    rendered = rendered.replace('data-prefer-stream-id="1305"', f'data-prefer-stream-id="{stream_id}"')
+    rendered = rendered.replace('data-stream-name="RealSense RGB"', f'data-stream-name="{stream_name}"')
+    if not joystick:
+        rendered = rendered.replace('data-joystick-mode="always"', 'data-joystick-mode="off"')
+    if depth_features:
+        # Inject depth_features.js before </body>
+        depth_script = f'<script src="/api/v1/{settings.camera_type}/depth_features.js"></script>'
+        rendered = rendered.replace('</body>', f'{depth_script}\n</body>')
     return HTMLResponse(rendered)
 
 @router.get(f"/api/v1/{CAM_TYPE}/janus.js", include_in_schema=False)
@@ -271,12 +332,20 @@ if CAM_TYPE == "depth_camera":
     @router.get(f"/api/v1/{CAM_TYPE}/depth_view.html", include_in_schema=False)
     @router.get("/depth_view.html", include_in_schema=False)
     def depth_view() -> HTMLResponse:
-        return _render_template_response("depth_view.html")
+        settings = get_settings()
+        depth_template = Path(settings.templates_dir) / "depth_view.html"
+        if depth_template.exists():
+            return _render_template_response("depth_view.html")
+        return _render_color_view_variant(1306, "RealSense Depth", joystick=False, depth_features=True)
 
     @router.get(f"/api/v1/{CAM_TYPE}/ir_view.html", include_in_schema=False)
     @router.get("/ir_view.html", include_in_schema=False)
     def ir_view() -> HTMLResponse:
-        return _render_template_response("ir_view.html")
+        settings = get_settings()
+        ir_template = Path(settings.templates_dir) / "ir_view.html"
+        if ir_template.exists():
+            return _render_template_response("ir_view.html")
+        return _render_color_view_variant(1307, "RealSense IR", joystick=False)
 
     depth_description = (
         "Returns the depth value at the given normalized coordinates (0..100), "
@@ -376,6 +445,142 @@ if CAM_TYPE == "depth_camera":
             return JSONResponse(content=resp.json())
         except requests.RequestException as e:
             raise HTTPException(status_code=502, detail=f"Depth color frame proxy error: {e}")
+
+    # ── /depth/frame  →  realsense_mux /depth_map (full float32 frame) ──
+
+    depth_frame_description = (
+        "Returns the full depth frame (float32, metres) from the D435 depth sensor. "
+        "Proxies to the local realsense_mux /depth_map endpoint."
+    )
+
+    @router.get(
+        f"/api/v1/{CAM_TYPE}/depth/frame",
+        summary="Get full depth frame",
+        description=depth_frame_description,
+    )
+    @router.get(
+        "/depth/frame",
+        summary="Get full depth frame",
+        description=depth_frame_description,
+    )
+    async def get_depth_frame(format: str = "json"):
+        import requests as _req
+        try:
+            url = f"http://localhost:8000/depth_map?format={format}"
+            resp = _req.get(url, timeout=5)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=resp.status_code, detail=resp.text)
+            if format == "raw":
+                return Response(
+                    content=resp.content,
+                    media_type="application/octet-stream",
+                    headers={
+                        "X-Width": resp.headers.get("X-Width", ""),
+                        "X-Height": resp.headers.get("X-Height", ""),
+                        "X-Dtype": resp.headers.get("X-Dtype", "float32"),
+                        "X-Timestamp": resp.headers.get("X-Timestamp", ""),
+                    },
+                )
+            return JSONResponse(content=resp.json())
+        except _req.RequestException as e:
+            raise HTTPException(status_code=502, detail=f"Depth frame proxy error: {e}")
+
+    # ── /depth/frame_color_overlay  →  aligned RGBD (color + depth) ──
+
+    @router.get(
+        f"/api/v1/{CAM_TYPE}/depth/frame_color_overlay",
+        summary="Get aligned RGBD frame",
+    )
+    @router.get(
+        "/depth/frame_color_overlay",
+        summary="Get aligned RGBD frame",
+    )
+    async def get_depth_frame_color_overlay(format: str = "json"):
+        """Return aligned colour + depth frame.
+
+        Fetches both /color_frame and /depth_map from realsense_mux and
+        combines them into a single JSON payload compatible with the
+        arm3d scene-helpers.js ``fetchAlignedRgbdJson()`` consumer.
+        """
+        import requests as _req
+        import base64 as b64mod
+
+        try:
+            color_resp = _req.get("http://localhost:8000/color_frame?format=json", timeout=5)
+            depth_resp = _req.get("http://localhost:8000/depth_map?format=json", timeout=5)
+            if color_resp.status_code != 200:
+                raise HTTPException(status_code=color_resp.status_code, detail=color_resp.text)
+            if depth_resp.status_code != 200:
+                raise HTTPException(status_code=depth_resp.status_code, detail=depth_resp.text)
+            cj = color_resp.json()
+            dj = depth_resp.json()
+            return JSONResponse(content={
+                "width": dj["width"],
+                "height": dj["height"],
+                "timestamp": dj.get("timestamp", 0),
+                "rgb_data": cj["data"],
+                "rgb_dtype": cj.get("dtype", "uint8-rgb24"),
+                "depth_data": dj["data"],
+                "depth_dtype": dj.get("dtype", "float32"),
+            })
+        except _req.RequestException as e:
+            raise HTTPException(status_code=502, detail=f"Aligned RGBD proxy error: {e}")
+
+# ---------------------------------------------------------------------------
+#  Depth-map proxy — serves /api/v1/depth_map/load for arm3d / 3-D scene
+# ---------------------------------------------------------------------------
+
+depth_map_description = (
+    "Returns the full depth frame (float32, metres) from the D435 depth sensor. "
+    "On a depth_camera node this proxies to the local realsense_mux; "
+    "on a color_camera node it proxies to the remote depth camera."
+)
+
+
+@router.get(
+    f"/api/v1/{CAM_TYPE}/depth_map/load",
+    include_in_schema=False,
+)
+@router.get(
+    "/api/v1/depth_map/load",
+    summary="Load full depth map",
+    description=depth_map_description,
+)
+@router.get("/depth_map/load", include_in_schema=False)
+async def depth_map_load(format: str = "json"):
+    """Proxy depth-map request to the appropriate backend."""
+    import requests as _req
+
+    settings = get_settings()
+
+    if settings.camera_type == "depth_camera":
+        # Local node: proxy to realsense_mux on port 8000
+        upstream = f"http://localhost:8000/depth_map?format={format}"
+    else:
+        # Remote node: proxy to the depth camera's FastAPI service
+        upstream = f"{settings.depth_cam_url}/depth_map/load?format={format}"
+
+    try:
+        resp = _req.get(upstream, timeout=5)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        if format == "raw":
+            return Response(
+                content=resp.content,
+                media_type="application/octet-stream",
+                headers={
+                    "X-Width": resp.headers.get("X-Width", ""),
+                    "X-Height": resp.headers.get("X-Height", ""),
+                    "X-Dtype": resp.headers.get("X-Dtype", "float32"),
+                    "X-Timestamp": resp.headers.get("X-Timestamp", ""),
+                },
+            )
+        return JSONResponse(content=resp.json())
+    except _req.RequestException as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Depth map proxy error: {exc}"
+        )
+
 
 @router.get(f"/api/v1/{CAM_TYPE}/favicon.ico", include_in_schema=False)
 @router.get("/favicon.ico", include_in_schema=False)

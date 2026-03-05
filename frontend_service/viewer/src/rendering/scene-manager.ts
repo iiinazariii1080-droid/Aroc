@@ -13,6 +13,8 @@ import type { EventBus } from '@/event-bus';
 export interface SceneManagerOptions {
   canvas: HTMLCanvasElement;
   bus: EventBus;
+  /** Skip shadows + reduce shadow map for Pi / low-end GPU. Default: false. */
+  lowQuality?: boolean;
 }
 
 export class SceneManager {
@@ -24,19 +26,27 @@ export class SceneManager {
   private animationId: number | null = null;
   private readonly bus: EventBus;
   private disposed = false;
+  private readonly lowQuality: boolean;
+  private resizeObserver: ResizeObserver | null = null;
+
+  /** Per-frame update callbacks (e.g., lift interpolation). */
+  private readonly updateCallbacks: Array<() => void> = [];
 
   constructor(opts: SceneManagerOptions) {
     this.bus = opts.bus;
+    this.lowQuality = opts.lowQuality ?? false;
 
     // Renderer
     this.renderer = new THREE.WebGLRenderer({
       canvas: opts.canvas,
-      antialias: SCENE.renderer.antialias,
+      antialias: this.lowQuality ? false : SCENE.renderer.antialias,
       alpha: SCENE.renderer.alpha,
     });
-    this.renderer.shadowMap.enabled = SCENE.renderer.shadowMapEnabled;
+    this.renderer.shadowMap.enabled = this.lowQuality ? false : SCENE.renderer.shadowMapEnabled;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, SCENE.renderer.pixelRatioMax));
+    this.renderer.setPixelRatio(
+      this.lowQuality ? 1 : Math.min(window.devicePixelRatio, SCENE.renderer.pixelRatioMax),
+    );
     this.renderer.setClearColor(SCENE.background);
 
     // Scene
@@ -67,8 +77,12 @@ export class SceneManager {
     // Floor grid
     this.setupFloor();
 
-    // Resize handling
+    // Resize handling — use ResizeObserver when available (better for iframes)
     this.handleResize();
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => this.handleResize());
+      this.resizeObserver.observe(opts.canvas.parentElement ?? opts.canvas);
+    }
     window.addEventListener('resize', this.handleResize);
 
     // EventBus
@@ -87,7 +101,8 @@ export class SceneManager {
         dl.position.set(lx, ly, lz);
         dl.castShadow = lightCfg.castShadow;
         if (dl.castShadow) {
-          dl.shadow.mapSize.set(1024, 1024);
+          const shadowRes = this.lowQuality ? 512 : 1024;
+          dl.shadow.mapSize.set(shadowRes, shadowRes);
           dl.shadow.camera.near = 1;
           dl.shadow.camera.far = 100;
           const s = 30;
@@ -132,10 +147,17 @@ export class SceneManager {
     const loop = () => {
       if (this.disposed) return;
       this.animationId = requestAnimationFrame(loop);
+      // Per-frame updates (interpolation, etc.)
+      for (const cb of this.updateCallbacks) cb();
       this.controls.update();
       this.renderer.render(this.scene, this.camera);
     };
     loop();
+  }
+
+  /** Register a per-frame update callback. */
+  onUpdate(cb: () => void): void {
+    this.updateCallbacks.push(cb);
   }
 
   stop(): void {
@@ -152,6 +174,10 @@ export class SceneManager {
     this.disposed = true;
     this.stop();
     window.removeEventListener('resize', this.handleResize);
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
     this.controls.dispose();
     this.renderer.dispose();
 

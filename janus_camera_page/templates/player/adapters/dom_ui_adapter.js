@@ -40,6 +40,10 @@
       this._frameTick = null;
       this._frameIntervalId = null;
 
+      // Video stall detection callback
+      this._videoStalledCb = null;
+      this._stalledDebounceTimer = null;
+
       // Ensure autoplay-friendly attributes
       this._video.autoplay = true;
       this._video.playsInline = true;
@@ -66,10 +70,33 @@
         h.onToggleStats && h.onToggleStats(this._statsVisible);
       });
 
+      // Video stall detection: browser fires 'stalled' when fetching media data has stalled
+      // and 'waiting' when playback stopped because of temporary buffer underrun.
+      this._video.addEventListener('stalled', () => this._onVideoStallEvent('stalled'));
+      this._video.addEventListener('waiting', () => this._onVideoStallEvent('waiting'));
+
       // start hidden
       this.statsBox.style.display = 'none';
       this.statusPill.style.display = 'none';
       this.debugPanel.style.display = 'none';
+    }
+
+    /** Debounced video stall handler — coalesces rapid stalled+waiting bursts. */
+    _onVideoStallEvent(eventName){
+      if (!this._videoStalledCb) return;
+      if (this._stalledDebounceTimer) return; // already debounced
+      this._stalledDebounceTimer = this.clock.setTimeout(() => {
+        this._stalledDebounceTimer = null;
+        try { this._videoStalledCb(eventName); } catch(_) {}
+      }, 500);
+    }
+
+    /**
+     * Register callback for video stall events (stalled/waiting).
+     * @param {function(string): void} cb called with event name
+     */
+    onVideoStalled(cb){
+      this._videoStalledCb = typeof cb === 'function' ? cb : null;
     }
 
     bindIntents(handlers){
@@ -144,7 +171,7 @@
       const errCode = vm.errCode;
 
       this.statusPill.textContent = statusTextFor(st, attempt, errCode);
-      this.statusPill.dataset.state = st;
+      this.statusPill.dataset.state = vm.degraded ? 'DEGRADED' : st;
       this.statusPill.style.display = 'flex';
 
       if (this.cfg.debugPanelEnabled) {
@@ -184,6 +211,12 @@
 
     bindStream(stream){
       try {
+        const prev = this._video.srcObject;
+        // Full reset: if the stream changed, clear srcObject first to flush
+        // the browser's decoder state and prevent stale "ghost" frames.
+        if (prev && prev !== stream) {
+          this._video.srcObject = null;
+        }
         this._video.srcObject = stream;
       } catch (e) {
         this.log.warn('video_bind_failed', { error: String(e) });

@@ -16,63 +16,65 @@
  */
 
 import type { RosPoint3, RosRPY, ThreePoint3 } from '@/types/coordinates';
-import { WORLD } from '@/config/scene-config';
 
-const S = WORLD.SCALE_FACTOR;   // 20
-const INV_S = 1 / S;
+/** Default scale factor: 1 meter = 20 world units. */
+export const DEFAULT_SCALE_FACTOR = 20;
+/** Default mm per world unit: 1 wu = 50 mm. */
+export const DEFAULT_MM_PER_WU = 50;
 
 // ─── Position conversions ─────────────────────────
 
 /** ROS meters → Three.js world units. Pure axis swap + scale. */
-export function rosToThree(p: RosPoint3): ThreePoint3 {
+export function rosToThree(p: RosPoint3, scale: number = DEFAULT_SCALE_FACTOR): ThreePoint3 {
   return {
-    x: -p.y * S,
-    y:  p.z * S,
-    z: -p.x * S,
+    x: -p.y * scale,
+    y:  p.z * scale,
+    z: -p.x * scale,
   };
 }
 
 /** Three.js world units → ROS meters. Inverse of rosToThree. */
-export function threeToRos(p: ThreePoint3): RosPoint3 {
+export function threeToRos(p: ThreePoint3, scale: number = DEFAULT_SCALE_FACTOR): RosPoint3 {
+  const inv = 1 / scale;
   return {
-    x: -p.z * INV_S,
-    y: -p.x * INV_S,
-    z:  p.y * INV_S,
+    x: -p.z * inv,
+    y: -p.x * inv,
+    z:  p.y * inv,
   };
 }
 
 // ─── Scalar unit conversions ──────────────────────
 
 /** Meters → world units. */
-export function metersToWorld(m: number): number {
-  return m * S;
+export function metersToWorld(m: number, scale: number = DEFAULT_SCALE_FACTOR): number {
+  return m * scale;
 }
 
 /** World units → meters. */
-export function worldToMeters(wu: number): number {
-  return wu * INV_S;
+export function worldToMeters(wu: number, scale: number = DEFAULT_SCALE_FACTOR): number {
+  return wu / scale;
 }
 
 /** Millimeters → world units. */
-export function mmToWorld(mm: number): number {
-  return mm / WORLD.MM_PER_WU;
+export function mmToWorld(mm: number, mmPerWu: number = DEFAULT_MM_PER_WU): number {
+  return mm / mmPerWu;
 }
 
 /** World units → millimeters. */
-export function worldToMm(wu: number): number {
-  return wu * WORLD.MM_PER_WU;
+export function worldToMm(wu: number, mmPerWu: number = DEFAULT_MM_PER_WU): number {
+  return wu * mmPerWu;
 }
 
 // ─── Combined position + scale shortcuts ──────────
 
 /** ROS meters point → Three.js world-unit point (swap + scale). */
-export function rosMetersToThreeWorld(p: RosPoint3): ThreePoint3 {
-  return rosToThree(p);
+export function rosMetersToThreeWorld(p: RosPoint3, scale: number = DEFAULT_SCALE_FACTOR): ThreePoint3 {
+  return rosToThree(p, scale);
 }
 
 /** Three.js world-unit point → ROS meters point (unswap + unscale). */
-export function threeWorldToRosMeters(p: ThreePoint3): RosPoint3 {
-  return threeToRos(p);
+export function threeWorldToRosMeters(p: ThreePoint3, scale: number = DEFAULT_SCALE_FACTOR): RosPoint3 {
+  return threeToRos(p, scale);
 }
 
 // ─── Rotation conversions ─────────────────────────
@@ -188,6 +190,45 @@ export function mat4TransformPoint(m: Mat4, p: RosPoint3): RosPoint3 {
     y: m[1] * p.x + m[5] * p.y + m[9]  * p.z + m[13],
     z: m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14],
   };
+}
+
+// ─── COB (Change-of-Basis) matrices ────────────
+
+/**
+ * ROS→Three change-of-basis (column-major).
+ *   ROS X → Three -Z,  ROS Y → Three -X,  ROS Z → Three +Y
+ */
+const _cobRosToThree: Mat4 = (() => {
+  const m = new Float64Array(16);
+  m[0] =  0; m[1] =  0; m[2] = -1; m[3] = 0;
+  m[4] = -1; m[5] =  0; m[6] =  0; m[7] = 0;
+  m[8] =  0; m[9] =  1; m[10]=  0; m[11]= 0;
+  m[12]=  0; m[13]=  0; m[14]=  0; m[15]= 1;
+  return m;
+})();
+
+/**
+ * Three→ROS change-of-basis (column-major) = transpose of ROS→Three.
+ *   Three X → ROS -Y,  Three Y → ROS +Z,  Three Z → ROS -X
+ */
+const _cobThreeToRos: Mat4 = (() => {
+  const m = new Float64Array(16);
+  m[0] =  0; m[1] = -1; m[2] =  0; m[3] = 0;
+  m[4] =  0; m[5] =  0; m[6] =  1; m[7] = 0;
+  m[8] = -1; m[9] =  0; m[10]=  0; m[11]= 0;
+  m[12]=  0; m[13]=  0; m[14]=  0; m[15]= 1;
+  return m;
+})();
+
+/**
+ * Convert a 4×4 matrix from Three.js frame to ROS frame.
+ *   M_ros = COB_inv × M_three × COB
+ *
+ * Use this to convert FK matrices computed in Three.js space
+ * (using groupsPosition / jointAxes) into ROS convention for TransformAuthority.
+ */
+export function mat4ThreeToRos(mThree: Mat4): Mat4 {
+  return mat4Multiply(mat4Multiply(_cobThreeToRos, mThree), _cobRosToThree);
 }
 
 /**

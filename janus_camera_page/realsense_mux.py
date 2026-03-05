@@ -62,10 +62,11 @@ class CameraService:
     Хранит *уже повернутый* depth-кадр (float32, метры) и даёт глубину по нормализованным координатам [0..1].
     Также хранит последний цветной кадр (RGB24, uint8) для colour-overlay.
     """
-    def __init__(self, rotate="none", flip_x=False, flip_y=False):
+    def __init__(self, rotate="none", flip_x=False, flip_y=False, depth_flip180=False):
         self.rotate = rotate
         self.flip_x = flip_x
         self.flip_y = flip_y
+        self.depth_flip180 = depth_flip180
         self._lock = threading.Lock()
         self._depth_m = None
         self._shape = None
@@ -78,6 +79,8 @@ class CameraService:
     def update_depth_from_z16(self, z16: np.ndarray, scale_m_per_unit: float):
         depth_m = z16.astype(np.float32) * scale_m_per_unit
         depth_m = rotate_img(depth_m, self.rotate)
+        if self.depth_flip180:
+            depth_m = np.rot90(depth_m, 2)  # 180° = hflip + vflip
         with self._lock:
             self._depth_m = depth_m
             self._shape = depth_m.shape[:2]
@@ -98,6 +101,16 @@ class CameraService:
     def get_color_timestamp(self) -> float:
         with self._lock:
             return self._color_updated_at
+
+    def get_depth_map(self) -> Optional[dict]:
+        """Return the full depth frame (float32, metres) with metadata, or None."""
+        with self._lock:
+            if self._depth_m is None:
+                return None
+            arr = self._depth_m.copy()
+            ts = self._updated_at
+        h, w = arr.shape[:2]
+        return {"array": arr, "width": w, "height": h, "timestamp": ts}
 
     def get_depth(self, x_norm: float, y_norm: float):
         with self._lock:
@@ -167,6 +180,40 @@ def make_fastapi(service: CameraService):
         encoded = b64mod.b64encode(raw_bytes).decode("ascii")
         return {"width": w, "height": h, "dtype": "uint8-rgb24",
                 "timestamp": service.get_color_timestamp(), "data": encoded}
+
+    @router.get("/depth_map")
+    async def get_depth_map(
+        format: str = "json",
+        service: CameraService = Depends(get_camera_service),
+    ):
+        """Return the full depth frame (float32, metres) as base64 JSON or raw bytes."""
+        import base64 as b64mod
+        dm = service.get_depth_map()
+        if dm is None:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=503, content={"detail": "no depth frame yet"})
+        arr = dm["array"]
+        w, h = dm["width"], dm["height"]
+        raw_bytes = arr.tobytes()
+        if format == "raw":
+            return Response(
+                content=raw_bytes,
+                media_type="application/octet-stream",
+                headers={
+                    "X-Width": str(w),
+                    "X-Height": str(h),
+                    "X-Dtype": "float32",
+                    "X-Timestamp": str(dm["timestamp"]),
+                },
+            )
+        encoded = b64mod.b64encode(raw_bytes).decode("ascii")
+        return {
+            "width": w,
+            "height": h,
+            "dtype": "float32",
+            "timestamp": dm["timestamp"],
+            "data": encoded,
+        }
 
     app.include_router(router)
     return app
@@ -275,6 +322,7 @@ def run_pipeline(
     depth_fifo: Optional[str],
     ir_fifo: Optional[str],
     rotate: str,
+    depth_flip180: bool = False,
 ) -> None:
     modes = probe_modes()
 
@@ -282,7 +330,7 @@ def run_pipeline(
     depth_mode = select_mode(modes["depth"], depth_idx) if depth_idx >= 0 else None
     ir_mode    = select_mode(modes["ir"],    ir_idx)    if ir_idx    >= 0 else None
 
-    service = CameraService(rotate=rotate, flip_x=False, flip_y=False)
+    service = CameraService(rotate=rotate, flip_x=False, flip_y=False, depth_flip180=depth_flip180)
 
     if not color_mode and not depth_mode and not ir_mode:
         print("No streams selected", file=sys.stderr)
@@ -356,6 +404,27 @@ def run_pipeline(
     color_count = depth_count = ir_count = 0
     last_report = time.time()
 
+    def _safe_write(writer, data, fifo_path, label):
+        """Write to FIFO, recovering from BrokenPipeError if the reader (ffmpeg) died."""
+        nonlocal color_writer, depth_writer, ir_writer
+        try:
+            writer.write(data)
+            return writer
+        except (BrokenPipeError, OSError) as exc:
+            print(f"[fifo] {label} writer broken ({exc}), reopening {fifo_path} ...", flush=True)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            try:
+                new_writer = open_fifo_writer_blocking(fifo_path)
+                new_writer.write(data)
+                print(f"[fifo] {label} writer recovered", flush=True)
+                return new_writer
+            except Exception as reopen_exc:
+                print(f"[fifo] {label} reopen failed: {reopen_exc}", flush=True)
+                return None
+
     try:
         while running:
             frames = pipeline.wait_for_frames()
@@ -370,7 +439,7 @@ def run_pipeline(
                     # Store latest colour frame for HTTP endpoint
                     service.update_color_rgb(img)
                     if color_writer:
-                        color_writer.write(img.tobytes())
+                        color_writer = _safe_write(color_writer, img.tobytes(), color_fifo, 'color')
 
             if depth_mode:
                 df = frames.get_depth_frame()
@@ -382,8 +451,10 @@ def run_pipeline(
                         c = colorizer.process(df)
                         img = np.asanyarray(c.get_data()).astype(np.uint8)  # HxWx3
                         img = rotate_img(img, rotate)
+                        if service.depth_flip180:
+                            img = np.rot90(img, 2)  # 180° to match color sensor orientation
                         img = np.ascontiguousarray(img)
-                        depth_writer.write(img.tobytes())
+                        depth_writer = _safe_write(depth_writer, img.tobytes(), depth_fifo, 'depth')
 
             if ir_mode:
                 irf = frames.get_infrared_frame(ir_mode.stream_index)
@@ -393,7 +464,7 @@ def run_pipeline(
                         ir = np.asanyarray(irf.get_data())  # HxW, uint8
                         ir = rotate_img(ir, rotate)
                         ir = np.ascontiguousarray(ir)
-                        ir_writer.write(ir.tobytes())
+                        ir_writer = _safe_write(ir_writer, ir.tobytes(), ir_fifo, 'ir')
 
             now = time.time()
             if now - last_report >= 2.0:
@@ -447,6 +518,7 @@ def main():
         # ir_fifo="/run/realsense/ir.fifo",
         ir_fifo=None,
         rotate=rotate,
+        depth_flip180=False,             # color и depth sensor одинаково ориентированы после cw-поворота
     )
 
 

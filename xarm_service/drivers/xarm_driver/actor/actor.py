@@ -215,6 +215,31 @@ class RobotActor:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 1.5, 60.0)
 
+    def _try_reinit_gripper(self) -> bool:
+        """Attempt to (re-)initialise GripperController after a fault clear.
+
+        Returns True if self._gripper is usable after the call.
+        """
+        if self._gripper is not None:
+            return True
+        arm = self.get_arm()
+        if not arm:
+            return False
+        try:
+            # clean errors first — modbus init often fails while C22 is active
+            arm.clean_error()
+            arm.set_state(0)
+        except Exception:
+            pass
+        try:
+            self._gripper = GripperController(arm, baudrate=115200, timeout=100)
+            logger.info("GripperController re-init succeeded")
+            return True
+        except Exception as e:
+            self._gripper = None
+            logger.warning("GripperController re-init failed: %s", e)
+            return False
+
     async def _executor_loop(self) -> None:
         """Single consumer: get command from queue, execute, publish result."""
         store = self._get_store()
@@ -425,6 +450,8 @@ class RobotActor:
 
             if command.type == CommandType.GRIP_CLOSE:
                 if not self._gripper:
+                    self._try_reinit_gripper()
+                if not self._gripper:
                     return CommandResult(
                         command_id=command.command_id,
                         status=ResultStatus.FAILED,
@@ -446,6 +473,8 @@ class RobotActor:
                 )
 
             if command.type == CommandType.GRIP_OPEN:
+                if not self._gripper:
+                    self._try_reinit_gripper()
                 if not self._gripper:
                     return CommandResult(
                         command_id=command.command_id,
@@ -490,6 +519,9 @@ class RobotActor:
                     self._get_store().set_robot(error_code=0, warn_code=0)
                 except Exception:
                     pass
+                # Re-init gripper if it was lost due to modbus/controller errors
+                if not self._gripper:
+                    self._try_reinit_gripper()
                 return CommandResult(command_id=command.command_id, status=ResultStatus.SUCCEEDED)
 
             if command.type == CommandType.ENABLE_MOTION:
@@ -543,8 +575,7 @@ class RobotActor:
                         telemetry_snapshot={
                             "active": False,
                             "feedback": "UNKNOWN",
-                            "vacuum_level": None,
-                            "sensor_supported": bool(getattr(self._gripper, "sdk_vacuum_supported", False)),
+                            "sensor_supported": False,
                             "error": str(e),
                         },
                     )
@@ -556,8 +587,15 @@ class RobotActor:
                         "active": gs.active,
                         "feedback": gs.feedback.value,
                         "vacuum_level": gs.vacuum_level,
-                        "sensor_supported": bool(getattr(self._gripper, "sdk_vacuum_supported", False)),
-                        "sensor_disabled_reason": getattr(self._gripper, "sdk_vacuum_disabled_reason", None),
+                        "part_present": gs.part_present,
+                        "part_secured": gs.part_secured,
+                        "energy_saving": gs.energy_saving,
+                        "motor_stall": gs.motor_stall,
+                        "pcb_temperature": gs.pcb_temperature,
+                        "membrane_hours": gs.membrane_hours,
+                        "membrane_warn": gs.membrane_warn,
+                        "sensor_supported": gs.sensor_supported,
+                        "sensor_disabled_reason": getattr(self._gripper, "pdi_disabled_reason", None),
                         "modbus_raw": gs.modbus_raw,
                         "activated_at": snap.gripper_activated_at,
                         "idle_elapsed_s": round(time.time() - snap.gripper_activated_at, 1)
@@ -603,7 +641,18 @@ class RobotActor:
         return self._grasp_planner
 
     def _read_vacuum_state(self) -> int:
-        return self._gripper.read_vacuum_via_sdk() if self._gripper else -99
+        """Return vacuum state: 1=part_secured, 0=vacuum_on_no_part, -1=off, -99=error."""
+        if not self._gripper:
+            return -99
+        try:
+            pdi = self._gripper.read_pdi()
+            if pdi.part_secured:
+                return 1
+            if pdi.part_present:
+                return 0
+            return -1
+        except Exception:
+            return -99
 
     def _read_torques(self):
         return self._gripper.read_joints_torque() if self._gripper else None

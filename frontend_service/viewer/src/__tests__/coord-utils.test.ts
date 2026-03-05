@@ -19,6 +19,7 @@ import {
   mat4GetTranslation,
   mat4TransformPoint,
   mat4InvertRigid,
+  mat4ThreeToRos,
 } from '../domain/coord-utils';
 
 const EPSILON = 1e-10;
@@ -164,5 +165,47 @@ describe('mat4 operations', () => {
     expect(Math.abs(pBack.x - p.x)).toBeLessThan(1e-9);
     expect(Math.abs(pBack.y - p.y)).toBeLessThan(1e-9);
     expect(Math.abs(pBack.z - p.z)).toBeLessThan(1e-9);
+  });
+});
+
+describe('mat4ThreeToRos', () => {
+  it('identity stays identity', () => {
+    const I = mat4Identity();
+    const Iros = mat4ThreeToRos(I);
+    for (let i = 0; i < 16; i++) {
+      expect(Iros[i]).toBeCloseTo(I[i], 10);
+    }
+  });
+
+  it('pure Three.js Y translation → ROS Z translation', () => {
+    // Three.js translation (0, 5, 0) → ROS (0, 0, 5)
+    const T = mat4FromPose(0, 5, 0, 0, 0, 0);
+    const Tros = mat4ThreeToRos(T);
+    const pos = mat4GetTranslation(Tros);
+    expect(pos.x).toBeCloseTo(0, 8);
+    expect(pos.y).toBeCloseTo(0, 8);
+    expect(pos.z).toBeCloseTo(5, 8);
+  });
+
+  it('pure Three.js -Z translation → ROS X translation', () => {
+    // Three.js translation (0, 0, -3) → ROS (3, 0, 0)
+    // Three Z → ROS -X, so Three -Z → ROS X
+    const T = mat4FromPose(0, 0, -3, 0, 0, 0);
+    const Tros = mat4ThreeToRos(T);
+    const pos = mat4GetTranslation(Tros);
+    expect(pos.x).toBeCloseTo(3, 8);
+    expect(pos.y).toBeCloseTo(0, 8);
+    expect(pos.z).toBeCloseTo(0, 8);
+  });
+
+  it('roundtrip: ros→three→ros preserves translation', () => {
+    // A point at ROS (1, 2, 3) → Three (-2, 3, -1) → back to ROS (1, 2, 3)
+    // ROS→Three manually: Three x=-rosY=-2, y=rosZ=3, z=-rosX=-1
+    const threeT = mat4FromPose(-2, 3, -1, 0, 0, 0);
+    const rosBack = mat4ThreeToRos(threeT);
+    const pos = mat4GetTranslation(rosBack);
+    expect(pos.x).toBeCloseTo(1, 8);
+    expect(pos.y).toBeCloseTo(2, 8);
+    expect(pos.z).toBeCloseTo(3, 8);
   });
 });

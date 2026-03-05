@@ -40,10 +40,17 @@ class CommandHandler:
         self.transport_orchestrator = transport_orchestrator
         self.mqtt_adapter = mqtt_adapter
         self.event_bus = event_bus
+        self._navigate_lock = asyncio.Lock()
+        # Event used to cancel a pending laser-timeout wait when a newer command arrives.
+        self._laser_cancel_event: Optional[asyncio.Event] = None
     
     async def handle_navigate_to(self, command: NavigationCommand) -> NavigationStatus:
         """
         Handle navigateTo command with idempotency.
+        
+        If a previous command is waiting for laser_timeout / waiting_for_scanner
+        to clear, it is immediately cancelled and replaced by this new command
+        (no queue — latest command wins).
         
         Args:
             command: Navigation command
@@ -51,7 +58,39 @@ class CommandHandler:
         Returns:
             Navigation status
         """
-        _LOGGER.info(f"Handling navigateTo command: {command.command_id}, target: {command.target_id}")
+        # Signal any pending laser-wait to abort — the new command replaces it.
+        if self._laser_cancel_event is not None:
+            _LOGGER.info(
+                "New navigate command %s arrived; cancelling pending laser-wait",
+                command.command_id,
+            )
+            self._laser_cancel_event.set()
+
+        # Create a fresh cancel event for *this* command's potential laser wait.
+        cancel_event = asyncio.Event()
+        self._laser_cancel_event = cancel_event
+
+        # Serialize navigate flow to prevent concurrent commands from both
+        # passing the busy check and creating orphan transports.
+        try:
+            async with asyncio.timeout(120):
+                async with self._navigate_lock:
+                    return await self._handle_navigate_to_inner(command, cancel_event)
+        except TimeoutError:
+            _LOGGER.error("Navigate lock acquisition timed out (120s) for command %s", command.command_id)
+            return NavigationStatus(
+                status=NavigationStatusEnum.ERROR,
+                goal_id=command.command_id,
+                progress_percent=0,
+                error_reason="navigate_lock_timeout",
+            )
+
+
+    async def _handle_navigate_to_inner(
+        self, command: NavigationCommand, cancel_event: Optional[asyncio.Event] = None,
+    ) -> NavigationStatus:
+        """Inner implementation of navigate_to, called under _navigate_lock."""
+        _LOGGER.info("Handling navigateTo command: %s, target: %s", command.command_id, command.target_id)
 
         # ACK received after basic parsing/validation
         await self.event_bus.publish(AckEvent(type=AckType.RECEIVED.value, command_id=command.command_id))
@@ -101,7 +140,7 @@ class CommandHandler:
                 await self._publish_status(error_status)
                 return error_status
 
-            _LOGGER.info(f"Command {command.command_id} already exists, returning current status")
+            _LOGGER.info("Command %s already exists, returning current status", command.command_id)
             # Return current status (will be updated by status publisher)
             last_status = await state_store.get_last_navigation_status()
             if last_status and last_status.goal_id == command.command_id:
@@ -109,10 +148,11 @@ class CommandHandler:
             # Fallback: create status from transport state
             return await self._get_status_from_transport(existing_transport)
 
-        # Busy policy: if any active transport in STARTING/RUNNING/CANCELING, reject by default
+        # Busy policy: reject if any transport is still in a non-terminal state
+        # (P2-11: pre-run states 0-3 also block, not just STARTING/RUNNING/CANCELING)
         active = await state_store.get_all_active_commands()
         for _, t in active.items():
-            if t.state in (NavigationStateMachine.STARTING, NavigationStateMachine.RUNNING, NavigationStateMachine.CANCELING):
+            if not NavigationStateMachine.is_terminal_state(t.state):
                 await self.event_bus.publish(
                     ResultErrorEvent(type=ResultType.ERROR.value, command_id=command.command_id, reason="busy")
                 )
@@ -140,7 +180,41 @@ class CommandHandler:
                 raise DeviceError("Controller unreachable: timeout checking status")
             
             readiness = ReadinessChecker.check_readiness(agv_status)
-            
+
+            # --- Wait for scanner flags (laser_timeout / waiting_for_scanner) ---
+            _SCANNER_FLAGS = {"not_ready:laser_timeout", "not_ready:waiting_for_scanner"}
+            if (
+                not readiness.ready
+                and readiness.error_detail in _SCANNER_FLAGS
+                and cancel_event is not None
+            ):
+                waited_readiness = await self._wait_for_scanner_clear(
+                    cancel_event, command.command_id
+                )
+                if waited_readiness is None:
+                    # Cancelled by newer command or timed out
+                    if cancel_event.is_set():
+                        reason = "replaced_by_newer_command"
+                    else:
+                        reason = readiness.error_detail or "not_ready:laser_timeout_expired"
+                    await self.event_bus.publish(
+                        ResultErrorEvent(
+                            type=ResultType.ERROR.value,
+                            command_id=command.command_id,
+                            reason=reason,
+                        )
+                    )
+                    error_status = NavigationStatus(
+                        status=NavigationStatusEnum.ERROR,
+                        goal_id=command.command_id,
+                        progress_percent=0,
+                        error_reason=reason,
+                    )
+                    await self._publish_status(error_status)
+                    return error_status
+                # Use the updated readiness (may be ready=True or a different error)
+                readiness = waited_readiness
+
             if not readiness.ready:
                 # Optional auto-action: try to switch controller into drive mode once.
                 # Disabled by default; enable with SYMOVO_AUTO_SET_DRIVE_MODE=true.
@@ -226,7 +300,7 @@ class CommandHandler:
                     command.command_id,
                 )
                 try:
-                    remaining = await self.symovo_client.clear_all_transports()
+                    await self.symovo_client.clear_all_transports()
                 except Exception as e:
                     _LOGGER.warning("Failed to clear Symovo transports before navigate: %s", str(e), exc_info=True)
 
@@ -282,8 +356,11 @@ class CommandHandler:
             if not transport_id:
                 raise DeviceError("Transport creation failed: no transport ID returned")
             
-            # Start transport
-            await self.transport_orchestrator.start_transport(transport_id)
+            # Start transport (with timeout to prevent holding the lock forever)
+            await asyncio.wait_for(
+                self.transport_orchestrator.start_transport(transport_id),
+                timeout=30.0,
+            )
             
             # 6. Register in state store
             transport_state = transport_data.get("state", 0)
@@ -307,29 +384,141 @@ class CommandHandler:
             )
             await self._publish_status(status)
             
-            _LOGGER.info(f"Successfully started transport {transport_id} for command {command.command_id}")
+            _LOGGER.info("Successfully started transport %s for command %s", transport_id, command.command_id)
             return status
             
+        except asyncio.CancelledError:
+            # Re-raise CancelledError cleanly — must not be caught by Exception below
+            if transport_id:
+                try:
+                    await asyncio.shield(self.transport_orchestrator.delete_transport(transport_id))
+                except Exception:
+                    _LOGGER.debug("Cleanup delete_transport failed on cancel", exc_info=True)
+            try:
+                await state_store.clear_session(command.command_id)
+            except Exception:
+                pass
+            raise
         except Exception as e:
-            _LOGGER.error(f"Failed to create/start transport: {e}")
+            _LOGGER.error("Failed to create/start transport: %s", e)
 
             # Best-effort cleanup: if the transport was created on the
             # controller but the subsequent start (or registration) failed,
             # delete it so it does not linger as an orphan.
             if transport_id:
-                await self.transport_orchestrator.delete_transport(transport_id)
+                try:
+                    await asyncio.shield(self.transport_orchestrator.delete_transport(transport_id))
+                except Exception:
+                    _LOGGER.debug("Cleanup delete_transport failed", exc_info=True)
+
+            # P2-7: clear orphaned NavigationSession that was persisted before
+            # transport creation.  Without this, the session lingers on disk.
+            try:
+                await state_store.clear_session(command.command_id)
+            except Exception:
+                _LOGGER.debug("Cleanup clear_session failed", exc_info=True)
 
             await self.event_bus.publish(
-                ResultErrorEvent(type=ResultType.ERROR.value, command_id=command.command_id, reason=f"transport_creation_failed:{str(e)}")
+                ResultErrorEvent(type=ResultType.ERROR.value, command_id=command.command_id, reason="transport_creation_failed")
             )
             error_status = NavigationStatus(
                 status=NavigationStatusEnum.ERROR,
                 goal_id=command.command_id,
                 progress_percent=0,
-                error_reason=f"transport_creation_failed:{str(e)}"
+                error_reason="transport_creation_failed"
             )
             await self._publish_status(error_status)
             return error_status
+
+    # ------------------------------------------------------------------
+    # Scanner-flag wait (laser_timeout / waiting_for_scanner)
+    # ------------------------------------------------------------------
+
+    async def _wait_for_scanner_clear(
+        self,
+        cancel_event: asyncio.Event,
+        command_id: str,
+    ) -> Optional["RobotReadiness"]:
+        """Poll controller status until scanner flags clear or timeout/cancel.
+
+        Returns:
+            * ``RobotReadiness(ready=True, ...)`` when the scanner issue resolved
+              and the robot is fully ready.
+            * A non-scanner ``RobotReadiness(ready=False, ...)`` if a *different*
+              readiness problem is detected (caller should handle normally).
+            * ``None`` if the wait was cancelled (``cancel_event`` set) or the
+              timeout expired without recovery.
+        """
+        from domain.models import RobotReadiness  # local to avoid circular at module level
+
+        _SCANNER_FLAGS = {"not_ready:laser_timeout", "not_ready:waiting_for_scanner"}
+
+        timeout = float(settings.laser_timeout_wait_s)
+        poll_interval = float(settings.laser_timeout_poll_interval_s)
+        deadline = time.monotonic() + timeout
+
+        _LOGGER.info(
+            "Scanner flag active for command %s — waiting up to %.0fs for it to clear",
+            command_id, timeout,
+        )
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _LOGGER.warning(
+                    "Scanner-wait timed out (%.0fs) for command %s", timeout, command_id,
+                )
+                return None
+
+            # Sleep / wait for cancel — whichever comes first.
+            wait_time = min(poll_interval, remaining)
+            try:
+                await asyncio.wait_for(cancel_event.wait(), timeout=wait_time)
+                # cancel_event was set → a newer command replaced us
+                _LOGGER.info(
+                    "Scanner-wait cancelled for command %s (replaced by newer command)",
+                    command_id,
+                )
+                return None
+            except asyncio.TimeoutError:
+                # Normal poll tick — continue to re-check status below
+                pass
+
+            # Re-fetch status
+            try:
+                agv_status = await asyncio.wait_for(
+                    self.symovo_client.status_uncached(),
+                    timeout=5.0,
+                )
+            except (asyncio.TimeoutError, Exception) as exc:
+                _LOGGER.warning(
+                    "Status fetch failed during scanner-wait for %s: %s", command_id, exc,
+                )
+                continue  # retry on next tick
+
+            readiness = ReadinessChecker.check_readiness(agv_status)
+
+            if readiness.ready:
+                _LOGGER.info(
+                    "Scanner flag cleared for command %s — proceeding with navigation",
+                    command_id,
+                )
+                return readiness
+
+            if readiness.error_detail not in _SCANNER_FLAGS:
+                # Different problem appeared (e.g. emergency_stop) — return it
+                # so the caller handles it through the normal error path.
+                _LOGGER.warning(
+                    "Different readiness issue appeared during scanner-wait for %s: %s",
+                    command_id, readiness.error_detail,
+                )
+                return readiness
+
+            # Still a scanner flag — keep waiting
+            _LOGGER.debug(
+                "Scanner flag still active for %s (%s), %.1fs remaining",
+                command_id, readiness.error_detail, deadline - time.monotonic(),
+            )
 
     async def _ensure_navigation_session(self, command: NavigationCommand, target_config: Dict[str, Any]) -> None:
         """Create/update NavigationSession for the command if not present."""
@@ -411,22 +600,33 @@ class CommandHandler:
         Returns:
             Navigation status
         """
-        _LOGGER.info(f"Handling cancel command for: {command_id}")
+        _LOGGER.info("Handling cancel command for: %s", command_id)
         await self.event_bus.publish(AckEvent(type=AckType.RECEIVED.value, command_id=command_id))
         
         # Find active transport
         active_transport = await state_store.get_active_transport(command_id)
         if not active_transport:
-            _LOGGER.warning(f"No active transport found for command {command_id}")
-            # Return idle status
-            status = NavigationStatus(
-                status=NavigationStatusEnum.IDLE,
-                goal_id=None,
-                progress_percent=0,
-                error_reason=None
-            )
-            await self._publish_status(status)
-            await self.event_bus.publish(ResultCanceledEvent(type=ResultType.CANCELED.value, command_id=command_id))
+            _LOGGER.warning("No active transport found for command %s (already completed or unknown)", command_id)
+            # P2-8: only publish IDLE if no OTHER active commands are running.
+            remaining = await state_store.get_all_active_commands()
+            if remaining:
+                _LOGGER.info("Skipping IDLE publish — %d other active command(s)", len(remaining))
+                status = NavigationStatus(
+                    status=NavigationStatusEnum.IDLE,
+                    goal_id=None,
+                    progress_percent=0,
+                    error_reason=None,
+                )
+            else:
+                status = NavigationStatus(
+                    status=NavigationStatusEnum.IDLE,
+                    goal_id=None,
+                    progress_percent=0,
+                    error_reason=None,
+                )
+                await self._publish_status(status)
+            # Don't emit result.canceled for unknown/already-completed commands —
+            # downstream consumers would record a misleading cancellation event.
             return status
         
         # Stop transport
@@ -437,10 +637,12 @@ class CommandHandler:
             # P1-8 fix: Deactivate charger station if this was a charger navigation.
             # Must happen before clearing transport so the session/target_id is still available.
             await charger_workflow.maybe_deactivate_on_cancel(self.symovo_client, active_transport)
-            
-            # Update state store FIRST to signal cancellation to watchers
-            # This ensures watchers can detect cancellation before making long-poll requests
-            await state_store.update_transport_state(command_id, 9)  # CANCELING
+
+            # P7-4 fix: Clear transport from state_store FIRST, before calling stop_transport.
+            # This causes _watch_transport to see "no longer active" on its next check and
+            # exit cleanly, preventing duplicate result.canceled events from both cancel
+            # and the watcher.
+            await state_store.clear_transport(command_id)
 
             # Publish cancel acknowledgment immediately
             await self.event_bus.publish(AckEvent(type=AckType.ACCEPTED.value, command_id=command_id))
@@ -453,10 +655,7 @@ class CommandHandler:
                     timeout=5.0  # 5 seconds should be enough for stop operation
                 )
             except asyncio.TimeoutError:
-                _LOGGER.warning(f"stop_transport timed out for {active_transport.transport_id}, but continuing with cancel")
-            
-            # Clear transport from state store to stop watchers
-            await state_store.clear_transport(command_id)
+                _LOGGER.warning("stop_transport timed out for %s, but continuing with cancel", active_transport.transport_id)
             
             await self.event_bus.publish(ResultCanceledEvent(type=ResultType.CANCELED.value, command_id=command_id))
             
@@ -468,19 +667,19 @@ class CommandHandler:
             )
             await self._publish_status(status)
             
-            _LOGGER.info(f"Successfully canceled transport {active_transport.transport_id} for command {command_id}")
+            _LOGGER.info("Successfully canceled transport %s for command %s", active_transport.transport_id, command_id)
             return status
             
         except Exception as e:
-            _LOGGER.error(f"Failed to cancel transport: {e}")
+            _LOGGER.error("Failed to cancel transport: %s", e)
             await self.event_bus.publish(
-                ResultErrorEvent(type=ResultType.ERROR.value, command_id=command_id, reason=f"cancel_failed:{str(e)}")
+                ResultErrorEvent(type=ResultType.ERROR.value, command_id=command_id, reason="cancel_failed")
             )
             error_status = NavigationStatus(
                 status=NavigationStatusEnum.ERROR,
                 goal_id=command_id,
                 progress_percent=0,
-                error_reason=f"cancel_failed:{str(e)}"
+                error_reason="cancel_failed"
             )
             await self._publish_status(error_status)
             return error_status
@@ -492,9 +691,15 @@ class CommandHandler:
 
         # DB lookup by unique name
         try:
-            rec = await asyncio.to_thread(get_robot_position_by_name, target_id)
+            rec = await asyncio.wait_for(
+                asyncio.to_thread(get_robot_position_by_name, target_id),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.warning("DB lookup timed out for target '%s' (5s)", target_id)
+            return None
         except Exception as e:
-            _LOGGER.warning(f"DB lookup failed for target '{target_id}': {e}")
+            _LOGGER.warning("DB lookup failed for target '%s': %s", target_id, e)
             return None
 
         if not isinstance(rec, dict):
@@ -529,7 +734,11 @@ class CommandHandler:
         elif isinstance(loc.get("theta"), (int, float)):
             theta_rad = float(loc.get("theta"))
 
-        map_id = loc.get("map_id", 0)
+        raw_map_id = loc.get("map_id", 0)
+        try:
+            map_id = int(raw_map_id) if raw_map_id is not None else 0
+        except (ValueError, TypeError):
+            map_id = 0
 
         # Optional speed (if provided in same shape as mapping)
         max_speed = params.get("max_speed_m_s")

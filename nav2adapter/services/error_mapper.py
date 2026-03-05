@@ -107,9 +107,9 @@ class ErrorMapper:
                 if status_code in ErrorMapper.ERROR_CODE_MAP:
                     return ErrorMapper.ERROR_CODE_MAP[status_code]
                 
-                # Fallback: use status_detail or generic error
+                # Fallback: generic transport error (do not expose raw codes)
                 if status_code != 0:
-                    return f"transport_error_{status_code}_{status_detail}"
+                    return "transport_error"
         
         # Check if transport state is ERROR
         transport_state = transport_data.get("state")

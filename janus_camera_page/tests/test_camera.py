@@ -41,11 +41,18 @@ class TestHealthEndpoint:
     """Test the /healthz endpoint."""
 
     @pytest.mark.asyncio
-    async def test_healthz_returns_ok(self, client):
+    async def test_healthz_returns_structured_response(self, client):
         r = await client.get("/healthz")
         assert r.status_code == 200
         body = r.json()
-        assert body.get("ok") is True
+        # Deep healthz now checks Janus+stream; in test env Janus is down
+        # so ok may be False, but structure must be correct
+        assert "ok" in body
+        assert "mode" in body
+        assert "janus_reachable" in body
+        assert "stream_active" in body
+        assert "details" in body
+        assert isinstance(body["ok"], bool)
 
 
 class TestStaticMount:

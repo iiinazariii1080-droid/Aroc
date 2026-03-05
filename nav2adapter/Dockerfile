@@ -1,5 +1,5 @@
 # Попробуйте альтернативные образы если основной не работает:
-FROM python:3.11-slim
+FROM python:3.12-slim
 # Альтернативы:
 # FROM python:3.11-alpine
 # FROM ubuntu:22.04
@@ -43,11 +43,13 @@ ENV SERVICE_HOST=0.0.0.0 \
     LOG_LEVEL=info \
     ROBOT_POSITIONS_DB_PATH=/app/data/database.db
 
-EXPOSE 7905
+EXPOSE 7905 7906
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
   CMD curl -fsS "http://localhost:${SERVICE_PORT}/livez" || exit 1
 
 # Run uvicorn (entrypoint will switch to appuser)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7905", "--log-level", "info"]
+# Shell-form so SERVICE_PORT / LOG_LEVEL env vars are expanded at runtime
+# (must match HEALTHCHECK which also uses ${SERVICE_PORT}).
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${SERVICE_PORT} --log-level ${LOG_LEVEL}"]
 

@@ -29,16 +29,22 @@ class Settings:
     janus_mount_id: int = int(os.environ.get("JANUS_MOUNT_ID", "1305"))
     janus_http_base: str = os.environ.get("JANUS_HTTP", "http://127.0.0.1:8088")
     relay_url: str = os.environ.get("RELAY_URL", "http://127.0.0.1:9000").rstrip("/")
+    depth_cam_url: str = os.environ.get("DEPTH_CAM_URL", "http://192.168.1.55:8900").rstrip("/")
     allow_insecure_tls: bool = os.environ.get("ALLOW_INSECURE_TLS", "0") == "1"
     turn_host: str = os.getenv("TURN_HOST", "82.165.177.194")
     turn_port: int = int(os.getenv("TURN_PORT", "3478"))
     turn_user: str = os.getenv("TURN_USER", "webrtc")
-    turn_pass: str = os.getenv("TURN_PASS", "G456AH37gbc")
+    turn_pass: str = os.getenv("TURN_PASS", "")      # MUST be set via env in production
+    turn_shared_secret: str = os.getenv("TURN_SHARED_SECRET", "")  # coturn static-auth-secret for ephemeral creds
+    turn_cred_ttl: int = int(os.getenv("TURN_CRED_TTL", "86400"))  # ephemeral credential lifetime in seconds (24h)
     ice_policy: str = os.getenv("ICE_POLICY", "all")
-    watchdog_enabled: bool = os.environ.get("CAM_WATCHDOG", "0") == "1"
-    snapshot_watchdog_enabled: bool = os.environ.get("CAM_WATCHDOG", "0") == "1"
-    watchdog_interval_sec: int = int(os.environ.get("CAM_WATCHDOG_INTERVAL", "10"))
-    watchdog_stale_ms: int = int(os.environ.get("CAM_WATCHDOG_STALE_MS", "5000"))
+    watchdog_enabled: bool = os.environ.get("CAM_WATCHDOG", "1") == "1"
+    snapshot_watchdog_enabled: bool = os.environ.get("CAM_SNAPSHOT_WATCHDOG", os.environ.get("CAM_WATCHDOG", "1")) == "1"
+    watchdog_interval_sec: int = int(os.environ.get("CAM_WATCHDOG_INTERVAL", "8"))
+    watchdog_stale_ms: int = int(os.environ.get("CAM_WATCHDOG_STALE_MS", "10000"))
+    watchdog_grace_sec: int = int(os.environ.get("WATCHDOG_GRACE_SEC", "60"))
+    watchdog_reboot_enabled: bool = os.environ.get("CAM_WATCHDOG_REBOOT_ENABLED", "1") == "1"
+    max_fdir_reboots: int = int(os.environ.get("MAX_FDIR_REBOOTS", "2"))
     cors_origins: List[str] = field(
         default_factory=lambda: [
             "http://192.168.1.101:*",

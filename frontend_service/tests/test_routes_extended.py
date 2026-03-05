@@ -3,27 +3,24 @@
 import pytest
 import respx
 from httpx import Response
+from unittest.mock import patch
 
 
 # ── SPA fallback edge cases ────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_spa_fallback_api_prefix_404(client):
-    """Paths starting with api/ should return 404 (not SPA HTML)."""
-    r = await client.get("/api/")
-    # This goes through proxy_api which tries upstream; without respx it errors.
-    # But /api/ is different — let's try a deep path that won't match proxy_api
-    # Actually, test the SPA fallback specifically with static/ prefix
-    r2 = await client.get("/static/nonexistent_css.css")
-    # This is caught by StaticFiles mount first (404) or SPA fallback
-    assert r2.status_code in (404, 200)
+    """spa_fallback returns 404 for api/* paths."""
+    import main
+    r = await main.spa_fallback("api/test")
+    assert r.status_code == 404
+    assert b"Not Found" in r.body
 
 
 @pytest.mark.asyncio
 async def test_spa_fallback_static_prefix_404(client):
-    """Path traversal attempts are handled safely."""
+    """Static mount path traversal returns 404."""
     r = await client.get("/static/../../../etc/passwd")
-    # StaticFiles mount may normalize, SPA fallback may serve index, either is acceptable
-    assert r.status_code in (200, 400, 403, 404)
+    assert r.status_code == 404
 
 
 # ── static file routes ────────────────────────────────────────────
@@ -45,15 +42,10 @@ async def test_arm3d_viewer(client):
 async def test_arm3d_v2_not_built(client, monkeypatch):
     """When viewer dist doesn't exist, returns 503."""
     import main
-    from pathlib import Path
-    fake_path = Path("/tmp/nonexistent_viewer/dist/index.html")
-    monkeypatch.setattr(main, "serve_arm3d_v2", None)  # won't work; we need the endpoint
-
-    # Actually the endpoint checks existence at call time:
-    r = await client.get("/arm3d_v2")
-    # If viewer/dist/index.html doesn't exist → 503
-    # If it does exist → 200
-    assert r.status_code in (200, 503)
+    with patch("main.Path.exists", return_value=False):
+        r = await client.get("/arm3d_v2")
+    assert r.status_code == 503
+    assert "not built" in r.json()["detail"]
 
 
 # ── proxy API content-type handling ────────────────────────────────

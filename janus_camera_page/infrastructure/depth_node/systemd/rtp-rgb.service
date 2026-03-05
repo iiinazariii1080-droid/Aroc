@@ -1,0 +1,22 @@
+[Unit]
+Description=RGB (rgb24 FIFO -> H264 -> Janus mp 1305)
+After=network.target realsense-mux.service
+Requires=realsense-mux.service
+
+[Service]
+ExecStart=/bin/bash -lc '\
+  set -o pipefail; \
+  exec ffmpeg -loglevel warning \
+    -f rawvideo -pixel_format rgb24 -video_size 480x640 -framerate 15 \
+    -i /run/realsense/color.fifo \
+    -vf format=yuv420p \
+    -c:v libx264 -preset veryfast -tune zerolatency -profile:v baseline -level:v 3.1 \
+    \
+    -g 30 -keyint_min 30 -sc_threshold 0 \
+    -x264-params repeat-headers=1:bframes=0 \
+    -an -f rtp "rtp://127.0.0.1:5003?pkt_size=1200" \
+'
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

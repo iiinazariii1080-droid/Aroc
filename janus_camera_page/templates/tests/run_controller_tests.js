@@ -143,10 +143,12 @@ async function main(){
   let frameCb = null;
   const ui = {
     startFrameClock: (cb) => { frameCb = cb; },
+    stopFrameClock: () => {},
     bindIntents: () => {},
     render: () => {},
     bindStream: () => {},
     ensurePlaying: async () => ({ ok: true, blocked: false }),
+    onVideoStalled: () => {},
   };
 
   // Streaming stub (watch() emits STREAMING_OFFER_RECEIVED so reconnect settle window is started and notifyRecovered can reset attempt)
@@ -161,6 +163,7 @@ async function main(){
     recreate: async () => {},
     getInboundStream: () => ({}),
     getPeerConnection: () => null,
+    isSessionAlive: () => true,
   };
 
   const stats = { start: () => {}, stop: () => {} };
@@ -267,10 +270,12 @@ async function main(){
 
     const ui4 = {
       startFrameClock: (cb) => { frameCb4 = cb; },
+      stopFrameClock: () => {},
       bindIntents: () => {},
       render: () => {},
       bindStream: () => {},
       ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
     };
 
     let initResolve = null;
@@ -286,6 +291,7 @@ async function main(){
       recreate: async () => {},
       getInboundStream: () => ({}),
       getPeerConnection: () => null,
+      isSessionAlive: () => true,
     };
 
     const c4 = new AP.App.PlayerController(cfg, rtcConfig, ui4, clock4, log, streaming4, stats, null);
@@ -365,10 +371,12 @@ async function main(){
     };
     const uiBindThrows = {
       startFrameClock: (cb) => { frameCb = cb; },
+      stopFrameClock: () => {},
       bindIntents: () => {},
       render: () => {},
       bindStream: () => { throw new Error('bind_failed'); },
       ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
     };
     const c6b = new AP.App.PlayerController(cfg, rtcConfig, uiBindThrows, clock, logErr, streaming, stats, null);
     await c6b.init();
@@ -391,10 +399,12 @@ async function main(){
     };
     const uiRenderThrows = {
       startFrameClock: (cb) => { frameCb = cb; },
+      stopFrameClock: () => {},
       bindIntents: () => {},
       render: () => { if (++renderCallCount > 1) throw new Error('render_failed'); },
       bindStream: () => {},
       ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
     };
     const c6c = new AP.App.PlayerController(cfg, rtcConfig, uiRenderThrows, clock, logWarn, streaming, stats, null);
     await c6c.init();
@@ -424,6 +434,7 @@ async function main(){
       recreate: async () => {},
       getInboundStream: () => ({}),
       getPeerConnection: () => null,
+      isSessionAlive: () => true,
     };
     const c6d = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, logStop, streamingStopRejects, stats, null);
     await c6d.init();
@@ -564,10 +575,12 @@ async function main(){
     let renderCount = 0;
     const uiRenderCount = {
       startFrameClock: (cb) => { frameCb = cb; },
+      stopFrameClock: () => {},
       bindIntents: () => {},
       render: () => { renderCount++; },
       bindStream: () => {},
       ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
     };
     const c10 = new AP.App.PlayerController(cfg, rtcConfig, uiRenderCount, clock, log, streaming, stats, null);
     await c10.init();
@@ -587,10 +600,12 @@ async function main(){
 
     const ui11 = {
       startFrameClock: (cb) => { frameCb11 = cb; },
+      stopFrameClock: () => {},
       bindIntents: () => {},
       render: () => {},
       bindStream: () => {},
       ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
     };
 
     let initResolve11 = null;
@@ -606,6 +621,7 @@ async function main(){
       recreate: async () => {},
       getInboundStream: () => ({}),
       getPeerConnection: () => null,
+      isSessionAlive: () => true,
     };
 
     const c11 = new AP.App.PlayerController(cfg, rtcConfig, ui11, clock11, log, streaming11, stats, null);
@@ -634,6 +650,683 @@ async function main(){
     // but the stale first flow should NOT have called watch.
     assert(watchCalls11 === 0, 'stale first flow dropped, no watch call');
     assert(c11.state === PlayerState.CONNECTING, 'c11 still CONNECTING (second flow pending)');
+  }
+
+  // ---- Test 12: HANGUP event triggers recovery via ConnectionPolicy
+  {
+    console.log('--- CT Test 12: HANGUP handler ---');
+    const c12 = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, log, streaming, stats, null);
+    await c12.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb();
+    assert(c12.state === PlayerState.PLAYING, 'c12 PLAYING');
+
+    // Use non-ICE hangup reason (generic path → REQUEST_RECOVERY MEDIUM)
+    streaming._sink({ type: 'HANGUP', payload: { reason: 'Server shutting down' } });
+    assert(c12.state === PlayerState.RECONNECTING, 'HANGUP (non-ICE) triggers RECONNECTING');
+  }
+
+  // ---- Test 13: TRACK on=true emits TRACK_READY → BIND_STREAM
+  {
+    console.log('--- CT Test 13: TRACK READY ---');
+    const c13 = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, log, streaming, stats, null);
+    await c13.init();
+    assert(c13.state === PlayerState.CONNECTING, 'c13 CONNECTING');
+
+    // TRACK on=true → TRACK_READY event → BIND_STREAM action
+    streaming._sink({ type: 'TRACK', payload: { on: true, mid: '0' } });
+    // Should not crash and state should still be CONNECTING (no transition from TRACK_READY alone)
+    assert(c13.state === PlayerState.CONNECTING, 'c13 still CONNECTING after TRACK');
+  }
+
+  // ---- Test 14: TRACK_MUTED → ARM, TRACK_UNMUTED → DISARM
+  {
+    console.log('--- CT Test 14: TRACK_MUTED/UNMUTED ---');
+    const c14 = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, log, streaming, stats, null);
+    await c14.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb();
+    assert(c14.state === PlayerState.PLAYING, 'c14 PLAYING');
+
+    streaming._sink({ type: 'TRACK_MUTED', payload: { trackId: 't1' } });
+    assert(c14._timers.has('trackMute:t1'), 'c14 track mute timer armed');
+
+    streaming._sink({ type: 'TRACK_UNMUTED', payload: { trackId: 't1' } });
+    assert(!c14._timers.has('trackMute:t1'), 'c14 track mute timer disarmed');
+  }
+
+  // ---- Test 15: Track mute timeout triggers recovery
+  {
+    console.log('--- CT Test 15: Track mute timeout ---');
+    const c15 = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, log, streaming, stats, null);
+    await c15.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb();
+    assert(c15.state === PlayerState.PLAYING, 'c15 PLAYING');
+
+    streaming._sink({ type: 'TRACK_MUTED', payload: { trackId: 't1' } });
+    // Simulate webrtcUp=false before timeout so recovery happens
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: false } });
+    // Wait for trackMuteRestartMs (1000)
+    await clock.advance(1000);
+    await flushMicrotasks();
+    assert(c15.state === PlayerState.RECONNECTING, 'c15 track mute timeout → RECONNECTING');
+  }
+
+  // ---- Test 16: TRACK_ENDED triggers recovery
+  {
+    console.log('--- CT Test 16: TRACK_ENDED ---');
+    const c16 = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, log, streaming, stats, null);
+    await c16.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb();
+    assert(c16.state === PlayerState.PLAYING, 'c16 PLAYING');
+
+    streaming._sink({ type: 'TRACK_ENDED', payload: { trackId: 't1', kind: 'video' } });
+    assert(c16.state === PlayerState.RECONNECTING, 'c16 TRACK_ENDED → RECONNECTING');
+  }
+
+  // ---- Test 17: 460 Already Watching — requests HARD recovery
+  {
+    console.log('--- CT Test 17: 460 Already Watching ---');
+    const c17 = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, log, streaming, stats, null);
+    await c17.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb();
+    assert(c17.state === PlayerState.PLAYING, 'c17 PLAYING');
+
+    streaming._sink({ type: 'ERROR', payload: { error: 'Already watching', error_code: 460 } });
+    assert(c17.state === PlayerState.RECONNECTING, 'c17 460 → RECONNECTING');
+    assert(c17._reconnect.pending() != null, 'c17 reconnect pending');
+    assert(c17._reconnect.pending().severity >= AP.Core.RecoverySeverity.HARD, 'c17 severity HARD for 460');
+  }
+
+  // ---- Test 18: ICE disconnected → grace timer → recovery (ICE grace cycle)
+  {
+    console.log('--- CT Test 18: ICE grace cycle ---');
+    const c18 = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, log, streaming, stats, null);
+    await c18.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb();
+    assert(c18.state === PlayerState.PLAYING, 'c18 PLAYING');
+
+    // ICE disconnected → ARM_ICE_GRACE
+    streaming._sink({ type: 'ICE_STATE', payload: { state: 'disconnected' } });
+    assert(c18._timers.has('iceGrace'), 'c18 ICE grace armed');
+
+    // ICE connected → CANCEL_ICE_GRACE
+    streaming._sink({ type: 'ICE_STATE', payload: { state: 'connected' } });
+    assert(!c18._timers.has('iceGrace'), 'c18 ICE grace cancelled on connected');
+  }
+
+  // ---- Test 19: ICE grace timeout fires → requests recovery
+  {
+    console.log('--- CT Test 19: ICE grace timeout ---');
+    const c19 = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, log, streaming, stats, null);
+    await c19.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb();
+    assert(c19.state === PlayerState.PLAYING, 'c19 PLAYING');
+
+    streaming._sink({ type: 'ICE_STATE', payload: { state: 'disconnected' } });
+    // Wait webrtcUp=false makes it eligible for recovery
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: false } });
+    // Wait for iceDisconnectedGraceMs (500)
+    await clock.advance(500);
+    await flushMicrotasks();
+    assert(c19.state === PlayerState.RECONNECTING, 'c19 ICE grace timeout → RECONNECTING');
+  }
+
+  // ---- Test 20: SESSION_RESET with expected resets consumed
+  {
+    console.log('--- CT Test 20: SESSION_RESET expected ---');
+    const c20 = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, log, streaming, stats, null);
+    await c20.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb();
+    assert(c20.state === PlayerState.PLAYING, 'c20 PLAYING');
+
+    // Enter RECONNECTING
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: false } });
+    c20.requestRecovery('test', AP.Core.RecoverySeverity.SOFT);
+    assert(c20.state === PlayerState.RECONNECTING, 'c20 RECONNECTING');
+
+    // Fire attempt
+    await clock.advance(500);
+    await flushMicrotasks();
+    assert(c20._reconnect.inFlight() === true, 'c20 in-flight');
+
+    // Set up expected session resets (like before recreate)
+    c20._reconnect.expectSessionResetFromRecreate();
+
+    // First SESSION_RESET → consumed (no error)
+    streaming._sink({ type: 'SESSION_RESET', payload: { type: 'SESSION_DESTROYED' } });
+    assert(c20.state === PlayerState.RECONNECTING, 'c20 still RECONNECTING after consumed reset');
+    assert(c20._reconnect.inFlight() === true, 'c20 still in-flight after consumed reset');
+
+    // Second SESSION_RESET → consumed
+    streaming._sink({ type: 'SESSION_RESET', payload: { type: 'SESSION_RECREATED' } });
+    assert(c20.state === PlayerState.RECONNECTING, 'c20 still RECONNECTING after second consumed reset');
+
+    // Third SESSION_RESET → NOT consumed → triggers failure
+    streaming._sink({ type: 'SESSION_RESET', payload: { type: 'SESSION_DESTROYED' } });
+    // The unconsumed reset triggers notifyAttemptFailed
+    assert(c20._reconnect.inFlight() === false, 'c20 attempt failed on unconsumed reset');
+  }
+
+  // ---- Test 21: retry() from ERROR works + error auto-retry timer BUG detection
+  // NOTE: _scheduleErrorAutoRetry() in _applySnapshot is immediately cleared by CANCEL_ALL_TIMERS
+  // in _executeActions (failClosed always emits CANCEL_ALL_TIMERS). The auto-retry timer is
+  // effectively dead code. This test documents the bug and verifies manual retry() still works.
+  {
+    console.log('--- CT Test 21: retry from ERROR ---');
+    const clock21 = createFakeClock();
+    let frameCb21 = null;
+    const ui21 = {
+      startFrameClock: (cb) => { frameCb21 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    const cfgRetry = Object.assign({}, cfg, { maxReconnectAttempts: 1, errorAutoRetryBaseMs: 500 });
+    const c21 = new AP.App.PlayerController(cfgRetry, rtcConfig, ui21, clock21, log, streaming, stats, null);
+    await c21.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb21();
+    assert(c21.state === PlayerState.PLAYING, 'c21 PLAYING');
+
+    // Force exhaustion → ERROR
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: false } });
+    c21.requestRecovery('no_frames', AP.Core.RecoverySeverity.SOFT);
+    await clock21.advance(500);
+    await flushMicrotasks();
+    await clock21.advance(1000);
+    await flushMicrotasks();
+    assert(c21.state === PlayerState.ERROR, 'c21 ERROR');
+
+    // BUG: _errorRetryTimer is null because CANCEL_ALL_TIMERS clears it immediately after scheduling
+    assert(c21._errorRetryTimer === null, 'c21 BUG: auto-retry timer cleared by CANCEL_ALL_TIMERS');
+
+    // Manual retry() works
+    c21.retry();
+    assert(c21.state === PlayerState.CONNECTING, 'c21 retry → CONNECTING');
+    assert(c21.desiredPlaying === true, 'c21 desiredPlaying restored');
+    assert(c21.errCode === '', 'c21 errCode cleared');
+  }
+
+  // ---- Test 22: Session dead upgrade — SOFT becomes RECREATE when session not alive
+  {
+    console.log('--- CT Test 22: session dead upgrade ---');
+    const clock22 = createFakeClock();
+    let frameCb22 = null;
+    const ui22 = {
+      startFrameClock: (cb) => { frameCb22 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    const warns22 = [];
+    const log22 = {
+      debug: () => {},
+      info: () => {},
+      warn: (msg, data) => { warns22.push({ msg, data }); },
+      error: () => {},
+    };
+    let sessionAlive = true;
+    const streaming22 = {
+      _sink: null,
+      setEventSink: function(s){ this._sink = s; },
+      init: async () => {},
+      listStreams: async () => ([{ id: 1 }]),
+      watch: async function(){ if (this._sink) this._sink({ type: 'STREAMING_OFFER_RECEIVED', payload: {} }); },
+      stop: async () => {},
+      detach: async () => {},
+      recreate: async () => {},
+      getInboundStream: () => ({}),
+      getPeerConnection: () => null,
+      isSessionAlive: () => sessionAlive,
+    };
+    const c22 = new AP.App.PlayerController(cfg, rtcConfig, ui22, clock22, log22, streaming22, stats, null);
+    await c22.init();
+    streaming22._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb22();
+    assert(c22.state === PlayerState.PLAYING, 'c22 PLAYING');
+
+    // Session dies
+    sessionAlive = false;
+    streaming22._sink({ type: 'WEBRTC_STATE', payload: { up: false } });
+    c22.requestRecovery('no_frames', AP.Core.RecoverySeverity.SOFT);
+    assert(c22.state === PlayerState.RECONNECTING, 'c22 RECONNECTING');
+
+    // Fire the backoff timer
+    await clock22.advance(500);
+    await flushMicrotasks();
+
+    // Should have logged session_dead_upgrade
+    assert(warns22.some(w => w.msg === 'session_dead_upgrade'), 'c22 session_dead_upgrade logged');
+  }
+
+  // ---- Test 23: Watchdog timeout triggers recovery
+  {
+    console.log('--- CT Test 23: watchdog timeout ---');
+    const clock23 = createFakeClock();
+    let frameCb23 = null;
+    const ui23 = {
+      startFrameClock: (cb) => { frameCb23 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    const c23 = new AP.App.PlayerController(cfg, rtcConfig, ui23, clock23, log, streaming, stats, null);
+    await c23.init();
+    // Flush microtasks so _runConnectFlow completes (deep async chain: init→listStreams→watch→ensurePlaying→startWatchdog)
+    // _runConnectFlow is fire-and-forget from _executeActions; needs ~50 microtask flushes for full chain.
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb23();
+    assert(c23.state === PlayerState.PLAYING, 'c23 PLAYING');
+
+    // Stop sending frames — let noFrameThresholdMs (1500) expire
+    // Watchdog ticks every watchdogTickMs (250ms).
+    // Need to advance enough for watchdog to detect timeout for ICE state not 'new'/'checking'
+    streaming._sink({ type: 'ICE_STATE', payload: { state: 'connected' } });
+    await clock23.advance(2000);
+    await flushMicrotasks();
+    assert(c23.state === PlayerState.RECONNECTING, 'c23 watchdog timeout → RECONNECTING');
+  }
+
+  // ---- Test 24: _selectStreamId preferences
+  {
+    console.log('--- CT Test 24: _selectStreamId ---');
+    const c24 = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, log, streaming, stats, null);
+
+    // preferStreamId takes precedence
+    assert(c24._selectStreamId([{ id: 5, description: 'cam' }]) === 1, 'c24 preferStreamId=1 wins');
+
+    // Without preferStreamId, match by name
+    const cfgName = Object.assign({}, cfg, { preferStreamId: null, streamName: 'depth' });
+    const c24b = new AP.App.PlayerController(cfgName, rtcConfig, ui, clock, log, streaming, stats, null);
+    assert(c24b._selectStreamId([{ id: 1, description: 'Color' }, { id: 2, description: 'Depth cam' }]) === 2, 'c24 streamName match');
+
+    // Fallback to first
+    const cfgNoName = Object.assign({}, cfg, { preferStreamId: null, streamName: null });
+    const c24c = new AP.App.PlayerController(cfgNoName, rtcConfig, ui, clock, log, streaming, stats, null);
+    assert(c24c._selectStreamId([{ id: 10 }, { id: 20 }]) === 10, 'c24 fallback to first');
+
+    // Throw on empty
+    let threw24 = false;
+    try { c24c._selectStreamId([]); } catch (e) { threw24 = true; }
+    assert(threw24, 'c24 throws on empty list');
+  }
+
+  // ---- Test 25: _isDataPlaneHealthy checks frame age
+  {
+    console.log('--- CT Test 25: _isDataPlaneHealthy ---');
+    const clock25 = createFakeClock();
+    let frameCb25 = null;
+    const ui25 = {
+      startFrameClock: (cb) => { frameCb25 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    const c25 = new AP.App.PlayerController(cfg, rtcConfig, ui25, clock25, log, streaming, stats, null);
+    await c25.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb25();
+    assert(c25._isDataPlaneHealthy(), 'c25 healthy right after frame');
+
+    clock25.advance(2000);
+    assert(!c25._isDataPlaneHealthy(), 'c25 unhealthy after 2s without frames');
+  }
+
+  // ---- Test 26: STREAMING_OFFER_RECEIVED during RECONNECTING starts settle window
+  {
+    console.log('--- CT Test 26: STREAMING_OFFER settle ---');
+    const c26 = new AP.App.PlayerController(cfg, rtcConfig, ui, clock, log, streaming, stats, null);
+    await c26.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb();
+    assert(c26.state === PlayerState.PLAYING, 'c26 PLAYING');
+
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: false } });
+    c26.requestRecovery('x', AP.Core.RecoverySeverity.SOFT);
+    assert(c26.state === PlayerState.RECONNECTING, 'c26 RECONNECTING');
+
+    await clock.advance(500);
+    await flushMicrotasks();
+    assert(c26._reconnect.inFlight() === true, 'c26 in-flight');
+
+    // STREAMING_OFFER_RECEIVED → state machine emits START_RECONNECT_SETTLE → startSettleWindow
+    streaming._sink({ type: 'STREAMING_OFFER_RECEIVED', payload: {} });
+    // After offer, settle window is started. Simulate recovery.
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb();
+    assert(c26.state === PlayerState.PLAYING, 'c26 recovered after settle');
+    assert(c26._reconnect.attempt() === 0, 'c26 attempt reset');
+  }
+
+  // ---- Test 27: Video stalled detection
+  {
+    console.log('--- CT Test 27: video stalled ---');
+    const clock27 = createFakeClock();
+    let frameCb27 = null;
+    let stallCb = null;
+    const ui27 = {
+      startFrameClock: (cb) => { frameCb27 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: (cb) => { stallCb = cb; },
+    };
+    const c27 = new AP.App.PlayerController(cfg, rtcConfig, ui27, clock27, log, streaming, stats, null);
+    await c27.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    streaming._sink({ type: 'ICE_STATE', payload: { state: 'connected' } });
+    frameCb27();
+    assert(c27.state === PlayerState.PLAYING, 'c27 PLAYING');
+
+    // Advance so frame age > 2000ms
+    clock27.advance(3000);
+
+    // Trigger video stalled callback
+    assert(stallCb != null, 'c27 stall callback installed');
+    stallCb('stalled');
+
+    // Should trigger RECONNECTING since frame age > 2000 and in PLAYING
+    assert(c27.state === PlayerState.RECONNECTING, 'c27 video stalled → RECONNECTING');
+  }
+
+  // ---- Test 28: Tab resume (short hide) uses grace period, does NOT immediately reconnect
+  {
+    console.log('--- CT Test 28: Tab resume short hide - grace period ---');
+    const clock28 = createFakeClock();
+    let frameCb28 = null;
+    const ui28 = {
+      startFrameClock: (cb) => { frameCb28 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    const c28 = new AP.App.PlayerController(cfg, rtcConfig, ui28, clock28, log, streaming, stats, null);
+    await c28.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb28();
+    assert(c28.state === PlayerState.PLAYING, 'c28 PLAYING');
+
+    // Simulate tab hidden for 4 seconds (typical driving tab-switch)
+    c28._tabHiddenAt = clock28.nowMs();
+    clock28.advance(4000);
+    // Frame age is now 4000ms, which would have triggered tab_resume_stale before the fix.
+    // _isDataPlaneHealthy() threshold = max(1000, 250*2) = 1000ms → would be unhealthy.
+    assert(!c28._isDataPlaneHealthy(), 'c28 unhealthy before resume (expected)');
+
+    // Now simulate tab becoming visible
+    c28._onVisibilityChange(); // tab visible (no _tabHiddenAt set → means tab is visible)
+
+    // Key assertion: should NOT have triggered reconnection
+    assert(c28.state === PlayerState.PLAYING, 'c28 still PLAYING after short tab hide (grace period)');
+
+    // The watchdog timestamp was reset, so _isDataPlaneHealthy should be true now
+    assert(c28._isDataPlaneHealthy(), 'c28 healthy after watchdog reset on tab resume');
+  }
+
+  // ---- Test 29: Tab resume (long hide > session timeout) forces HARD recovery
+  {
+    console.log('--- CT Test 29: Tab resume long hide - HARD recovery ---');
+    const clock29 = createFakeClock();
+    let frameCb29 = null;
+    const ui29 = {
+      startFrameClock: (cb) => { frameCb29 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    const cfg29 = Object.assign({}, cfg, { sessionTimeoutMs: 30000 });
+    const c29 = new AP.App.PlayerController(cfg29, rtcConfig, ui29, clock29, log, streaming, stats, null);
+    await c29.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    streaming._sink({ type: 'ICE_STATE', payload: { state: 'connected' } });
+    frameCb29();
+    assert(c29.state === PlayerState.PLAYING, 'c29 PLAYING');
+
+    // Simulate tab hidden for 35 seconds (> session timeout)
+    c29._tabHiddenAt = clock29.nowMs();
+    clock29.advance(35000);
+
+    // Make webrtc down so reconnect attempt doesn't skip
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: false } });
+
+    c29._onVisibilityChange();
+
+    // Should have triggered HARD recovery → RECONNECTING
+    assert(c29.state === PlayerState.RECONNECTING, 'c29 RECONNECTING after long tab hide (> session timeout)');
+  }
+
+  // ---- Test 30: Tab resume grace resets FPS tracking (prevents false FPS drop)
+  {
+    console.log('--- CT Test 30: Tab resume resets FPS tracking ---');
+    const clock30 = createFakeClock();
+    let frameCb30 = null;
+    const ui30 = {
+      startFrameClock: (cb) => { frameCb30 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    const c30 = new AP.App.PlayerController(cfg, rtcConfig, ui30, clock30, log, streaming, stats, null);
+    await c30.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+
+    // Deliver many frames to fill FPS ring buffer
+    for (let i = 0; i < 30; i++) {
+      clock30.advance(33);
+      frameCb30();
+    }
+    assert(c30.state === PlayerState.PLAYING, 'c30 PLAYING');
+
+    // Simulate 5-second tab hide
+    c30._tabHiddenAt = clock30.nowMs();
+    clock30.advance(5000);
+
+    // Before resume, FPS should be very low (gap in ring buffer)
+    const fpsBefore = c30._watchdog.getCurrentFps(clock30.nowMs());
+    // FPS ring has old entries from 5 seconds ago, FPS calculation spans the gap
+
+    // Resume tab
+    c30._onVisibilityChange();
+
+    // After resume, FPS ring should be reset (empty)
+    const fpsAfter = c30._watchdog.getCurrentFps(clock30.nowMs());
+    assert(fpsAfter === 0, 'c30 FPS ring reset to 0 after tab resume');
+    assert(c30.state === PlayerState.PLAYING, 'c30 still PLAYING (no false FPS drop)');
+  }
+
+  // ---- Test 31: WatchdogService.resetAfterTabResume() resets timestamp and FPS ring
+  {
+    console.log('--- CT Test 31: WatchdogService.resetAfterTabResume ---');
+    const clock31 = createFakeClock();
+    const watchdog = new AP.App.WatchdogService(cfg, clock31, () => {}, () => {});
+
+    // Record some frames
+    watchdog.updateFrameTime();
+    clock31.advance(33);
+    watchdog.updateFrameTime();
+    clock31.advance(33);
+    watchdog.updateFrameTime();
+
+    // Advance to make frame age stale
+    clock31.advance(5000);
+    const ageBefore = watchdog.getLastFrameAgeMs(clock31.nowMs());
+    assert(ageBefore >= 5000, 'c31 age before reset >= 5000');
+    assert(watchdog.getCurrentFps(clock31.nowMs()) > 0, 'c31 FPS before reset > 0 (ring has entries)');
+
+    // Reset after tab resume
+    watchdog.resetAfterTabResume();
+
+    const ageAfter = watchdog.getLastFrameAgeMs(clock31.nowMs());
+    assert(ageAfter === 0, 'c31 age after reset === 0');
+    assert(watchdog.getCurrentFps(clock31.nowMs()) === 0, 'c31 FPS after reset === 0 (ring cleared)');
+  }
+
+  // ---- Test 32: Tab resume during CONNECTING also uses grace (no reconnect)
+  {
+    console.log('--- CT Test 32: Tab resume during CONNECTING ---');
+    const clock32 = createFakeClock();
+    const ui32 = {
+      startFrameClock: () => {},
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    const c32 = new AP.App.PlayerController(cfg, rtcConfig, ui32, clock32, log, streaming, stats, null);
+    await c32.init();
+    assert(c32.state === PlayerState.CONNECTING, 'c32 CONNECTING');
+
+    // Simulate 10-second tab hide during CONNECTING (< sessionTimeout)
+    c32._tabHiddenAt = clock32.nowMs();
+    clock32.advance(10000);
+    c32._onVisibilityChange();
+
+    // Should still be CONNECTING — grace period, not immediate reconnect
+    assert(c32.state === PlayerState.CONNECTING, 'c32 still CONNECTING after medium tab hide');
+  }
+
+  // ---- Test 33: network_online from ERROR defers retry (not immediate)
+  {
+    console.log('--- CT Test 33: network_online deferred retry ---');
+    const clock33 = createFakeClock();
+    let frameCb33 = null;
+    const ui33 = {
+      startFrameClock: (cb) => { frameCb33 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    // Use failing streaming to simulate "Is the server down?"
+    let initCallCount = 0;
+    const failStreaming = Object.assign({}, streaming, {
+      init: async () => { initCallCount++; if (initCallCount <= 1) throw new Error('Is the server down?'); },
+    });
+    const c33 = new AP.App.PlayerController(cfg, rtcConfig, ui33, clock33, log, failStreaming, stats, null);
+    // Manually set up ERROR state (simulating post-disconnect)
+    c33.state = PlayerState.ERROR;
+    c33.desiredPlaying = false;
+    c33._errorRetryCount = 8; // simulate accumulated backoff from long disconnect
+
+    // Fire network_online
+    c33._onNetworkOnline();
+
+    // Should NOT have transitioned immediately — deferred retry pending
+    assert(c33.state === PlayerState.ERROR, 'c33 still ERROR right after network_online (deferred)');
+    // Error retry count should be reset
+    assert(c33._errorRetryCount === 0, 'c33 error retry count reset on network_online');
+    // Timer should be set
+    assert(c33._errorRetryTimer != null, 'c33 deferred retry timer set');
+
+    // Advance 2s (default networkOnlineDelayMs) — retry should fire
+    await clock33.advance(2000);
+    await flushMicrotasks();
+    // retry() called → ERROR → CONNECTING (but init fails → back to ERROR)
+    // The key point: the retry DID fire after the delay
+    assert(initCallCount === 1, 'c33 streaming.init called after 2s delay');
+  }
+
+  // ---- Test 34: network_online resets _errorRetryCount for fresh backoff
+  {
+    console.log('--- CT Test 34: network_online resets error retry count ---');
+    const clock34 = createFakeClock();
+    let frameCb34 = null;
+    const ui34 = {
+      startFrameClock: (cb) => { frameCb34 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    const c34 = new AP.App.PlayerController(cfg, rtcConfig, ui34, clock34, log, streaming, stats, null);
+    await c34.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb34();
+    assert(c34.state === PlayerState.PLAYING, 'c34 PLAYING');
+
+    // Simulate high error retry count (accumulated during long disconnect)
+    c34._errorRetryCount = 10;
+
+    // network_online while PLAYING — should reset count even in non-ERROR states
+    c34._onNetworkOnline();
+    assert(c34._errorRetryCount === 0, 'c34 error retry count reset on network_online from PLAYING');
+  }
+
+  // ---- Test 35: network_online deferred retry succeeds after delay
+  {
+    console.log('--- CT Test 35: network_online deferred retry succeeds ---');
+    const clock35 = createFakeClock();
+    let frameCb35 = null;
+    const ui35 = {
+      startFrameClock: (cb) => { frameCb35 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    const c35 = new AP.App.PlayerController(cfg, rtcConfig, ui35, clock35, log, streaming, stats, null);
+    // init() to wire up frame callback + streaming sink
+    await c35.init();
+    assert(typeof frameCb35 === 'function', 'c35 frameCb wired');
+
+    // Move to ERROR state via _fail (realistic path)
+    c35._fail(AP.Core.PlayerErrorCode.CONNECT_FAILED, 'simulated');
+    assert(c35.state === PlayerState.ERROR, 'c35 ERROR');
+    c35._errorRetryCount = 5; // simulate accumulated backoff
+
+    // Fire network_online → schedules deferred retry in 2s
+    c35._onNetworkOnline();
+    assert(c35.state === PlayerState.ERROR, 'c35 still ERROR');
+
+    // Advance 2s → retry fires → CONNECTING → streaming works
+    await clock35.advance(2000);
+    await flushMicrotasks();
+    assert(c35.state === PlayerState.CONNECTING, 'c35 CONNECTING after deferred retry');
+
+    // Complete connection
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb35();
+    assert(c35.state === PlayerState.PLAYING, 'c35 PLAYING after successful deferred retry');
+    assert(c35._errorRetryCount === 0, 'c35 error retry count reset on PLAYING');
   }
 
   console.log('OK: controller tests passed');

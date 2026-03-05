@@ -46,13 +46,13 @@ export const TRANSFORMS: Record<string, StaticTransform> = {
   /**
    * Canonical arm-base visual transform in ROS frame.
    * Used as the zero reference for debug deltas.
-   * Stored in world units / degrees for backward compat with rendering layer.
+   * The Three.js world-unit offsets are applied directly by the rendering layer.
    */
   armBaseCanonical: {
-    translation: { x: 0, y: -0.1, z: 0.525 },  // m (was wu: 0, -2, 10.5)
+    translation: { x: 0, y: -0.1, z: 0.525 },  // m (ROS frame)
     rotation: { roll: 0, pitch: 0, yaw: 0 },
     status: 'KNOWN',
-    note: 'Canonical zero reference (visual only). Legacy wu: {x:0, y:10.5, z:-2}, deg: {x:30, y:-30, z:0}',
+    note: 'Canonical zero reference (visual only). Three.js offsets applied via canonicalVisualOffset.',
   },
 
   /** T_agv → arm_base. Source: physical mounting drawings. */
@@ -69,13 +69,13 @@ export const TRANSFORMS: Record<string, StaticTransform> = {
    * pointing sideways (perpendicular to suction axis).
    *
    * Position: 44mm along local X, -168mm along local Y (toward tip), -27mm along local Z.
-   * Rotation: rx=-90° ry=0° rz=-90° — rotates camera optical axis to match physical mount.
+   * Rotation: rx=-90° ry=+90° rz=0° — rotates camera optical axis to match physical mount.
    */
   flangeToCamera: {
-    translation: { x: 0.044, y: -0.168, z: -0.027 },
-    rotation: { roll: -Math.PI / 2, pitch: 0, yaw: -Math.PI / 2 },
+    translation: { x: 0.03, y: -0.03, z: -0.15 },
+    rotation: { roll: -Math.PI / 2, pitch: Math.PI / 2, yaw: 0 },
     status: 'KNOWN',
-    note: 'Calibrated 2026-02-20. P:44/-168/-27mm R:-90/0/-90 deg (in toolGroup local frame)',
+    note: 'Calibrated preset. P:30/-30/-150mm R:-90/90/0 deg (in toolGroup local frame)',
   },
 
   /** T_flange → gripper. Zero offset (gripper STL at tool group origin). */
@@ -93,6 +93,16 @@ export const TRANSFORMS: Record<string, StaticTransform> = {
     note: 'Visual only — no kinematic effect',
   },
 };
+
+/**
+ * Canonical arm-base visual offset in Three.js world units / degrees.
+ * Applied by arm-visual.ts applyMount() to match legacy viewer appearance.
+ * Source: v1 scene-config.js armBaseCanonical.position_wu / rotation_deg.
+ */
+export const ARM_CANONICAL_VISUAL = {
+  positionWu: [0, 15.5, -2] as const,   // Three.js Y-up world units
+  rotationDeg: [30, -30, 0] as const,    // Three.js Euler XYZ degrees
+} as const;
 
 
 // ─────────────────────────────────────────────────
@@ -163,11 +173,14 @@ export const DEPTH_CAMERA = {
   intrinsics: {
     fx: 380.4253845214844,
     fy: 380.4253845214844,
-    cx: 324.824951171875,
-    cy: 232.37411499023438,
-    width: 640,
-    height: 480,
+    cx: 232.37411499023438,
+    cy: 324.824951171875,
+    width: 480,
+    height: 640,
   } satisfies CameraIntrinsics,
+
+  /** Raw uint16 → mm conversion factor (D435 depth_scale). */
+  depthScale: 0.9,
 
   depthCalibration: {
     k: 0.957,
@@ -179,8 +192,8 @@ export const DEPTH_CAMERA = {
 
   /** Computed FOV from intrinsics (degrees). */
   fov: {
-    h: 2 * Math.atan(640 / (2 * 380.4253845214844)) * (180 / Math.PI),   // ≈ 80.16°
-    v: 2 * Math.atan(480 / (2 * 380.4253845214844)) * (180 / Math.PI),   // ≈ 64.47°
+    h: 2 * Math.atan(480 / (2 * 380.4253845214844)) * (180 / Math.PI),   // ≈ 64.47°
+    v: 2 * Math.atan(640 / (2 * 380.4253845214844)) * (180 / Math.PI),   // ≈ 80.16°
   },
 } as const;
 
@@ -193,8 +206,16 @@ export const DEPTH_OVERLAY: DepthOverlayConfig = {
   stridePx: 4,
   minRaw: 50,
   maxRaw: 2000,
-  minDistanceM: 0.10,
-  pixelRotationDeg: 90,
+  minDistanceM: 0.05,
+  rejectNearBlackRgb: true,
+  nearBlackThreshold: 16,
+  /**
+   * Pixel rotation for depth overlay (degrees).
+    * Camera stream is mounted in portrait orientation (480x640 payload),
+    * so we rotate pixels 90° clockwise before unprojection to align with
+    * canonical intrinsics (640x480 model frame).
+   */
+    pixelRotationDeg: 90,
   flipX: false,
   flipY: false,
   swapPayloadWH: false,
@@ -229,7 +250,11 @@ export const SCENE_CAMERA = {
   fov: 45,
   near: 0.1,
   far: 500,
-  initialPosition: [20, 15, 20] as const,   // world units
+  /**
+   * Camera orbits from front-right above the robot.
+   * Matches legacy viewer position.
+   */
+  initialPosition: [20, 15, 20] as const,  // world units
   initialTarget: [0, 5, 0] as const,        // world units
   controls: {
     enableDamping: true,
@@ -271,7 +296,7 @@ export const FLOOR = {
   gridSize: 80,
   gridDivisions: 24,
   gridColors: [0x303846, 0x232a36] as const,
-  positionY: -5,        // world units
+  positionY: 0,         // world units
   realHeightM: 0,       // ROS Z = floor level
 } as const;
 
@@ -296,18 +321,9 @@ export const AGV_VISUALIZATION = {
     mapMetaUrlTemplate: '/api/v1/symovo/map/{map_id}',
     mapImageUrlTemplate: '/api/v1/symovo/map/{map_id}/full.png',
     preferredMapId: 1,
-    textureRotationDeg: 0,
-    planePosXM: 15.06,
-    planePosYM: -12.84,
-    planePosZM: 0,
-    planeRxDeg: 0,
-    planeRyDeg: -90,
-    planeRzDeg: 0,
-    texOffsetXM: 0,
-    texOffsetYM: 0,
-    texYawDeg: 0,
     opacity: 0.8,
-    yOffset_wu: -4.98,
+    /** Small Y offset to prevent z-fighting with grid plane. */
+    yOffset_wu: -0.1,
   },
   robotStatus: {
     url: '/api/v1/robot/status',
@@ -365,7 +381,27 @@ export const API = {
 
 
 // ─────────────────────────────────────────────────
-// §12  DEBUG QUERY PARAMS
+// §12  WORKSPACE VISUALIZATION
+// ─────────────────────────────────────────────────
+
+export const WORKSPACE_VIS = {
+  /** Wireframe edge color. */
+  edgeColor: 0x22d3ee,       // cyan-400
+  /** Translucent fill color. */
+  fillColor: 0x22d3ee,
+  /** Fill opacity (0 = wireframe only). */
+  fillOpacity: 0.06,
+  /** Edge line width (BasicLineMaterial limitation: always 1 on most GPUs). */
+  lineWidth: 1,
+  /** Label text color. */
+  labelColor: '#22d3ee',
+  /** Whether to show dimension labels on edges. */
+  showLabels: true,
+} as const;
+
+
+// ─────────────────────────────────────────────────
+// §13  DEBUG QUERY PARAMS
 // ─────────────────────────────────────────────────
 
 export const DEBUG_PARAMS = {
@@ -375,4 +411,5 @@ export const DEBUG_PARAMS = {
   depthCloud: 'depth_cloud',
   coords: 'coords',
   agvMap: 'agv_map',
+  workspace: 'workspace',
 } as const;
