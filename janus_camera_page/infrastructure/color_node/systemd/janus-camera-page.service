@@ -4,7 +4,9 @@ After=network-online.target janus.service
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=30s
 WorkingDirectory=/home/boris/robot/janus_camera_page
 ExecStart=/usr/bin/python3 /home/boris/robot/janus_camera_page/main.py
 Restart=always

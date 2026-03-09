@@ -6,12 +6,15 @@ Connects to the realsense‑mux HTTP service for depth data:
   • ``GET /depth?x=&y=``   — single‑pixel depth query
   • object detection via depth‑based segmentation
   • grasp‑point computation for vacuum grippers
+  • frame capture & TTL cache for grasp analysis
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import List, Optional, Tuple
+import time
+import uuid
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
 import cv2
@@ -34,9 +37,11 @@ from app.config import (
     DEPTH_AVG_FRAMES,
     DEPTH_CALIB_A,
     DEPTH_CALIB_B,
+    FRAME_TTL_S,
 )
 from models.grasp_types import (
     CameraIntrinsics,
+    FrameContext,
     GraspPoint,
     ObjectDetection,
     PixelCoord,
@@ -57,34 +62,99 @@ class DepthService:
             width=DEPTH_FRAME_WIDTH, height=DEPTH_FRAME_HEIGHT,
             depth_scale=DEPTH_SCALE,
         )
+        # Frame TTL cache: {frame_id: (np.ndarray, timestamp_s)}
+        self._frame_cache: Dict[str, Tuple[np.ndarray, float]] = {}
+
+    @property
+    def intrinsics(self) -> CameraIntrinsics:
+        return self._intrinsics
 
     # ── Frame capture ──────────────────────────────────────────────────────
 
     async def get_depth_frame(self) -> np.ndarray:
         """Capture a full depth frame (uint16, shape H×W) via HTTP.
 
-        Uses ``GET /depth/frame`` which returns raw uint16 binary data.
+        Uses ``GET /depth/frame?format=json`` which returns JSON with
+        base64-encoded float32 depth data in metres.  The result is
+        converted to uint16 raw values compatible with ``DEPTH_SCALE``
+        (i.e. ``depth_mm ≈ raw * DEPTH_SCALE``).
+
         Raises ``ConnectionError`` when the camera is not reachable.
         """
+        import base64
+
         import httpx
 
         url = f"{self._base_url}/depth/frame"
         try:
             async with httpx.AsyncClient(timeout=DEPTH_HTTP_TIMEOUT_S) as client:
-                resp = await client.get(url)
+                resp = await client.get(url, params={"format": "json"})
                 resp.raise_for_status()
         except Exception as exc:
             raise ConnectionError(
                 f"Depth camera not reachable at {url}: {exc}"
             ) from exc
 
-        raw = resp.content
-        if len(raw) != DEPTH_FRAME_BYTES:
+        body = resp.json()
+        raw = base64.b64decode(body["data"])
+        arr_f32 = np.frombuffer(raw, dtype=np.float32)
+
+        expected_pixels = DEPTH_FRAME_WIDTH * DEPTH_FRAME_HEIGHT
+        if arr_f32.size != expected_pixels:
             raise ConnectionError(
-                f"Depth frame size mismatch: got {len(raw)}, expected {DEPTH_FRAME_BYTES}"
+                f"Depth frame pixel count mismatch: got {arr_f32.size}, "
+                f"expected {expected_pixels}"
             )
-        arr = np.frombuffer(raw, dtype=np.uint16)
-        return arr.reshape((DEPTH_FRAME_HEIGHT, DEPTH_FRAME_WIDTH))
+
+        arr_f32 = arr_f32.reshape((DEPTH_FRAME_HEIGHT, DEPTH_FRAME_WIDTH))
+
+        # Convert float32 metres → uint16 raw values.
+        # Pipeline convention: depth_mm = raw_uint16 * DEPTH_SCALE
+        arr_raw = (arr_f32 * 1000.0) / DEPTH_SCALE
+        return np.clip(arr_raw, 0, 65535).astype(np.uint16)
+
+    # ── Frame capture & TTL cache ──────────────────────────────────────────
+
+    async def capture_frame(self) -> Tuple[str, np.ndarray, FrameContext]:
+        """Capture a depth frame, cache it with a TTL, and return (frame_id, frame, context).
+
+        The cached frame can be retrieved later via ``get_cached_frame(frame_id)``
+        within the TTL window (default 5 s).
+        """
+        frame = await self.get_depth_frame()
+        frame_id = uuid.uuid4().hex[:12]
+        ts_ms = int(time.time() * 1000)
+        self._frame_cache[frame_id] = (frame, time.time())
+        self._evict_expired()
+
+        ci = self._intrinsics
+        ctx = FrameContext(
+            frame_id=frame_id,
+            timestamp_ms=ts_ms,
+            intrinsics={"fx": ci.fx, "fy": ci.fy, "cx": ci.cx, "cy": ci.cy},
+            depth_scale=ci.depth_scale,
+            resolution=(ci.width, ci.height),
+            frame_reused=True,
+        )
+        return frame_id, frame, ctx
+
+    def get_cached_frame(self, frame_id: str) -> Optional[np.ndarray]:
+        """Return a cached frame if it exists and is within TTL, else None."""
+        entry = self._frame_cache.get(frame_id)
+        if entry is None:
+            return None
+        frame, cached_at = entry
+        if (time.time() - cached_at) > FRAME_TTL_S:
+            del self._frame_cache[frame_id]
+            return None
+        return frame
+
+    def _evict_expired(self) -> None:
+        """Remove frames older than TTL."""
+        now = time.time()
+        expired = [fid for fid, (_, ts) in self._frame_cache.items() if (now - ts) > FRAME_TTL_S]
+        for fid in expired:
+            del self._frame_cache[fid]
 
     async def get_single_depth(self, x: int, y: int) -> float:
         """Query depth at a single pixel via ``GET /depth?x=&y=``."""

@@ -93,6 +93,27 @@ ice_connect_duration_seconds = Histogram(
     buckets=[0.5, 1, 2, 3, 5, 8, 10, 15, 30],
 )
 
+ttff_seconds = Histogram(
+    "camstack_ttff_seconds",
+    "Time-to-first-frame as reported by client telemetry",
+    buckets=[1, 2, 3, 5, 8, 10, 15, 20, 30],
+)
+
+client_packet_loss_ratio = Gauge(
+    "camstack_client_packet_loss_ratio",
+    "Latest client-reported packet loss ratio (0.0-1.0)",
+)
+
+client_frames_decoded_total = Gauge(
+    "camstack_client_frames_decoded_total",
+    "Latest client-reported cumulative framesDecoded",
+)
+
+client_last_report_age_seconds = Gauge(
+    "camstack_client_last_report_age_seconds",
+    "Seconds since last client telemetry stats_report",
+)
+
 
 # ── Endpoint ────────────────────────────────────────────────────────
 

@@ -152,6 +152,12 @@ def make_fastapi(service: CameraService):
         y: float,
         service: CameraService = Depends(get_camera_service),
     ):
+        import math
+        if math.isnan(x) or math.isnan(y) or math.isinf(x) or math.isinf(y):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=422, detail="x and y must be finite numbers")
+        x = max(0.0, min(100.0, x))
+        y = max(0.0, min(100.0, y))
         # Клиент даёт 0..100 → нормализуем в 0..1
         x_norm = x / 100.0
         y_norm = y / 100.0
@@ -370,7 +376,40 @@ def run_pipeline(
     if ir_mode:
         enable(ir_mode)
 
-    profile = pipeline.start(config)
+    # Try to start pipeline; on VIDIOC_S_FMT errno=5 do firmware-level hardware_reset and retry
+    MAX_HW_RESET_RETRIES = 2
+    profile = None
+    for attempt in range(1 + MAX_HW_RESET_RETRIES):
+        try:
+            profile = pipeline.start(config)
+            break
+        except RuntimeError as exc:
+            if "VIDIOC_S_FMT" in str(exc) and attempt < MAX_HW_RESET_RETRIES:
+                print(f"[hw-reset] pipeline.start() failed ({exc}), sending hardware_reset (attempt {attempt + 1}/{MAX_HW_RESET_RETRIES})", flush=True)
+                try:
+                    ctx = rs.context()
+                    devs = ctx.query_devices()
+                    if len(devs):
+                        devs[0].hardware_reset()
+                        print("[hw-reset] hardware_reset() sent, waiting 6s for device re-enum ...", flush=True)
+                        time.sleep(6)
+                    else:
+                        print("[hw-reset] no device found for hardware_reset", flush=True)
+                        time.sleep(3)
+                except Exception as he:
+                    print(f"[hw-reset] hardware_reset() itself failed: {he}", flush=True)
+                    time.sleep(3)
+                # recreate pipeline after hw reset
+                pipeline = rs.pipeline()
+                config = rs.config()
+                if color_mode:
+                    enable(color_mode)
+                if depth_mode:
+                    enable(depth_mode)
+                if ir_mode:
+                    enable(ir_mode)
+            else:
+                raise
 
     depth_scale = None
     if depth_mode:
@@ -404,11 +443,15 @@ def run_pipeline(
     color_count = depth_count = ir_count = 0
     last_report = time.time()
 
+    _fifo_fail_count = {'color': 0, 'depth': 0, 'ir': 0}
+    _FIFO_MAX_CONSECUTIVE_FAILURES = 10
+
     def _safe_write(writer, data, fifo_path, label):
         """Write to FIFO, recovering from BrokenPipeError if the reader (ffmpeg) died."""
         nonlocal color_writer, depth_writer, ir_writer
         try:
             writer.write(data)
+            _fifo_fail_count[label] = 0
             return writer
         except (BrokenPipeError, OSError) as exc:
             print(f"[fifo] {label} writer broken ({exc}), reopening {fifo_path} ...", flush=True)
@@ -420,10 +463,19 @@ def run_pipeline(
                 new_writer = open_fifo_writer_blocking(fifo_path)
                 new_writer.write(data)
                 print(f"[fifo] {label} writer recovered", flush=True)
+                _fifo_fail_count[label] = 0
                 return new_writer
             except Exception as reopen_exc:
-                print(f"[fifo] {label} reopen failed: {reopen_exc}", flush=True)
-                return None
+                _fifo_fail_count[label] += 1
+                print(
+                    f"[fifo] {label} reopen failed ({_fifo_fail_count[label]}"
+                    f"/{_FIFO_MAX_CONSECUTIVE_FAILURES}): {reopen_exc}",
+                    flush=True,
+                )
+                if _fifo_fail_count[label] >= _FIFO_MAX_CONSECUTIVE_FAILURES:
+                    print(f"[fifo] {label} FIFO unrecoverable after {_FIFO_MAX_CONSECUTIVE_FAILURES} failures, crashing for systemd restart", flush=True)
+                    raise RuntimeError(f"FIFO {label} unrecoverable") from reopen_exc
+                return writer  # return original (broken) writer instead of None to avoid AttributeError
 
     try:
         while running:
@@ -438,7 +490,7 @@ def run_pipeline(
                     img = np.ascontiguousarray(img)
                     # Store latest colour frame for HTTP endpoint
                     service.update_color_rgb(img)
-                    if color_writer:
+                    if color_writer is not None:
                         color_writer = _safe_write(color_writer, img.tobytes(), color_fifo, 'color')
 
             if depth_mode:
@@ -454,7 +506,9 @@ def run_pipeline(
                         if service.depth_flip180:
                             img = np.rot90(img, 2)  # 180° to match color sensor orientation
                         img = np.ascontiguousarray(img)
-                        depth_writer = _safe_write(depth_writer, img.tobytes(), depth_fifo, 'depth')
+                        result = _safe_write(depth_writer, img.tobytes(), depth_fifo, 'depth')
+                        if result is not None:
+                            depth_writer = result
 
             if ir_mode:
                 irf = frames.get_infrared_frame(ir_mode.stream_index)
@@ -464,7 +518,9 @@ def run_pipeline(
                         ir = np.asanyarray(irf.get_data())  # HxW, uint8
                         ir = rotate_img(ir, rotate)
                         ir = np.ascontiguousarray(ir)
-                        ir_writer = _safe_write(ir_writer, ir.tobytes(), ir_fifo, 'ir')
+                        result = _safe_write(ir_writer, ir.tobytes(), ir_fifo, 'ir')
+                        if result is not None:
+                            ir_writer = result
 
             now = time.time()
             if now - last_report >= 2.0:
@@ -508,11 +564,14 @@ def main():
 
     rotate = "cw"  # наш фиксированный поворот
 
+    color_idx = int(os.environ.get("RS_COLOR_IDX", "90"))
+    depth_idx = int(os.environ.get("RS_DEPTH_IDX", "18"))
+    ir_idx = int(os.environ.get("RS_IR_IDX", "-1"))
+
     run_pipeline(
-        color_idx=90,                    # как у тебя было
-        depth_idx=18,
-        # ir_idx=19,
-        ir_idx=-1,
+        color_idx=color_idx,
+        depth_idx=depth_idx,
+        ir_idx=ir_idx,
         color_fifo="/run/realsense/color.fifo",
         depth_fifo="/run/realsense/depth.fifo",
         # ir_fifo="/run/realsense/ir.fifo",

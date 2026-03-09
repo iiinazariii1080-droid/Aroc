@@ -23,6 +23,8 @@ services:
       # .env is loaded via env_file directive above; no volume mount needed
       # Mount certificates directory (if TLS is used)
       - ./certs:/app/certs
+      # Shared configuration module
+      - ../shared_config:/app/shared_config:ro
     ports:
       # Expose API port (only if API_ENABLED=true)
       - "${API_PORT:-7900}:${API_PORT:-7900}"

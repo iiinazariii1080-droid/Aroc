@@ -25,27 +25,31 @@ $IPT -A INPUT -p icmp -j ACCEPT
 # ── SSH (22) ──
 $IPT -A INPUT -p tcp --dport 22 -j ACCEPT
 
-# ── Camera page FastAPI (8900) ──
-$IPT -A INPUT -p tcp --dport 8900 -j ACCEPT
+# ── Camera page FastAPI (8900) — LAN + loopback; external via Cloudflare tunnel ──
+$IPT -A INPUT -p tcp --dport 8900 -s 127.0.0.0/8    -j ACCEPT
+$IPT -A INPUT -p tcp --dport 8900 -s 192.168.1.0/24 -j ACCEPT
 
-# ── Janus WebRTC REST (8088) ──
-$IPT -A INPUT -p tcp --dport 8088 -j ACCEPT
+# ── Janus WebRTC REST (8088) — LAN only; external via Cloudflare tunnel ──
+$IPT -A INPUT -p tcp --dport 8088 -s 127.0.0.0/8    -j ACCEPT
+$IPT -A INPUT -p tcp --dport 8088 -s 192.168.1.0/24 -j ACCEPT
 
-# ── Janus WebSocket (8188) ──
-$IPT -A INPUT -p tcp --dport 8188 -j ACCEPT
+# ── Janus WebSocket (8188) — LAN only; external via Cloudflare tunnel ──
+$IPT -A INPUT -p tcp --dport 8188 -s 127.0.0.0/8    -j ACCEPT
+$IPT -A INPUT -p tcp --dport 8188 -s 192.168.1.0/24 -j ACCEPT
 
 # ── Janus Admin API (7088) — only from LAN ──
 $IPT -A INPUT -p tcp --dport 7088 -s 192.168.1.0/24 -j ACCEPT
 
-# ── Janus RTP media (40000-41000 UDP, ICE range) ──
+# ── Janus RTP media (40000-41000 UDP, ICE range — WAN for WebRTC clients) ──
 $IPT -A INPUT -p udp --dport 40000:41000 -j ACCEPT
 
 # ── Janus RTP ingest from ffmpeg (5002-5120 UDP, local only) ──
 $IPT -A INPUT -p udp --dport 5002:5120 -s 127.0.0.0/8 -j ACCEPT
 $IPT -A INPUT -p udp --dport 5002:5120 -s 192.168.1.0/24 -j ACCEPT
 
-# ── TextRoom relay / hook (9000) ──
-$IPT -A INPUT -p tcp --dport 9000 -j ACCEPT
+# ── TextRoom relay / hook (9000) — LAN + loopback; external via Cloudflare tunnel ──
+$IPT -A INPUT -p tcp --dport 9000 -s 127.0.0.0/8    -j ACCEPT
+$IPT -A INPUT -p tcp --dport 9000 -s 192.168.1.0/24 -j ACCEPT
 
 # ── Cloudflare tunnel (managed by cloudflared, outbound only) ──
 # No inbound rule needed — tunnel is outbound.
@@ -57,7 +61,7 @@ $IPT -A INPUT -s 192.168.1.55 -j ACCEPT
 $IPT -A INPUT -p udp --dport 68 -j ACCEPT
 
 # ── Drop everything else ──
-$IPT -A INPUT -j LOG --log-prefix "FW-DROP: " --log-level 4
+$IPT -A INPUT -m limit --limit 30/min --limit-burst 10 -j LOG --log-prefix "FW-DROP: " --log-level 4
 $IPT -A INPUT -j DROP
 
 echo "[firewall-color] INPUT rules applied. Run 'sudo netfilter-persistent save' to persist."

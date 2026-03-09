@@ -181,10 +181,13 @@ class SymovoAgvClient(BaseHttpClient):
             await charger_workflow.maybe_deactivate_on_drive_mode(self)
 
         # Prefer 'agv' path first (matches observed controller behavior); fallback to 'amr'.
+        # max_retries=0: controller 503 means "robot not ready" (physical state),
+        # retrying won't help and causes gateway timeout (504).
         try:
-            return await self.put(f"/agv/{self.robot_number}/move/drive_mode", json_data=payload)
-        except Exception:
-            return await self.put(f"/amr/{self.robot_number}/move/drive_mode", json_data=payload)
+            return await self.put(f"/agv/{self.robot_number}/move/drive_mode", json_data=payload, max_retries=0)
+        except DeviceError:
+            # 404 / other non-connection error on /agv/ path — try /amr/ fallback
+            return await self.put(f"/amr/{self.robot_number}/move/drive_mode", json_data=payload, max_retries=0)
 
     async def move_speed(
         self,

@@ -60,8 +60,10 @@
 
   async function loadRtcConfig(cfg, log){
     const url = `${window.location.origin}${cfg.clientConfigPath}`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 8000);
     try {
-      const resp = await fetch(url, { cache: 'no-store' });
+      const resp = await fetch(url, { cache: 'no-store', signal: ac.signal });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       const iceServers = Array.isArray(data.iceServers) && data.iceServers.length ? data.iceServers : DEFAULT_ICE;
@@ -72,6 +74,8 @@
     } catch (e) {
       log.warn('rtc_config_fallback', { error: String(e?.message || e) });
       return sanitizeRtcConfig(DEFAULT_ICE, 'all', log);
+    } finally {
+      clearTimeout(timer);
     }
   }
 

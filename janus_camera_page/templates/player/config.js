@@ -51,7 +51,7 @@
     const PROTOCOL = window.location.protocol;
     const WS = PROTOCOL === 'https:' ? 'wss' : 'ws';
 
-    const CAM_TYPE = dataset.camType || '__CAM_TYPE__';
+    const CAM_TYPE = dataset.camType || 'color_camera';
     const apiPrefixMode = String(dataset.apiPrefixMode || 'port').toLowerCase();
     const apiPrefix = dataset.apiPrefix || `/api/v1/${CAM_TYPE}`;
 
@@ -139,8 +139,8 @@
     // When true (default): reconnect only while tab is visible; on tab visible again, auto-retry if ERROR or resume RECONNECTING.
     const visibilityAwareReconnect = resolveFeatureFlag(dataset.visibilityAwareReconnect, true);
     // sessionTimeoutMs: must match Janus janus.jcfg session_timeout. Used by visibility handler to
-    // detect dead sessions after long tab-hide. Default 30s matches our Janus config.
-    const sessionTimeoutMs = clampInt(dataset.sessionTimeoutMs, 10000, 120000, 30000);
+    // detect dead sessions after long tab-hide. Default 60s matches our Janus config.
+    const sessionTimeoutMs = clampInt(dataset.sessionTimeoutMs, 10000, 120000, 60000);
     const preferStreamId = dataset.preferStreamId ? parseInt(dataset.preferStreamId, 10) : null;
     const streamName = dataset.streamName || 'RealSense Stream';
     const clientConfigPath = dataset.clientConfigPath || `/api/v1/${CAM_TYPE}/client-config`;

@@ -5,13 +5,14 @@ import os
 from typing import Optional, Dict, Any
 from pydantic import Field
 from pydantic_settings import BaseSettings
+from shared_config.network import DEVICES
 
 
 class Settings(BaseSettings):
     """Настройки приложения."""
     
     # Symovo AGV настройки
-    symovo_car_ip: str = Field(default="192.168.1.100")
+    symovo_car_ip: str = Field(default=DEVICES.SYMOVO_CAR_IP)
     symovo_robot_number: int = Field(default=15)
     symovo_timeout_seconds: int = Field(default=10)
     symovo_operation_timeout_seconds: Optional[float] = Field(default=30.0)

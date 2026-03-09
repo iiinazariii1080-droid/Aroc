@@ -168,6 +168,6 @@ class RobotMain(object):
 
 rotate = False
 correct_j6 = 0
-# arm = XArmAPI('192.168.1.220', baud_checkset=False)
+# arm = XArmAPI(os.getenv('XARM_IP', '192.168.1.220'), baud_checkset=False)
 # robot_main = RobotMain(arm)
 # result = robot_main.run()

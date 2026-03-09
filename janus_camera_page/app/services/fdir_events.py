@@ -132,11 +132,26 @@ def recent(n: int = 50) -> list[dict]:
     return [asdict(e) for e in reversed(items[-n:])]
 
 
+_PERSIST_MAX_BYTES = int(os.getenv("FDIR_LOG_MAX_BYTES", str(5 * 1024 * 1024)))  # 5 MB
+
+
 def _persist(event: FdirEvent) -> None:
-    """Append JSON line to disk (best-effort, no crash on failure)."""
+    """Append JSON line to disk (best-effort, no crash on failure).
+
+    Rotates fdir.jsonl → fdir.jsonl.1 when file exceeds
+    ``FDIR_LOG_MAX_BYTES`` (default 5 MB).  Only one backup is kept.
+    """
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(LOG_DIR / "fdir.jsonl", "a") as f:
+        log_path = LOG_DIR / "fdir.jsonl"
+        # Rotate before write to keep the file bounded.
+        try:
+            if log_path.exists() and log_path.stat().st_size >= _PERSIST_MAX_BYTES:
+                backup = LOG_DIR / "fdir.jsonl.1"
+                log_path.replace(backup)
+        except OSError:
+            pass  # rotation failure is non-critical
+        with open(log_path, "a") as f:
             f.write(event.to_json() + "\n")
     except Exception:
         pass  # non-critical; ring buffer is the primary store

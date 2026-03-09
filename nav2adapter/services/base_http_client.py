@@ -207,11 +207,13 @@ class BaseHttpClient(ABC):
         path: str,
         json_data: Optional[Dict[str, Any]] = None,
         timeout: Optional[aiohttp.ClientTimeout] = None,
-        op_timeout: Optional[float] = None
+        op_timeout: Optional[float] = None,
+        max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
         """PUT запрос."""
         return await self._make_request(
-            "PUT", path, json_data=json_data, timeout=timeout, op_timeout=op_timeout
+            "PUT", path, json_data=json_data, timeout=timeout, op_timeout=op_timeout,
+            max_retries=max_retries,
         )
 
     async def delete(

@@ -377,6 +377,9 @@ class XarmMoveWithToolParams(BaseApiModel):
             example=False,
         ),
     ] = False   # default only here
+    roll_offset_deg: Optional[float] = Field(None, description="Roll offset in degrees")
+    pitch_offset_deg: Optional[float] = Field(None, description="Pitch offset in degrees")
+    yaw_offset_deg: Optional[float] = Field(None, description="Yaw offset in degrees")
 
 from pydantic import BaseModel, Field, StrictFloat, StrictBool, validator
 

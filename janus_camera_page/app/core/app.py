@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -7,6 +9,14 @@ from app.core.events import register_event_handlers
 from app.core.settings import get_settings
 from app.routes import register_routes
 
+_settings = get_settings()
+# frame-ancestors requires exact origin-s, not CIDR notation.
+# Default: the two LAN nodes that may embed the player.
+_FRAME_ANCESTORS_LAN = os.environ.get(
+    "CSP_FRAME_ANCESTORS_LAN",
+    "http://192.168.1.10:8900 http://192.168.1.55:8900 https://blupassionsystem.de:8443",
+)
+
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add security headers to every response (P2.9)."""
@@ -14,15 +24,18 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         response: Response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        # X-Frame-Options removed: CSP frame-ancestors is the modern
+        # replacement and already allows cross-origin embedding from
+        # *.techvisioncloud.pl.  Having both creates a contradiction
+        # (SAMEORIGIN vs cross-origin frame-ancestors).
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "script-src 'self' https://cdn.jsdelivr.net; "
             "style-src 'self' 'unsafe-inline'; "
             "connect-src 'self' wss: ws: https://*.techvisioncloud.pl; "
             "img-src 'self' data: blob:; "
             "media-src 'self' blob:; "
-            "frame-ancestors 'self' https://*.techvisioncloud.pl http://192.168.1.0/24"
+            f"frame-ancestors 'self' https://*.techvisioncloud.pl {_FRAME_ANCESTORS_LAN}"
         )
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "camera=(), microphone=()"
@@ -37,10 +50,11 @@ def create_app() -> FastAPI:
 
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins,
+        allow_origins=[],
+        allow_origin_regex=settings.cors_origin_regex,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-API-Key", "X-Requested-With"],
     )
 
     application.mount("/static", StaticFiles(directory=settings.static_dir), name="static")

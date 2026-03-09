@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 # Fallback CDN for janus.js when templates/janus.js is not present (classic browser build from Meetecho repo)
-JANUS_JS_CDN_URL = "https://cdn.jsdelivr.net/gh/meetecho/janus-gateway@master/html/janus.js"
+JANUS_JS_CDN_URL = "https://cdn.jsdelivr.net/gh/meetecho/janus-gateway@v1.2.4/html/janus.js"
 
 from app.core.dependencies import require_api_key
 from app.core.settings import get_settings
@@ -121,6 +121,167 @@ def healthz() -> HealthResponse:
     )
 
 
+@router.get(
+    "/health/stream",
+    summary="End-to-end stream health (media-level)",
+    description="Checks whether video is actually being decoded by at least one "
+    "connected client. Combines Janus mount freshness, client telemetry "
+    "recency, and system mode into a single verdict.",
+)
+def health_stream() -> JSONResponse:
+    """Media-level health: not just 'process alive' but 'stream usable'."""
+    from app.services import system_mode as smode
+
+    settings = get_settings()
+    checks: Dict[str, Any] = {}
+
+    # 1. Janus mount: is RTP arriving?
+    janus_ok = False
+    video_age = None
+    try:
+        summary = janus.janus_summary(settings.janus_mount_id)
+        janus_ok = True
+        video_age = summary.get("video_age_ms")
+        rtp_fresh = (
+            video_age is not None
+            and isinstance(video_age, (int, float))
+            and video_age <= settings.watchdog_stale_ms
+        )
+        checks["rtp_ingest"] = {
+            "ok": rtp_fresh,
+            "video_age_ms": video_age,
+            "threshold_ms": settings.watchdog_stale_ms,
+        }
+    except Exception as exc:
+        checks["rtp_ingest"] = {"ok": False, "error": str(exc)}
+        rtp_fresh = False
+
+    # 2. Client telemetry: has any browser reported stats recently?
+    client_reporting = False
+    try:
+        from app.routes.metrics import (
+            client_last_report_age_seconds,
+            client_frames_decoded_total,
+            client_packet_loss_ratio,
+        )
+
+        report_age = client_last_report_age_seconds._value.get()
+        frames = client_frames_decoded_total._value.get()
+        loss = client_packet_loss_ratio._value.get()
+        # Consider client healthy if we got a report AND frames are being decoded
+        client_reporting = frames > 0
+        checks["client_telemetry"] = {
+            "ok": client_reporting,
+            "frames_decoded": frames,
+            "packet_loss_ratio": round(loss, 4) if loss else 0,
+            "note": "no client connected yet" if not client_reporting else None,
+        }
+    except Exception:
+        checks["client_telemetry"] = {"ok": False, "note": "metrics unavailable"}
+
+    # 3. System mode
+    mode = smode.current_mode()
+    mode_ok = mode not in (smode.SystemMode.SAFE,)
+    checks["system_mode"] = {"ok": mode_ok, "mode": mode.value}
+
+    # 4. Recovery ladder
+    try:
+        from app.services.recovery_ladder import get_ladder
+
+        ladder = get_ladder()
+        level = ladder.level if ladder else 0
+        checks["recovery_ladder"] = {"ok": level <= 2, "level": level}
+    except Exception:
+        checks["recovery_ladder"] = {"ok": True, "level": 0}
+
+    # Verdict: stream is E2E usable when RTP is fresh AND system isn't in SAFE mode.
+    # Client telemetry is informational (no clients ≠ broken stream).
+    stream_usable = rtp_fresh and mode_ok
+
+    return JSONResponse(
+        status_code=200 if stream_usable else 503,
+        content={
+            "stream_usable": stream_usable,
+            "checks": checks,
+        },
+    )
+
+
+# ── Full system status snapshot ──
+
+@router.get(
+    f"/api/v1/{CAM_TYPE}/status",
+    summary="Full system status snapshot",
+    description="Combines health, mode, recovery ladder, settings, and uptime "
+    "into a single diagnostic payload for operators and dashboards.",
+)
+@router.get(
+    "/status",
+    summary="Full system status snapshot",
+    description="Combines health, mode, recovery ladder, settings, and uptime "
+    "into a single diagnostic payload for operators and dashboards.",
+)
+def system_status() -> JSONResponse:
+    import time as _time
+
+    from app.services import system_mode as smode
+    from app.services.recovery_ladder import get_ladder
+
+    settings = get_settings()
+
+    # Health
+    health_data: Dict[str, Any] = {}
+    try:
+        h = healthz()
+        health_data = {
+            "ok": h.ok,
+            "mode": h.mode,
+            "janus_reachable": h.janus_reachable,
+            "stream_active": h.stream_active,
+        }
+    except Exception as exc:
+        health_data = {"ok": False, "error": str(exc)}
+
+    # Recovery ladder
+    ladder_data: Dict[str, Any] = {}
+    try:
+        ladder = get_ladder()
+        ladder_data = ladder.status() if ladder else {"current_level": 0}
+    except Exception:
+        ladder_data = {"current_level": 0}
+
+    # System mode
+    mode_data = smode.mode_info()
+
+    # Service brief
+    svc: Dict[str, Any] = {}
+    try:
+        svc = systemd_brief(settings.service_name)
+    except Exception:
+        svc = {"active": False, "since": None, "restarts": 0}
+
+    # Settings snapshot (non-secret)
+    cfg = {
+        "camera_type": settings.camera_type,
+        "janus_mount_id": settings.janus_mount_id,
+        "watchdog_enabled": settings.watchdog_enabled,
+        "snapshot_watchdog_enabled": settings.snapshot_watchdog_enabled,
+        "watchdog_interval_sec": settings.watchdog_interval_sec,
+        "watchdog_stale_ms": settings.watchdog_stale_ms,
+        "ice_policy": settings.ice_policy,
+    }
+
+    return JSONResponse(content={
+        "timestamp": _time.time(),
+        "camera_type": settings.camera_type,
+        "health": health_data,
+        "mode": mode_data,
+        "recovery_ladder": ladder_data,
+        "service": svc,
+        "settings": cfg,
+    })
+
+
 # ── Relay proxy: joystick e2e latency measurement ──
 
 @router.get(f"/api/v1/{CAM_TYPE}/relay/time", include_in_schema=False)
@@ -187,6 +348,13 @@ def _depth_features_js_response() -> FileResponse:
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="depth_features.js not found")
     return FileResponse(str(html_path), media_type="application/javascript")
+
+def _gripper_reticle_js_response() -> FileResponse:
+    settings = get_settings()
+    js_path = Path(settings.templates_dir) / "gripper_reticle.js"
+    if not js_path.exists():
+        raise HTTPException(status_code=404, detail="gripper_reticle.js not found")
+    return FileResponse(str(js_path), media_type="application/javascript")
 
 def _gamepad_js_response() -> FileResponse:
     """
@@ -270,6 +438,11 @@ def streaming_js() -> FileResponse:
 @router.get("/depth_features.js", include_in_schema=False)
 def depth_features_js() -> FileResponse:
     return _depth_features_js_response()
+
+@router.get(f"/api/v1/{CAM_TYPE}/gripper_reticle.js", include_in_schema=False)
+@router.get("/gripper_reticle.js", include_in_schema=False)
+def gripper_reticle_js() -> FileResponse:
+    return _gripper_reticle_js_response()
 
 
 @router.get(f"/api/v1/{CAM_TYPE}/gamepaddriver.js", include_in_schema=False)
@@ -364,7 +537,7 @@ if CAM_TYPE == "depth_camera":
         summary="Get depth at specified coordinates",
         description=depth_description,
     )
-    async def get_depth(
+    def get_depth(
         x: Optional[float] = None,
         y: Optional[float] = None,
         message: Optional[str] = None,
@@ -401,7 +574,7 @@ if CAM_TYPE == "depth_camera":
 
         try:
             url = f"http://localhost:8000/depth?x={x}&y={y}"
-            response = requests.get(url)
+            response = requests.get(url, timeout=5)
             if response.status_code != 200:
                 raise HTTPException(status_code=response.status_code, detail=response.text)
             return DepthResponse(**response.json())
@@ -425,7 +598,7 @@ if CAM_TYPE == "depth_camera":
         summary="Get real D435 colour frame (RGB24)",
         description=color_frame_description,
     )
-    async def get_depth_color_frame(format: str = "json"):
+    def get_depth_color_frame(format: str = "json"):
         import requests as _req
         try:
             url = f"http://localhost:8000/color_frame?format={format}"
@@ -463,7 +636,7 @@ if CAM_TYPE == "depth_camera":
         summary="Get full depth frame",
         description=depth_frame_description,
     )
-    async def get_depth_frame(format: str = "json"):
+    def get_depth_frame(format: str = "json"):
         import requests as _req
         try:
             url = f"http://localhost:8000/depth_map?format={format}"
@@ -495,7 +668,7 @@ if CAM_TYPE == "depth_camera":
         "/depth/frame_color_overlay",
         summary="Get aligned RGBD frame",
     )
-    async def get_depth_frame_color_overlay(format: str = "json"):
+    def get_depth_frame_color_overlay(format: str = "json"):
         """Return aligned colour + depth frame.
 
         Fetches both /color_frame and /depth_map from realsense_mux and
@@ -547,7 +720,7 @@ depth_map_description = (
     description=depth_map_description,
 )
 @router.get("/depth_map/load", include_in_schema=False)
-async def depth_map_load(format: str = "json"):
+def depth_map_load(format: str = "json"):
     """Proxy depth-map request to the appropriate backend."""
     import requests as _req
 

@@ -403,28 +403,21 @@ async function setOverlay(colorIndex = 0, stereoIndex = 0, options = {}) {
   overlayConnectAttempt = (options.attempt || 1);
   const mySeq = (++overlayOfferSeq);
 
-  // Build ICE servers with UDP and TCP TURN; enforce relay-only for internet
-  const turnHost = '82.165.177.194';
-  const turnUser = 'webrtc';
-  const turnPass = 'G456AH37gbc';
+  // Fetch ephemeral ICE credentials from the camera service instead of hardcoding.
+  // Try the depth proxy route first, then fall back to the color camera endpoint.
   let iceServers;
   let iceTransportPolicy = 'relay';
-  // TURN only (no public STUN) to avoid leaking unroutable candidates
-  if (overlayConnectAttempt === 1) {
-    iceServers = [
-      { urls: `turn:${turnHost}:3478?transport=udp`, username: turnUser, credential: turnPass },
-      { urls: `turns:${turnHost}:5349?transport=tcp`, username: turnUser, credential: turnPass },
-    ];
-  } else if (overlayConnectAttempt === 2) {
-    // Relay-only, UDP TURN only
-    iceServers = [
-      { urls: `turn:${turnHost}:3478?transport=udp`, username: turnUser, credential: turnPass },
-    ];
-  } else {
-    // Relay-only, TCP TURN only
-    iceServers = [
-      { urls: `turns:${turnHost}:5349?transport=tcp`, username: turnUser, credential: turnPass },
-    ];
+  try {
+    let cfgResp = await fetch('/depth_camera/client-config');
+    if (!cfgResp.ok) cfgResp = await fetch('/client-config');
+    if (!cfgResp.ok) throw new Error(`client-config ${cfgResp.status}`);
+    const cfgData = await cfgResp.json();
+    iceServers = cfgData.iceServers || cfgData.ice_servers || [];
+    if (cfgData.iceTransportPolicy) iceTransportPolicy = cfgData.iceTransportPolicy;
+  } catch (e) {
+    console.warn('[OVERLAY] Failed to fetch ICE config, using STUN-only fallback', e);
+    iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+    iceTransportPolicy = 'all';
   }
 
   pc = new RTCPeerConnection({

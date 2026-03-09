@@ -8,7 +8,7 @@ from drivers.dryve_d1.config.defaults import default_driver_config
 
 async def main() -> None:
     # Configure connection via env vars or edit below.
-    host = os.getenv("DRYVE_HOST", "192.168.1.10")
+    host = os.getenv("DRYVE_HOST", "192.168.1.230")
     unit_id = int(os.getenv("DRYVE_UNIT_ID", "1"))
 
     cfg: DryveD1Config = default_driver_config(host=host, unit_id=unit_id)

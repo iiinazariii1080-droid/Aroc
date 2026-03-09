@@ -1,0 +1,229 @@
+# ============================================================================
+# Root Docker Compose — full robot stack orchestration
+#
+# Usage:
+#   cp .env.example .env          # fill in real values
+#   docker compose up -d          # start all services
+#   docker compose up -d --build  # rebuild & start
+#   docker compose logs -f        # follow logs
+#
+# For production hardening, layer the prod override:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# ============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-healthcheck-defaults: &hc-defaults
+  interval: 30s
+  timeout: 5s
+  retries: 3
+  start_period: 15s
+
+services:
+  # ---------- API Gateway (reverse proxy / aggregator) ----------
+  api-gateway:
+    build:
+      context: ./api_gateway_service
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    env_file: .env
+    environment:
+      PORT: ${API_GATEWAY_PORT:-8201}
+      WEB_CONCURRENCY: 1
+      READINESS_CHECK_SERVICES: 0
+      READINESS_CHECK_AUTH: 0
+      SERVICE_SYMOVO_CONCURRENCY: 5
+      HTTP_MAX_CONNECTIONS: 50
+      HTTP_MAX_KEEPALIVE_CONNECTIONS: 40
+      HTTP_KEEPALIVE_EXPIRY: 120
+      CAM_MAX_CONNECTIONS: 30
+      CAM_MAX_KEEPALIVE: 25
+      SERVICE_MAP_JSON: '{"depth_map":{"url":"http://${HOST_LAN_IP:-192.168.1.10}:${COLOR_CAMERA_PORT:-8900}","prefix":"/api/v1/depth_map"}}'
+    ports:
+      - "${API_GATEWAY_PORT:-8201}:${API_GATEWAY_PORT:-8201}"
+    restart: unless-stopped
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${API_GATEWAY_PORT:-8201}/readyz"]
+    logging: *default-logging
+    networks:
+      - robot-net
+
+  # ---------- Igus Lift Service ----------
+  # NOTE: network_mode: host required for Modbus/TCP to physical motor on LAN
+  igus-service:
+    build:
+      context: ./igus_service
+      dockerfile: Dockerfile
+    container_name: igus-service
+    env_file: .env
+    network_mode: host
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_HOST: "0.0.0.0"
+      SERVICE_PORT: ${IGUS_PORT:-8101}
+      IGUS_MOTOR_IP: ${IGUS_MOTOR_IP:-192.168.1.230}
+      IGUS_MOTOR_PORT: ${IGUS_MOTOR_PORT:-502}
+      DRYVE_HOST: ${IGUS_MOTOR_IP:-192.168.1.230}
+      DRYVE_PORT: ${IGUS_MOTOR_PORT:-502}
+      DRYVE_UNIT_ID: ${DRYVE_UNIT_ID:-0}
+      DRYVE_ALLOW_TID_MISMATCH: ${DRYVE_ALLOW_TID_MISMATCH:-0}
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:${IGUS_PORT:-8101}/health"]
+      start_period: 15s
+    restart: unless-stopped
+    logging: *default-logging
+
+  # ---------- xArm Service ----------
+  xarm-service:
+    build:
+      context: .
+      dockerfile: xarm_service/Dockerfile
+    container_name: xarm-service
+    env_file: .env
+    environment:
+      SERVICE_HOST: "0.0.0.0"
+      SERVICE_PORT: ${XARM_PORT:-8102}
+      XARM_IP: ${XARM_HARDWARE_IP:-192.168.1.220}
+      DEPTH_CAMERA_IP: ${DEPTH_CAMERA_IP:-192.168.1.55}
+      WS_CHECK_DISABLED: "1"
+    ports:
+      - "${XARM_PORT:-8102}:${XARM_PORT:-8102}"
+    restart: unless-stopped
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "curl", "-fsS", "http://localhost:${XARM_PORT:-8102}/healthz"]
+    logging: *default-logging
+    networks:
+      - robot-net
+
+  # ---------- Robot Service (main orchestrator) ----------
+  robot-service:
+    build:
+      context: .
+      dockerfile: robot_service/Dockerfile
+    container_name: robot-service
+    env_file: .env
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      UVICORN_WORKERS: "1"
+      SERVER_IP: ${HOST_LAN_IP:-192.168.1.10}
+      IGUS_CONTAINER_IP: ${HOST_LAN_IP:-192.168.1.10}
+      IGUS_CONTAINER_PORT: ${IGUS_PORT:-8101}
+      XARM_CONTAINER_IP: ${HOST_LAN_IP:-192.168.1.10}
+      XARM_CONTAINER_PORT: ${XARM_PORT:-8102}
+      SYMOVO_CONTAINER_IP: ${HOST_LAN_IP:-192.168.1.10}
+      SYMOVO_CONTAINER_PORT: ${SYMOVO_PORT:-7905}
+      SYMOVO_NAV2ADAPTER_HOST: ${HOST_LAN_IP:-192.168.1.10}
+      SYMOVO_ROBOT_ID: ${ROBOT_ID:-fahrdummy-01}
+      DEPTH_CAMERA_CONTAINER_IP: ${DEPTH_CAMERA_IP:-192.168.1.55}
+      DEPTH_CAMERA_CONTAINER_PORT: "8900"
+      XARM_WS_URL: "ws://${XARM_HARDWARE_IP:-192.168.1.220}:${XARM_WS_PORT:-18333}/ws?channel=prod&lang=en&v=1&id=robot"
+    ports:
+      - "${ROBOT_PORT:-8110}:${ROBOT_PORT:-8110}"
+    restart: unless-stopped
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://127.0.0.1:${ROBOT_PORT:-8110}/healthz"]
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    networks:
+      - robot-net
+
+  # ---------- Nav2 Adapter (Symovo AGV) ----------
+  symovo-service:
+    build:
+      context: ./nav2adapter
+      dockerfile: Dockerfile
+    container_name: symovo-service
+    env_file: .env
+    environment:
+      ROBOT_POSITIONS_DB_PATH: /app/data/database.db
+      PERSISTENCE_PATH: /app/data/state.json
+    volumes:
+      - nav2adapter-data:/app/data
+    ports:
+      - "${SYMOVO_PORT:-7905}:${SYMOVO_PORT:-7905}"
+      - "${TELEOP_PORT:-7906}:${TELEOP_PORT:-7906}"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${SYMOVO_PORT:-7905}/livez || exit 1"]
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+    networks:
+      - robot-net
+
+  # ---------- MQTT Command Service (bridge to AE.HUB) ----------
+  mqtt-service:
+    build:
+      context: ./mqtt_command_service
+      dockerfile: Dockerfile
+    container_name: mqtt-service
+    env_file: .env
+    environment:
+      CONFIG_DB_PATH: /app/data/config.db
+      API_ENABLED: ${API_ENABLED:-true}
+      API_PORT: ${MQTT_API_PORT:-7900}
+      API_HOST: "0.0.0.0"
+      CERT_STORAGE_DIR: /app/certs
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      JSON_LOGS: ${JSON_LOGS:-false}
+    volumes:
+      - mqtt-data:/app/data
+      - mqtt-certs:/app/certs
+    ports:
+      - "${MQTT_API_PORT:-7900}:${MQTT_API_PORT:-7900}"
+    restart: unless-stopped
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "python3", "healthcheck.py"]
+      timeout: 10s
+      start_period: 40s
+    logging: *default-logging
+    networks:
+      - robot-net
+
+  # ---------- Frontend ----------
+  frontend:
+    build:
+      context: ./frontend_service
+      dockerfile: Dockerfile
+    container_name: frontend
+    env_file: .env
+    environment:
+      PYTHONPATH: /app
+      HOST: "0.0.0.0"
+      PORT: ${FRONTEND_PORT:-8401}
+      ALLOWED_ORIGINS: "*"
+      API_GATEWAY_URL: "http://${HOST_LAN_IP:-192.168.1.10}:${API_GATEWAY_PORT:-8201}"
+    ports:
+      - "${FRONTEND_PORT:-8401}:${FRONTEND_PORT:-8401}"
+    restart: unless-stopped
+    logging: *default-logging
+    networks:
+      - robot-net
+
+# ── Volumes ─────────────────────────────────────────────────────────────────
+volumes:
+  nav2adapter-data:
+  mqtt-data:
+  mqtt-certs:
+
+# ── Network ─────────────────────────────────────────────────────────────────
+networks:
+  robot-net:
+    driver: bridge

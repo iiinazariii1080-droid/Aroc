@@ -583,6 +583,116 @@ async def autotake(velocity: int) -> bool:
             except Exception as depth_exc:
                 logger.warning("Stage 2: re-measurement failed (%s), using old estimate %.1f", depth_exc, distance)
 
+            # ── GRASP ANALYSIS (between depth re-measure and move) ────────
+            grasp_cfg = config.get("graspAnalysis", {}) if isinstance(config, dict) else {}
+            grasp_enabled = bool(grasp_cfg.get("enabled", False))
+            roll_corr = 0.0
+            pitch_corr = 0.0
+            yaw_corr = 0.0
+            xy_corr_x = 0.0
+            xy_corr_y = 0.0
+            grasp_analysis_ok = False
+
+            if grasp_enabled:
+                try:
+                    # Capture frame and analyse on the same snapshot
+                    cap = await manipulator.capture_depth_frame()
+                    frame_id = cap.get("frame_id")
+                    # Forward algorithm params from trajectory config
+                    algo_kwargs = {}
+                    if "yawSearchStepDeg" in grasp_cfg:
+                        algo_kwargs["yaw_search_step_deg"] = float(grasp_cfg["yawSearchStepDeg"])
+                    if "collisionEnvelopeMm" in grasp_cfg:
+                        algo_kwargs["collision_envelope_mm"] = float(grasp_cfg["collisionEnvelopeMm"])
+                    if "sealPerimeterPoints" in grasp_cfg:
+                        algo_kwargs["seal_perimeter_points"] = int(grasp_cfg["sealPerimeterPoints"])
+                    if "cupGridStepMm" in grasp_cfg:
+                        algo_kwargs["cup_grid_step_mm"] = float(grasp_cfg["cupGridStepMm"])
+                    ga = await manipulator.analyze_grasp(
+                        frame_id=frame_id, x_norm=50.0, y_norm=50.0, **algo_kwargs,
+                    )
+
+                    ga_status = ga.get("status", "FAILED") if ga else "FAILED"
+                    if ga_status in ("OK", "DEGRADED"):
+                        roll_corr = float(ga.get("roll_correction_deg", 0.0))
+                        pitch_corr = float(ga.get("pitch_correction_deg", 0.0))
+                        yaw_corr = float(ga.get("yaw_correction_deg", 0.0))
+                        xy_mm = ga.get("xy_correction_mm", [0.0, 0.0])
+                        xy_corr_x = float(xy_mm[0]) if len(xy_mm) > 0 else 0.0
+                        xy_corr_y = float(xy_mm[1]) if len(xy_mm) > 1 else 0.0
+                        confidence = float(ga.get("confidence", 0.0))
+                        approach_clear = bool(ga.get("approach_clear", True))
+
+                        # Per-trajectory RPY clamping
+                        max_roll = float(grasp_cfg.get("maxRollDeg", 8.0))
+                        max_pitch = float(grasp_cfg.get("maxPitchDeg", 8.0))
+                        max_yaw = float(grasp_cfg.get("maxYawDeg", 30.0))
+                        roll_corr = max(-max_roll, min(max_roll, roll_corr))
+                        pitch_corr = max(-max_pitch, min(max_pitch, pitch_corr))
+                        yaw_corr = max(-max_yaw, min(max_yaw, yaw_corr))
+
+                        # Seal score threshold enforcement
+                        dcr = ga.get("dual_cup_result") or {}
+                        combined_seal = float(dcr.get("combined_seal", 0.0))
+                        activation_mode = dcr.get("activation_mode", "BOTH")
+                        min_seal = float(grasp_cfg.get("minSealScore", 0.70))
+                        min_single_seal = float(grasp_cfg.get("minSingleCupSeal", 0.50))
+                        allow_single = bool(grasp_cfg.get("allowSingleCupPick", True))
+
+                        seal_ok = True
+                        if combined_seal < min_seal:
+                            logger.warning(
+                                "Grasp analysis: combined_seal %.2f < threshold %.2f — rejecting corrections",
+                                combined_seal, min_seal,
+                            )
+                            seal_ok = False
+                        if activation_mode in ("CUP_A_ONLY", "CUP_B_ONLY"):
+                            if not allow_single:
+                                logger.warning(
+                                    "Grasp analysis: single-cup mode %s but allowSingleCupPick=False — rejecting",
+                                    activation_mode,
+                                )
+                                seal_ok = False
+                            else:
+                                # Check the active cup meets single-cup threshold
+                                cup_key = "cup_a" if activation_mode == "CUP_A_ONLY" else "cup_b"
+                                active_seal = float(dcr.get(cup_key, {}).get("seal_score", 0.0))
+                                if active_seal < min_single_seal:
+                                    logger.warning(
+                                        "Grasp analysis: active cup seal %.2f < single-cup threshold %.2f — rejecting",
+                                        active_seal, min_single_seal,
+                                    )
+                                    seal_ok = False
+
+                        if seal_ok:
+                            grasp_analysis_ok = True
+                        else:
+                            # Zero out corrections — fall back to base offsets
+                            roll_corr = pitch_corr = yaw_corr = 0.0
+                            xy_corr_x = xy_corr_y = 0.0
+
+                        logger.info(
+                            "Grasp analysis: status=%s conf=%.3f seal=%.2f mode=%s roll=%.1f pitch=%.1f yaw=%.1f xy=(%.1f,%.1f) clear=%s accepted=%s",
+                            ga_status, confidence, combined_seal, activation_mode,
+                            roll_corr, pitch_corr, yaw_corr, xy_corr_x, xy_corr_y, approach_clear, grasp_analysis_ok,
+                        )
+                        if ga_status == "DEGRADED":
+                            logger.warning("Grasp analysis degraded: %s", ga.get("reason_codes", []))
+
+                        # Collision abort check
+                        abort_on_collision = bool(grasp_cfg.get("abortOnCollision", False))
+                        if not approach_clear and abort_on_collision:
+                            logger.warning("Grasp analysis: corridor BLOCKED and abortOnCollision=True — aborting")
+                            return False
+                    else:
+                        logger.warning("Grasp analysis FAILED: %s — using base offsets only", ga.get("reason_codes", []))
+                except Exception as ga_exc:
+                    logger.warning("Grasp analysis unavailable: %s — falling back to base offsets", ga_exc)
+
+            # Apply grasp analysis corrections additively to base offsets
+            effective_offset_x = offset_x + xy_corr_x
+            effective_offset_y = offset_y + xy_corr_y
+
             # Now calculate remaining travel = camera distance + offset_z
             remaining_travel = distance + offset_z
             logger.info("Stage 2: cam_distance=%.1f + offset_z=%.1f → remaining_travel=%.1f",
@@ -605,28 +715,48 @@ async def autotake(velocity: int) -> bool:
                             )
                         except Exception as e:
                             logger.warning("Stage 2 early gripper activation failed: %s", e)
-                logger.info(
-                    "Stage 2 (mid): moving x=%.1f y=%.1f z=%.1f (remaining_travel %.1f → %.1f)",
-                    offset_x, offset_y, stage2_z, remaining_travel, STAGE3_THRESHOLD_MM,
+
+                # Build move params with optional RPY corrections from grasp analysis
+                move_kwargs = dict(
+                    x_offset_mm=effective_offset_x,
+                    y_offset_mm=effective_offset_y,
+                    z_offset_mm=stage2_z,
+                    velocity_percent=velocity,
+                    reset_faults=False,
                 )
-                await manipulator.change_tool_position(XarmMoveWithToolParams(
-                    x_offset_mm=offset_x, y_offset_mm=offset_y, z_offset_mm=stage2_z,
-                    velocity_percent=velocity, reset_faults=False,
-                ))
-                total_x += offset_x
-                total_y += offset_y
+                if grasp_analysis_ok:
+                    move_kwargs["roll_offset_deg"] = roll_corr
+                    move_kwargs["pitch_offset_deg"] = pitch_corr
+                    move_kwargs["yaw_offset_deg"] = yaw_corr
+
+                logger.info(
+                    "Stage 2 (mid): moving x=%.1f y=%.1f z=%.1f roll=%.1f pitch=%.1f yaw=%.1f (remaining_travel %.1f → %.1f)",
+                    effective_offset_x, effective_offset_y, stage2_z, roll_corr, pitch_corr, yaw_corr,
+                    remaining_travel, STAGE3_THRESHOLD_MM,
+                )
+                await manipulator.change_tool_position(XarmMoveWithToolParams(**move_kwargs))
+                total_x += effective_offset_x
+                total_y += effective_offset_y
                 total_z += stage2_z
                 remaining_travel = STAGE3_THRESHOLD_MM
             else:
                 # Already close enough — just apply X/Y offsets
                 logger.info("Stage 2: already within %.1f mm — applying X/Y offsets only", STAGE3_THRESHOLD_MM)
-                if offset_x != 0 or offset_y != 0:
-                    await manipulator.change_tool_position(XarmMoveWithToolParams(
-                        x_offset_mm=offset_x, y_offset_mm=offset_y, z_offset_mm=0,
-                        velocity_percent=velocity, reset_faults=False,
-                    ))
-                    total_x += offset_x
-                    total_y += offset_y
+                if effective_offset_x != 0 or effective_offset_y != 0:
+                    move_kwargs = dict(
+                        x_offset_mm=effective_offset_x,
+                        y_offset_mm=effective_offset_y,
+                        z_offset_mm=0,
+                        velocity_percent=velocity,
+                        reset_faults=False,
+                    )
+                    if grasp_analysis_ok:
+                        move_kwargs["roll_offset_deg"] = roll_corr
+                        move_kwargs["pitch_offset_deg"] = pitch_corr
+                        move_kwargs["yaw_offset_deg"] = yaw_corr
+                    await manipulator.change_tool_position(XarmMoveWithToolParams(**move_kwargs))
+                    total_x += effective_offset_x
+                    total_y += effective_offset_y
 
             logger.info("Stage 2 done: remaining_travel=%.1f mm", remaining_travel)
 

@@ -115,8 +115,8 @@ async def test_no_release_before_timeout():
 
 
 @pytest.mark.asyncio
-async def test_release_on_sensor_error():
-    """When vacuum sensor returns -99 (error/degraded), treat as no-part → release."""
+async def test_no_release_on_sensor_error():
+    """When vacuum sensor returns -99 (error/degraded), extend timer — never drop product."""
     store = _make_store(gripper_active=True, activated_at=time.time() - 200)
     vacuum_reader = MagicMock(return_value=-99)  # sensor error
     release_cb = AsyncMock()
@@ -132,7 +132,10 @@ async def test_release_on_sensor_error():
     await asyncio.sleep(0.15)
     await wd.stop()
 
-    release_cb.assert_awaited_once()
+    release_cb.assert_not_awaited()
+    # Timer was refreshed: activated_at should now be recent
+    assert store._robot.gripper_activated_at is not None
+    assert time.time() - store._robot.gripper_activated_at < 2.0
 
 
 @pytest.mark.asyncio
@@ -185,8 +188,8 @@ async def test_reset_allows_re_fire():
 
 
 @pytest.mark.asyncio
-async def test_vacuum_reader_exception_triggers_release():
-    """If vacuum_reader raises, treat as sensor failure → release."""
+async def test_vacuum_reader_exception_extends_timer():
+    """If vacuum_reader raises, treat as sensor failure → extend timer (fail-safe)."""
     store = _make_store(gripper_active=True, activated_at=time.time() - 200)
     vacuum_reader = MagicMock(side_effect=RuntimeError("modbus timeout"))
     release_cb = AsyncMock()
@@ -202,7 +205,32 @@ async def test_vacuum_reader_exception_triggers_release():
     await asyncio.sleep(0.15)
     await wd.stop()
 
-    release_cb.assert_awaited_once()
+    release_cb.assert_not_awaited()
+    # Timer was refreshed
+    assert store._robot.gripper_activated_at is not None
+    assert time.time() - store._robot.gripper_activated_at < 2.0
+
+
+@pytest.mark.asyncio
+async def test_release_only_on_confirmed_no_part():
+    """Watchdog releases only when sensor positively confirms no part (vacuum=0 or -1)."""
+    for vacuum_val in (0, -1):
+        store = _make_store(gripper_active=True, activated_at=time.time() - 200)
+        vacuum_reader = MagicMock(return_value=vacuum_val)
+        release_cb = AsyncMock()
+
+        wd = GripperWatchdog(
+            state_store_getter=lambda: store,
+            vacuum_reader=vacuum_reader,
+            release_callback=release_cb,
+            timeout_s=1.0,
+            rate_hz=50.0,
+        )
+        await wd.start()
+        await asyncio.sleep(0.15)
+        await wd.stop()
+
+        release_cb.assert_awaited_once()
 
 
 # ── StateStore integration ───────────────────────────────────────────────────

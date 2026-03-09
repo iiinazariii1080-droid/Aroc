@@ -2,6 +2,7 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from shared_config.network import get_service_url
 import aiohttp
 import asyncio
 import argparse
@@ -29,7 +30,7 @@ class XarmManipulatorClient:
                 from core.connection_config import web_server_ip, web_server_port  # type: ignore
                 base_url = f"http://{web_server_ip}:{web_server_port}"
             except Exception:
-                base_url = "http://192.168.1.10:8102"
+                base_url = get_service_url("xarm")
 
         self.base_url = base_url.rstrip("/")
         self._session: Optional[aiohttp.ClientSession] = None
@@ -292,8 +293,40 @@ class XarmManipulatorClient:
     async def status(self) -> Dict[str, Any]:
         return await self._get("/status")
 
+    # ── Grasp analysis endpoints ───────────────────────────────────────────
+
+    @safe_call
+    async def capture_depth_frame(self) -> Dict[str, Any]:
+        """Capture and cache a depth frame on xarm_service. Returns {frame_id, timestamp_ms, depth_at_center_mm}."""
+        return await self._post("/depth/capture_frame")
+
+    @safe_call
+    async def analyze_grasp(
+        self,
+        frame_id: Optional[str] = None,
+        x_norm: float = 50.0,
+        y_norm: float = 50.0,
+        yaw_search_step_deg: Optional[float] = None,
+        collision_envelope_mm: Optional[float] = None,
+        seal_perimeter_points: Optional[int] = None,
+        cup_grid_step_mm: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Analyse a depth frame for optimal dual-cup grasp placement."""
+        payload: Dict[str, Any] = {"target_x_norm": x_norm, "target_y_norm": y_norm}
+        if frame_id is not None:
+            payload["frame_id"] = frame_id
+        if yaw_search_step_deg is not None:
+            payload["yaw_search_step_deg"] = yaw_search_step_deg
+        if collision_envelope_mm is not None:
+            payload["collision_envelope_mm"] = collision_envelope_mm
+        if seal_perimeter_points is not None:
+            payload["seal_perimeter_points"] = seal_perimeter_points
+        if cup_grid_step_mm is not None:
+            payload["cup_grid_step_mm"] = cup_grid_step_mm
+        return await self._post("/depth/analyze_grasp", json=payload)
+
 async def main():
-    url = "http://192.168.1.10:8102"
+    url = get_service_url("xarm")
 
     status = None
     with XarmManipulatorClient(base_url=url) as client:

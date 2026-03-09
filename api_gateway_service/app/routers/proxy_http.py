@@ -183,7 +183,10 @@ async def _proxy_to_service(request: Request, service: str, upstream_path: str):
             content={"detail": f"Upstream error: {service}", "url": url},
         )
 
-    cb.record_success()
+    if resp.status_code >= 500:
+        cb.record_failure()
+    else:
+        cb.record_success()
     record_proxy_result(service, resp.status_code)
 
     # Access log

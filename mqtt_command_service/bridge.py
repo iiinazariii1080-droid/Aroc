@@ -63,6 +63,11 @@ class MqttCommandBridge(CommandHandlerMixin, TaskManagerMixin):
         self._shutdown = threading.Event()
         self._tasks_lock = threading.Lock()
         self._active_tasks: dict[str, TaskInfo] = {}
+
+        # Safety state from nav2adapter via MQTT retained topic
+        self._safety_state: dict[str, Any] | None = None
+        self._safety_state_ts: float = 0.0
+        _SAFETY_HEARTBEAT_TIMEOUT_S = 60.0  # fail-closed if no heartbeat
         self._task_watcher_sem = threading.Semaphore(MAX_TASK_WATCHERS)
         self._auth_manager = HubAuthManager(config.hub_auth) if config.hub_auth else None
         self._last_disconnect_at: float | None = None
@@ -139,6 +144,10 @@ class MqttCommandBridge(CommandHandlerMixin, TaskManagerMixin):
             self.config.config_topic_pattern,
             self._handle_mqtt_message
         )
+
+        # Subscribe to safety state topic (retained — gets last known state on connect)
+        safety_topic = f"aroc/robot/{self.config.robot_id}/status/safety"
+        self.mqtt_client.subscribe(safety_topic, self._handle_safety_message)
 
         # Start MQTT client
         self.mqtt_client.start()
@@ -219,6 +228,39 @@ class MqttCommandBridge(CommandHandlerMixin, TaskManagerMixin):
             return
         logger.info("Received signal %s, shutting down...", signum)
         self.stop()
+
+    # ---- Safety state handling --------------------------------------
+    def _handle_safety_message(self, message: MQTTMessage) -> None:
+        """Cache safety state from nav2adapter retained topic."""
+        try:
+            payload = json.loads(message.payload.decode("utf-8", errors="replace"))
+            if isinstance(payload, dict):
+                self._safety_state = payload
+                self._safety_state_ts = time.time()
+                if payload.get("safety_lockout"):
+                    logger.warning(
+                        "[bridge] Safety lockout active: reason=%s",
+                        payload.get("reason"),
+                    )
+                else:
+                    logger.info("[bridge] Safety state: OK")
+        except Exception as e:
+            logger.warning("[bridge] Failed to parse safety state: %s", e)
+
+    def _is_safety_locked(self) -> bool:
+        """Check if robot is in safety lockout (fail-closed)."""
+        if self._safety_state is None:
+            # No safety data yet — allow commands (grace period on startup)
+            return False
+        # Fail-closed: if heartbeat is stale (>60s), assume lockout
+        age = time.time() - self._safety_state_ts
+        if age > 60.0:
+            logger.warning(
+                "[bridge] Safety heartbeat stale (%.0fs ago), assuming lockout",
+                age,
+            )
+            return True
+        return bool(self._safety_state.get("safety_lockout", False))
 
     # ---- MQTT message handling -------------------------------------
     def _handle_mqtt_message(self, message: MQTTMessage) -> None:
@@ -409,6 +451,15 @@ class MqttCommandBridge(CommandHandlerMixin, TaskManagerMixin):
                 # Store validated timestamp for forwarding in HTTP request
                 if timestamp:
                     data_dict["_validated_timestamp"] = timestamp
+
+            # Safety gate: reject navigation commands when robot is in safety lockout
+            if command_key in ("navigateto", "cancel") and self._is_safety_locked():
+                reason = (self._safety_state or {}).get("reason", "unknown")
+                msg = f"Command rejected: robot is in safety lockout ({reason}). Release E-Stop and recover."
+                logger.warning("[bridge] %s (command=%s, id=%s)", msg, command_name, command_id)
+                self._publish_command_error(command_name, command_id, msg)
+                self._finish_command(command_id)
+                return
 
             if command_key == "navigateto":
                 self._handle_navigate_command(command_id, data_dict)

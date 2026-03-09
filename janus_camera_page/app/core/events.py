@@ -1,7 +1,45 @@
+import asyncio
+import logging
+import os
+import socket
+
 from fastapi import FastAPI
 
+from app.core.settings import get_settings
 from app.services import janus_proxy, relay_proxy, watchdogs
 from app.services.thermal import start_thermal_monitor
+
+_is_color = get_settings().camera_type == "color_camera"
+_log = logging.getLogger("events")
+
+# ── systemd sd_notify via raw socket (no C dependency) ──────────
+_NOTIFY_SOCKET = os.environ.get("NOTIFY_SOCKET")
+
+
+def _sd_notify(state: str) -> None:
+    """Send a sd_notify datagram if running under systemd."""
+    if not _NOTIFY_SOCKET:
+        return
+    addr = _NOTIFY_SOCKET
+    if addr.startswith("@"):
+        addr = "\0" + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.connect(addr)
+            sock.sendall(state.encode())
+    except OSError:
+        _log.debug("sd_notify(%s) failed", state)
+
+
+async def _watchdog_loop() -> None:
+    """Periodically send WATCHDOG=1 keepalive to systemd."""
+    usec = os.environ.get("WATCHDOG_USEC")
+    if not usec or not _NOTIFY_SOCKET:
+        return
+    interval = int(usec) / 1_000_000 / 2  # half the timeout
+    while True:
+        _sd_notify("WATCHDOG=1")
+        await asyncio.sleep(interval)
 
 
 def register_event_handlers(app: FastAPI) -> None:
@@ -12,9 +50,17 @@ def register_event_handlers(app: FastAPI) -> None:
         start_thermal_monitor()
         await janus_proxy.start_client()
         await relay_proxy.start_client()
+        if _is_color:
+            from app.services import depth_camera_proxy
+            await depth_camera_proxy.start_client()
+        _sd_notify("READY=1")
+        asyncio.create_task(_watchdog_loop())
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         await janus_proxy.stop_client()
         await relay_proxy.stop_client()
+        if _is_color:
+            from app.services import depth_camera_proxy
+            await depth_camera_proxy.stop_client()
 

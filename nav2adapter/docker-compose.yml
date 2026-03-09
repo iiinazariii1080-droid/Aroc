@@ -15,6 +15,7 @@ services:
       - PERSISTENCE_PATH=/app/data/state.json
     volumes:
       - ./data:/app/data
+      - ../shared_config:/app/shared_config:ro
     restart: unless-stopped
     deploy:
       resources:

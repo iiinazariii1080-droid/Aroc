@@ -1,6 +1,7 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from shared_config.network import get_service_url
 import aiohttp
 import asyncio
 import threading
@@ -90,11 +91,11 @@ class SymovoAgvClient:
                 from core.connection_config import web_server_ip, web_server_port  # type: ignore
                 base_url = f"http://{web_server_ip}:{web_server_port}"
             except Exception:
-                base_url = "http://192.168.1.10:7905"
+                base_url = get_service_url("symovo")
 
         # If someone passed the legacy "/v0" base, ignore it and use new gateway
         if "/v0" in base_url:
-            base_url = "http://192.168.1.10:7905"
+            base_url = get_service_url("symovo")
 
         self.base_url = base_url.rstrip("/")
         self._session: Optional[aiohttp.ClientSession] = None

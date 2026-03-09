@@ -5,13 +5,13 @@ general :
   load_all = "true";
   configs_folder = "/opt/janus/etc/janus/streams.d";
   allow_persistent = "true";
-  admin_key = "stream-admin-123";
+  admin_key = "__STREAM_ADMIN_KEY__";
 };
 rgb-rtp : {
     type = "rtp";
     id = "1305";
     description = "H264 via RTP push";
-    secret = "changeme";
+    secret = "__JANUS_STREAMING_SECRET__";
 
     videobitrate = 0
     videobufferkf = true

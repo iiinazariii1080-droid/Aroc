@@ -105,9 +105,52 @@
     .charging-icon {
       display: none;
     }
+    /* Safety lockout banner */
+    #safety-banner {
+      display: none;
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 100%;
+      background: #d32f2f;
+      color: #fff;
+      font-weight: bold;
+      font-size: 0.95em;
+      z-index: 2000;
+      align-items: center;
+      justify-content: center;
+      gap: 1em;
+      padding: 0 2vw;
+    }
+    #safety-banner.recovery-available {
+      background: #f9a825;
+      color: #000;
+    }
+    #safety-banner .recover-btn {
+      background: #fff;
+      color: #d32f2f;
+      border: none;
+      border-radius: 4px;
+      padding: 0.25em 1em;
+      font-weight: bold;
+      font-size: 0.9em;
+      cursor: pointer;
+    }
+    #safety-banner.recovery-available .recover-btn {
+      color: #000;
+    }
+    #safety-banner .recover-btn:disabled {
+      opacity: 0.5;
+      cursor: wait;
+    }
   </style>
 </head>
 <body>
+  <div id="safety-banner">
+    <span id="safety-text">⚠ E-STOP ACTIVE</span>
+    <button class="recover-btn" id="recover-btn" style="display:none;">Восстановить</button>
+  </div>
   <div class="status-bar">
     <div class="status-left">
       <button class="settings-button" id="settings-button">
@@ -222,12 +265,60 @@
           manipulatorIcon.src = "/static/js/topbar/icons/manipulator.svg";
           manipulatorIcon.classList.remove("error");
         }
+
+        // Safety lockout banner
+        updateSafetyBanner(robotData.symovo && robotData.symovo.state_flags);
       } catch (error) {
         console.error("Ошибка при обновлении статуса:", error);
       }
     }
+
+    // Safety lockout banner logic
+    const safetyBanner = document.getElementById("safety-banner");
+    const safetyText = document.getElementById("safety-text");
+    const recoverBtn = document.getElementById("recover-btn");
+
+    function updateSafetyBanner(stateFlags) {
+      if (!stateFlags) { safetyBanner.style.display = "none"; return; }
+      const estop = stateFlags.emergency_stop === true;
+      const relayOpen = stateFlags.safety_relais_closed_state === false;
+      const locked = estop || relayOpen;
+      if (!locked) { safetyBanner.style.display = "none"; return; }
+      safetyBanner.style.display = "flex";
+      if (estop) {
+        safetyBanner.classList.remove("recovery-available");
+        safetyText.textContent = "⚠ E-STOP ACTIVE — release button to proceed";
+        recoverBtn.style.display = "none";
+      } else {
+        // Relay open but E-Stop not flagged — may be recoverable after relay reset
+        safetyBanner.classList.add("recovery-available");
+        safetyText.textContent = "⚠ SAFETY RELAY OPEN — reset relay, then recover";
+        recoverBtn.style.display = "";
+      }
+    }
+
     setInterval(updateStatusBar, 2500);
     window.addEventListener("load", updateStatusBar);
+
+    recoverBtn.addEventListener("click", async function() {
+      recoverBtn.disabled = true;
+      recoverBtn.textContent = "Recovering...";
+      try {
+        const resp = await fetch("/api/v1/robot/safety/recover", { method: "POST" });
+        const data = await resp.json();
+        if (data.success) {
+          safetyBanner.style.display = "none";
+        } else {
+          const failed = (data.steps || []).filter(s => s.status === "failed").map(s => s.name).join(", ");
+          safetyText.textContent = "⚠ Recovery failed: " + (failed || data.message || "unknown");
+        }
+      } catch (e) {
+        safetyText.textContent = "⚠ Recovery error: " + e.message;
+      } finally {
+        recoverBtn.disabled = false;
+        recoverBtn.textContent = "Восстановить";
+      }
+    });
   </script>
 </body>
 </html>

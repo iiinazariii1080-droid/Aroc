@@ -8,7 +8,9 @@ import logging
 import os
 import ssl
 import subprocess
+import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
 
@@ -23,6 +25,7 @@ from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from app.core.admin import require_admin
 from app.core.settings import get_settings
 from app.services import janus, janus_proxy
+from shared_config.network import DEVICES, PORTS
 
 router = APIRouter(tags=["janus"])
 ADMIN_DEPENDENCY = Depends(require_admin)
@@ -129,7 +132,7 @@ def load_nat_config() -> JanusNatConfig:
     if CAM_TYPE == "depth_camera":
         try:
             response = requests.get(
-                "http://192.168.1.10:8900/janus/nat", timeout=3
+                f"http://{DEVICES.HOST_LAN_IP}:{PORTS.COLOR_CAMERA}/janus/nat", timeout=3
             )
             response.raise_for_status()
             data = response.json()
@@ -150,9 +153,27 @@ def load_nat_config() -> JanusNatConfig:
 
     return JanusNatConfig()
 
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write content to *path* atomically via tempfile + rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        os.write(fd, content.encode())
+        os.fsync(fd)
+        os.close(fd)
+        fd = -1
+        os.rename(tmp, str(path))
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        with suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def save_nat_config(cfg: JanusNatConfig) -> None:
     JANUS_NAT_JSON.parent.mkdir(parents=True, exist_ok=True)
-    JANUS_NAT_JSON.write_text(cfg.model_dump_json(indent=2))
+    _atomic_write_text(JANUS_NAT_JSON, cfg.model_dump_json(indent=2))
 
 def render_nat_block(cfg: JanusNatConfig) -> str:
     def b(value: bool) -> str:
@@ -190,8 +211,8 @@ def restart_janus() -> None:
 
 def restart_depth_camera_janus() -> None:
     try:
-        url = f"http://192.168.1.55:8900/janus/restart"
-        response = requests.post(url)
+        url = f"http://{DEVICES.DEPTH_CAMERA_IP}:{PORTS.COLOR_CAMERA}/janus/restart"
+        response = requests.post(url, timeout=10)
         if response.status_code != 200:
             raise RuntimeError(f"Failed to restart janus: {response.text}")
     except requests.RequestException as exc:
@@ -200,7 +221,7 @@ def restart_depth_camera_janus() -> None:
         raise RuntimeError(f"Unknown error: {exc}") from exc
 
 @router.post("/janus/restart", summary="Restart Janus service", description="Restarts the Janus service.")
-async def _restart_janus() -> None:
+def _restart_janus() -> None:
     try:
         restart_janus()
     except RuntimeError as exc:
@@ -233,7 +254,7 @@ def patch_janus_cfg_with_nat(cfg: JanusNatConfig) -> None:
         f"{after}"
     )
 
-    JANUS_CFG_PATH.write_text(new_text)
+    _atomic_write_text(JANUS_CFG_PATH, new_text)
 @router.get(
     f"/api/v1/{CAM_TYPE}/client-config",
     response_model=ClientRtcConfig,
@@ -338,7 +359,7 @@ def get_client_rtc_config() -> ClientRtcConfig:
     summary="Read Janus NAT/STUN/TURN settings",
     description="Loads the JSON stored at `/etc/robot/janus-nat.json`.",
 )
-async def get_janus_nat_config():
+def get_janus_nat_config():
     return load_nat_config()
 
 if CAM_TYPE == "color_camera":
@@ -349,7 +370,7 @@ if CAM_TYPE == "color_camera":
         summary="Update Janus NAT/STUN/TURN settings",
         description="Persists the JSON, rewrites the `janus.jcfg` block between markers, and restarts Janus.",
     )
-    async def update_janus_nat_config(new_cfg: JanusNatConfig):
+    def update_janus_nat_config(new_cfg: JanusNatConfig):
             save_nat_config(new_cfg)
 
             try:

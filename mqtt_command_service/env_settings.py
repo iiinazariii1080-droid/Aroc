@@ -17,6 +17,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+from shared_config.network import DEVICES
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,7 +84,7 @@ class EnvSettings:
     task_poll_timeout: float = 120.0
 
     # ---- Network ----------------------------------------------------
-    local_ip: str = "192.168.1.10"
+    local_ip: str = DEVICES.HOST_LAN_IP
     depth_camera_ip: str | None = None  # None → same as local_ip
 
     # ---- Service URLs / map -----------------------------------------
@@ -143,7 +145,7 @@ class EnvSettings:
         Raises ``ValueError`` on malformed numeric values so that
         misconfigurations surface at startup rather than at first use.
         """
-        local_ip = _env("LOCAL_IP", "192.168.1.10")
+        local_ip = _env("LOCAL_IP", DEVICES.HOST_LAN_IP)
         depth_camera_raw = os.environ.get("DEPTH_CAMERA_IP")
 
         return cls(

@@ -24,6 +24,7 @@ PROTOCOL_ERROR = ErrorCode("PROTOCOL_ERROR", "Protocol error")
 MODBUS_GATEWAY_ERROR = ErrorCode("MODBUS_GATEWAY_ERROR", "Modbus gateway error")
 MODBUS_ILLEGAL_FUNCTION = ErrorCode("MODBUS_ILLEGAL_FUNCTION", "Illegal function for remote Modbus gateway")
 DRIVE_IN_FAULT = ErrorCode("DRIVE_IN_FAULT", "Drive is in FAULT state — call fault_reset first")
+SAFETY_LOCKOUT = ErrorCode("SAFETY_LOCKOUT", "Safety lockout: DI7 (Enable) is LOW — check E-Stop and safety relay")
 DRIVE_NOT_READY = ErrorCode("DRIVE_NOT_READY", "Drive is not ready for motion commands")
 FAULT_RESET_FAILED = ErrorCode("FAULT_RESET_FAILED", "Fault reset did not clear the fault")
 
@@ -42,6 +43,7 @@ __all__ = [
     "MOTOR_LOCK_NOT_INITIALIZED",
     "PROTOCOL_ERROR",
     "REQUEST_ERROR",
+    "SAFETY_LOCKOUT",
     "STATUS_READ_FAILED",
     "TELEMETRY_READ_FAILED",
     "TIMEOUT",

@@ -1,6 +1,8 @@
 import os
 import yaml
 
+from shared_config.network import DEVICES, PORTS
+
 
 def _load_config_file(path: str = os.getenv("APP_CONFIG_FILE", "/app/config.yaml")) -> dict:
     try:
@@ -20,7 +22,7 @@ def _get(key: str, default: str) -> str:
     return os.getenv(key, str(_CFG.get(key.lower(), default)))
 
 
-server_ip = _get("SERVER_IP", "192.168.1.10")
+server_ip = _get("SERVER_IP", DEVICES.HOST_LAN_IP)
 
 # External service addresses (prefer env; fallback to config.yaml; then default)
 IGUS_CONTAINER_IP = _get("IGUS_CONTAINER_IP", server_ip)
@@ -32,7 +34,7 @@ XARM_CONTAINER_PORT = _get("XARM_CONTAINER_PORT", "8102")
 SYMOVO_CONTAINER_IP = _get("SYMOVO_CONTAINER_IP", server_ip)
 SYMOVO_CONTAINER_PORT = _get("SYMOVO_CONTAINER_PORT", "7905")
 
-DEPTH_CAMERA_CONTAINER_IP = _get("DEPTH_CAMERA_CONTAINER_IP", "192.168.1.55")
+DEPTH_CAMERA_CONTAINER_IP = _get("DEPTH_CAMERA_CONTAINER_IP", DEVICES.DEPTH_CAMERA_IP)
 DEPTH_CAMERA_CONTAINER_PORT = _get("DEPTH_CAMERA_CONTAINER_PORT", "8000")
 
 # Joystick defaults (HTTP)
@@ -53,7 +55,7 @@ _SYMOVO_ANGULAR_MIN, _SYMOVO_ANGULAR_MAX = 0.01, 2.0
 
 # Teleop: main API at nav2adapter (host:7905). move/speed = /api/v1/robots/<robot_id>/move/speed; drive_mode = /drive_mode.
 # SYMOVO_NAV2ADAPTER_HOST = where nav2adapter runs (e.g. 192.168.1.10). SYMOVO_ROBOT_ID = robot id in nav2adapter (e.g. fahrdummy-01).
-SYMOVO_NAV2ADAPTER_HOST = _get("SYMOVO_NAV2ADAPTER_HOST", "192.168.1.10")
+SYMOVO_NAV2ADAPTER_HOST = _get("SYMOVO_NAV2ADAPTER_HOST", DEVICES.HOST_LAN_IP)
 SYMOVO_ROBOT_ID = _get("SYMOVO_ROBOT_ID", "fahrdummy-01")
 SYMOVO_TELEOP_MOVE_URL = _get(
     "SYMOVO_TELEOP_MOVE_URL",

@@ -1,15 +1,16 @@
 """GripperWatchdog: auto-release idle vacuum after configurable timeout.
 
 Runs at ~1 Hz.  When the gripper is active longer than *timeout_s* **and**
-the vacuum sensor does NOT report a held part, the watchdog triggers an
+the vacuum sensor confirms NO part is held, the watchdog triggers an
 automatic GRIP_OPEN via *release_callback*.
 
 If the vacuum sensor reports PART_GRIPPED (sdk value == 1) the timer is
 extended — we never drop a held object.
 
-When the SDK vacuum sensor is unavailable (degraded mode), the watchdog
-falls back to a pure time-based release after timeout — it is safer to
-release than to run the pump indefinitely without feedback.
+When the vacuum sensor is unavailable (degraded mode / error), the watchdog
+extends the timer instead of releasing — product safety takes priority
+over pump duty-cycle limits.  The gripper is only released when the sensor
+positively confirms no part is present (vacuum == 0 or vacuum == -1).
 
 References:
   ISO 10218-1 §5.4   — protective stop for auxiliary devices
@@ -132,19 +133,27 @@ class GripperWatchdog:
                 try:
                     vacuum = await run_in_threadpool(self._read_vacuum)
                 except Exception as exc:
-                    logger.debug("GripperWatchdog vacuum read: %s", exc)
-                    vacuum = -99  # treat sensor failure as "no part" (safe side)
+                    logger.warning("GripperWatchdog vacuum read error: %s — extending timer (fail-safe)", exc)
+                    vacuum = -99
 
-                if vacuum == 1:
-                    # Part is held → extend the timer by resetting activated_at.
-                    logger.debug(
-                        "GripperWatchdog: part detected (vacuum=1) after %.0fs — extending timer",
-                        elapsed,
-                    )
+                if vacuum == 1 or vacuum == -99:
+                    # vacuum==1  → part is held
+                    # vacuum==-99 → sensor error / degraded — assume part may be held (fail-safe)
+                    if vacuum == -99:
+                        logger.warning(
+                            "GripperWatchdog: sensor error (vacuum=-99) after %.0fs — "
+                            "extending timer (product safety: will NOT release)",
+                            elapsed,
+                        )
+                    else:
+                        logger.debug(
+                            "GripperWatchdog: part detected (vacuum=1) after %.0fs — extending timer",
+                            elapsed,
+                        )
                     store.refresh_gripper_activated_at()
                     continue
 
-                # vacuum ∈ {-1, 0, -99}: no part / off / sensor error → release
+                # vacuum ∈ {-1, 0}: confirmed no part / vacuum off → safe to release
                 logger.warning(
                     "GRIPPER_WATCHDOG_RELEASE: vacuum idle %.0fs (limit %.0fs), "
                     "vacuum_state=%d — auto-deactivating gripper",

@@ -18,6 +18,7 @@
 """
 import sys
 import math
+import os
 import time
 import queue
 import datetime
@@ -201,7 +202,7 @@ if __name__ == '__main__':
             rotate = True
 
         RobotMain.pprint('xArm-Python-SDK Version:{}'.format(version.__version__))
-        arm = XArmAPI('192.168.1.220', baud_checkset=False)
+        arm = XArmAPI(os.getenv('XARM_IP', '192.168.1.220'), baud_checkset=False)
         robot_main = RobotMain(arm)
 
         if robot_main.run(x,y,z):

@@ -1,6 +1,7 @@
 fastapi>=0.110,<0.116
 uvicorn[standard]>=0.22,<0.31
 pydantic>=2.5,<3
+pydantic-settings>=2.0,<3
 
 # xArm SDK (install from GitHub; distribution name is xarm-python-sdk)
 # Pinned to commit seen in your build logs for reproducibility

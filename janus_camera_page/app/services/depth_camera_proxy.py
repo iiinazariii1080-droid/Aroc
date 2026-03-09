@@ -12,6 +12,7 @@ Usage (called from ``events.py / routes/__init__.py``):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import httpx
@@ -23,25 +24,28 @@ from app.core.settings import get_settings
 log = logging.getLogger(__name__)
 
 _client: httpx.AsyncClient | None = None
+_client_lock = asyncio.Lock()
 
 
 async def start_client() -> None:
     global _client
-    if _client is not None:
-        return
-    _client = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=5.0, read=90.0, write=30.0, pool=60.0),
-        limits=httpx.Limits(max_keepalive_connections=10, max_connections=50),
-        headers={"Connection": "keep-alive"},
-    )
+    async with _client_lock:
+        if _client is not None:
+            return
+        _client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=90.0, write=30.0, pool=60.0),
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=50),
+            headers={"Connection": "keep-alive"},
+        )
 
 
 async def stop_client() -> None:
     global _client
-    if _client is None:
-        return
-    await _client.aclose()
-    _client = None
+    async with _client_lock:
+        if _client is None:
+            return
+        await _client.aclose()
+        _client = None
 
 
 async def forward_request(request: Request, upstream_path: str) -> Response:
@@ -53,16 +57,18 @@ async def forward_request(request: Request, upstream_path: str) -> Response:
     global _client
     if _client is None:
         await start_client()
-    assert _client is not None
+    client = _client
+    if client is None:
+        raise HTTPException(status_code=503, detail="Depth camera proxy client not ready")
 
     settings = get_settings()
-    base = settings.depth_camera_url.rstrip("/")
+    base = settings.depth_cam_url.rstrip("/")
     url = f"{base}{upstream_path}"
     if request.query_params:
         url = f"{url}?{request.query_params}"
 
     try:
-        resp = await _client.request(
+        resp = await client.request(
             method=request.method,
             url=url,
             headers={k: v for k, v in request.headers.items() if k.lower() not in ("host", "connection")},

@@ -9,11 +9,13 @@ xarm_container_port: 8102
 symovo_container_ip: 127.0.0.1
 
 # nav2adapter teleop (host:7905), robot_id for /api/v1/robots/<id>/move/speed
-symovo_nav2adapter_host: 192.168.1.10
+# Override via SYMOVO_NAV2ADAPTER_HOST env var
+symovo_nav2adapter_host: ${SYMOVO_NAV2ADAPTER_HOST:-192.168.1.10}
 symovo_robot_id: fahrdummy-01
 
-depth_camera_container_ip: 192.168.1.55
-depth_camera_container_port: 8000
+# Override via DEPTH_CAMERA_CONTAINER_IP env var
+depth_camera_container_ip: ${DEPTH_CAMERA_CONTAINER_IP:-192.168.1.55}
+depth_camera_container_port: 8900
 
 # joystick defaults
 joystick_deadzone: 0.12

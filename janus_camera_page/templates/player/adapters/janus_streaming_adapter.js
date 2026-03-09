@@ -44,7 +44,7 @@
       this._ioGen = 0;
 
       // Invalidate handle if session is destroyed/recreated.
-      this.session.onEvent((ev) => {
+      this._unsubSession = this.session.onEvent((ev) => {
         if (!ev || !ev.type) return;
         if (ev.type === 'SESSION_DESTROYED' || ev.type === 'SESSION_RECREATED') {
           if (this._pendingWatch) {
@@ -93,7 +93,9 @@
 
     /** Enqueue an async operation so only one IO method runs at a time. */
     _enqueue(fn){
-      this._io = this._io.then(fn).catch(() => {});
+      this._io = this._io.then(fn).catch((err) => {
+        this.log.warn('enqueue_error', { error: String(err), stack: err && err.stack });
+      });
       return this._io;
     }
 
@@ -124,6 +126,11 @@
 
     async recreate(rtcConfig){
       const gen = ++this._ioGen;
+      // Reject any pending watch promise from stale attempts.
+      if (this._pendingWatch) {
+        this._pendingWatch.reject(new Error('Session recreated'));
+        this._pendingWatch = null;
+      }
       // Flush stale queued operations from timed-out attempts.
       // _handleGen guards against stale attach callbacks corrupting state.
       this._io = Promise.resolve();
@@ -149,6 +156,11 @@
      * All I/O (stop, init, watch, detach, recreate) is serialized via _enqueue.
      */
     async stop(){
+      // Unsubscribe from session events to prevent listener accumulation.
+      if (this._unsubSession) {
+        this._unsubSession();
+        this._unsubSession = null;
+      }
       if (!this.handle) return Promise.resolve();
       return this._enqueue(async () => {
       const h = this.handle;
@@ -338,7 +350,14 @@
           ],
           success: (ourJsep) => {
             if (this._dropIfStaleGen(gen, 'createAnswer_success')) return;
-            h.send({ message: { request: 'start' }, jsep: ourJsep });
+            h.send({
+              message: { request: 'start' },
+              jsep: ourJsep,
+              error: (err) => {
+                if (this._dropIfStaleGen(gen, 'send_start_error')) return;
+                this._emit('ERROR', { where: 'send_start', error: err });
+              },
+            });
           },
           error: (err) => {
             if (this._dropIfStaleGen(gen, 'createAnswer_error')) return;

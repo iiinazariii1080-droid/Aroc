@@ -63,47 +63,26 @@ class TestPiCoBotIntegration:
         assert api.baudrate_calls == [115200]
         assert api.timeout_calls == [100]
 
-    def test_disable_sdk_vacuum_reads_after_exception_c19(self):
+    def test_pdi_disabled_after_persistent_failures(self):
+        """PDI reads are disabled after consecutive failures (fail streak limit)."""
         api = _MockApi()
-        api._vacuum_mode = "exception19"
         gc = GripperController(api)
 
-        first = gc.read_vacuum_via_sdk()
-        second = gc.read_vacuum_via_sdk()
+        # Force PDI to fail by making getset_tgpio_modbus_data return empty
+        original_fn = api.getset_tgpio_modbus_data
+        def _fail_pdi(command, **kwargs):
+            if command == [0x01, 0x04, 0x00, 0x00, 0x00, 0x28, 0xD8]:
+                return 0, []
+            return original_fn(command, **kwargs)
+        api.getset_tgpio_modbus_data = _fail_pdi
 
-        assert first == -99
-        assert second == -99
-        assert gc.sdk_vacuum_supported is False
-        assert api.vacuum_calls == 1
+        # Exhaust the fail streak limit (default 5)
+        for _ in range(6):
+            status = gc.get_status()
 
-    def test_disable_sdk_vacuum_reads_after_code19(self):
-        api = _MockApi()
-        api._vacuum_mode = "code19"
-        gc = GripperController(api)
-
-        first = gc.read_vacuum_via_sdk()
-        second = gc.read_vacuum_via_sdk()
-
-        assert first == -99
-        assert second == -99
-        assert gc.sdk_vacuum_supported is False
-        assert api.vacuum_calls == 1
-
-    def test_disable_after_repeated_nonzero_code(self):
-        api = _MockApi()
-        api._vacuum_mode = "other"
-        gc = GripperController(api)
-
-        first = gc.read_vacuum_via_sdk()
-        second = gc.read_vacuum_via_sdk()
-        third = gc.read_vacuum_via_sdk()
-
-        assert first == -99
-        assert second == -99
-        assert third == -99
-        assert gc.sdk_vacuum_supported is False
-        assert gc.sdk_vacuum_disabled_reason == "persistent_nonzero_code_1"
-        assert api.vacuum_calls == 2
+        assert gc.pdi_supported is False
+        assert gc.pdi_disabled_reason is not None
+        assert status.sensor_supported is False
 
     def test_activate_sets_active_and_uses_modbus(self):
         api = _MockApi()

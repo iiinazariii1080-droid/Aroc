@@ -11,13 +11,13 @@
 #   ./lan_monitor.sh          — same as 'start'
 # ───────────────────────────────────────────────────────────────────
 
-# ── targets ──
+# ── targets (override via env vars, e.g. MONITOR_GATEWAY_IP=10.0.0.1) ──
 declare -A TARGETS=(
-  [gateway]=192.168.1.109
-  [symovo]=192.168.1.100
-  [xarm]=192.168.1.220
-  [igus]=192.168.1.230
-  [depth_cam]=192.168.1.55
+  [gateway]=${MONITOR_GATEWAY_IP:-192.168.1.109}
+  [symovo]=${SYMOVO_CAR_IP:-192.168.1.100}
+  [xarm]=${XARM_HARDWARE_IP:-192.168.1.220}
+  [igus]=${IGUS_MOTOR_IP:-192.168.1.230}
+  [depth_cam]=${DEPTH_CAMERA_IP:-192.168.1.55}
 )
 
 INTERVAL=1            # seconds between rounds

@@ -22,7 +22,7 @@
       this.username = `viewer-${Math.random().toString(16).slice(2, 8)}`;
 
       // Invalidate on session reset
-      this.session.onEvent((ev) => {
+      this._unsubSession = this.session.onEvent((ev) => {
         if (!ev || !ev.type) return;
         if (ev.type === 'SESSION_DESTROYED' || ev.type === 'SESSION_RECREATED') {
           this.handle = null;
@@ -55,7 +55,7 @@
       });
 
       this.handle = handle;
-      try { handle.send({ message: { request: 'setup' } }); } catch(_) {}
+      try { handle.send({ message: { request: 'setup' } }); } catch(e) { console.warn('[textroom] setup send failed:', e); }
     }
 
     _createAnswer(jsep){
@@ -67,7 +67,7 @@
         tracks: [ { type: 'data' } ],
         trickle: true,
         success: (jsepAnswer) => {
-          try { h.send({ message: { request: 'ack' }, jsep: jsepAnswer }); } catch(_) {}
+          try { h.send({ message: { request: 'ack' }, jsep: jsepAnswer }); } catch(e) { console.warn('[textroom] ack send failed:', e); }
         },
         error: (err) => that.log.warn('textroom_answer_error', { error: String(err?.message || err) }),
       });
@@ -123,12 +123,17 @@
     }
 
     async detach(){
+      // Unsubscribe from session events to prevent listener accumulation.
+      if (this._unsubSession) {
+        this._unsubSession();
+        this._unsubSession = null;
+      }
       const h = this.handle;
       this.handle = null;
       this.ready = false;
       if (!h) return;
       await new Promise((resolve) => {
-        try { h.detach({ success: () => resolve(true), error: () => resolve(true) }); } catch(_) { resolve(true); }
+        try { h.detach({ success: () => resolve(true), error: () => resolve(true) }); } catch(e) { console.warn('[textroom] detach error:', e); resolve(true); }
       });
     }
   }

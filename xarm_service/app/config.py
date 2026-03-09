@@ -1,8 +1,10 @@
 import os
 from typing import List, Tuple
 
-XARM_IP = os.getenv("XARM_IP", "192.168.1.220")
-WS_XARM_BACKEND_URL = os.getenv("WS_XARM_BACKEND_URL", f"ws://{XARM_IP}:18333/ws")
+from shared_config.network import DEVICES, PORTS
+
+XARM_IP = os.getenv("XARM_IP", DEVICES.XARM_IP)
+WS_XARM_BACKEND_URL = os.getenv("WS_XARM_BACKEND_URL", f"ws://{XARM_IP}:{PORTS.XARM_WS}/ws")
 WS_CHECK_DISABLED: bool = os.getenv("WS_CHECK_DISABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 
 # Workspace (WS) — 40×90×120 cm, all values in mm
@@ -22,7 +24,7 @@ JOINT_ACC_DEG_S2: float = float(os.getenv("JOINT_ACC_DEG_S2", "150"))
 SAFE_HIGH_POSE_JOINTS: Tuple[float, ...] = (0.0, 0.0, 0.0, 90.0, 0.0, 0.0)
 
 # ── Smart Grasp pipeline ───────────────────────────────────────────────────
-DEPTH_BASE_URL: str = os.getenv("DEPTH_BASE_URL", "http://192.168.1.55:8000")
+DEPTH_BASE_URL: str = os.getenv("DEPTH_BASE_URL", f"http://{DEVICES.DEPTH_CAMERA_IP}:{PORTS.COLOR_CAMERA}")
 DEPTH_FRAME_WIDTH: int = 640
 DEPTH_FRAME_HEIGHT: int = 480
 DEPTH_FRAME_BYTES: int = DEPTH_FRAME_WIDTH * DEPTH_FRAME_HEIGHT * 2  # uint16
@@ -60,6 +62,31 @@ DEPTH_CALIB_B: float = float(os.getenv("DEPTH_CALIB_B", "45.2"))
 
 # Smart grasp global timeout
 SMART_GRASP_TIMEOUT_S: float = float(os.getenv("SMART_GRASP_TIMEOUT_S", "90"))
+
+# ── Gripper geometry (dual-cup vacuum gripper) ────────────────────────────
+GRIPPER_JAW_SPACING_MM: float = float(os.getenv("GRIPPER_JAW_SPACING_MM", "106"))
+GRIPPER_CUP_DIAMETER_MM: float = float(os.getenv("GRIPPER_CUP_DIAMETER_MM", "30"))
+GRIPPER_OFFSET_X_MM: float = float(os.getenv("GRIPPER_OFFSET_X_MM", "30"))
+GRIPPER_OFFSET_Y_MM: float = float(os.getenv("GRIPPER_OFFSET_Y_MM", "-52"))
+GRIPPER_OFFSET_Z_MM: float = float(os.getenv("GRIPPER_OFFSET_Z_MM", "60"))
+
+# ── Grasp analysis safety limits ──────────────────────────────────────────
+MAX_ROLL_CORRECTION_DEG: float = float(os.getenv("MAX_ROLL_CORRECTION_DEG", "8.0"))
+MAX_PITCH_CORRECTION_DEG: float = float(os.getenv("MAX_PITCH_CORRECTION_DEG", "8.0"))
+MAX_YAW_CORRECTION_DEG: float = float(os.getenv("MAX_YAW_CORRECTION_DEG", "30.0"))
+GRIPPER_ENVELOPE_RADIUS_MM: float = float(os.getenv("GRIPPER_ENVELOPE_RADIUS_MM", "70"))
+
+# ── Grasp analysis algorithm parameters ───────────────────────────────────
+DEPTH_GROW_THRESHOLD_MM: int = int(os.getenv("DEPTH_GROW_THRESHOLD_MM", "8"))
+MASK_DILATE_PX: int = int(os.getenv("MASK_DILATE_PX", "3"))
+SEAL_PERIMETER_POINTS: int = int(os.getenv("SEAL_PERIMETER_POINTS", "24"))
+CUP_GRID_STEP_MM: float = float(os.getenv("CUP_GRID_STEP_MM", "2.0"))
+YAW_SEARCH_RANGE_DEG: float = float(os.getenv("YAW_SEARCH_RANGE_DEG", "30.0"))
+YAW_SEARCH_STEP_DEG: float = float(os.getenv("YAW_SEARCH_STEP_DEG", "5.0"))
+MIN_MASK_POINTS: int = int(os.getenv("MIN_MASK_POINTS", "50"))
+NORMAL_CONSISTENCY_THRESHOLD_DEG: float = float(os.getenv("NORMAL_CONSISTENCY_THRESHOLD_DEG", "5.0"))
+SEAL_BREAK_DEPTH_JUMP_MM: float = float(os.getenv("SEAL_BREAK_DEPTH_JUMP_MM", "3.0"))
+FRAME_TTL_S: float = float(os.getenv("FRAME_TTL_S", "5.0"))
 
 # ── Gripper idle-vacuum watchdog ───────────────────────────────────────────
 # Auto-release vacuum after this many seconds if no part is detected.

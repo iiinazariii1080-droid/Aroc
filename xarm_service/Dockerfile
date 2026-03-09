@@ -16,11 +16,14 @@ RUN apt-get update \
 WORKDIR /app
 
 # Install Python dependencies first (better layer caching)
-COPY requirements.txt /app/requirements.txt
+COPY xarm_service/requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
 
 # Copy application source
-COPY . /app
+COPY xarm_service/ /app/
+
+# Copy shared_config package (used by app/config.py)
+COPY shared_config/ /app/shared_config/
 
 # Service configuration
 ENV SERVICE_HOST=0.0.0.0 \

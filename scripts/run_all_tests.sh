@@ -24,7 +24,6 @@ SERVICES=(
   nav2adapter
   api_gateway_service
   frontend_service
-  proxt_camera_service
   janus_camera_page
 )
 

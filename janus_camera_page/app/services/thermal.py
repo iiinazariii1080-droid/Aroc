@@ -43,7 +43,13 @@ def read_cpu_temp() -> float | None:
     try:
         raw = THERMAL_ZONE.read_text().strip()
         return int(raw) / 1000.0
-    except Exception:
+    except PermissionError:
+        logger.error("Permission denied reading %s — thermal monitoring degraded", THERMAL_ZONE)
+        return None
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.warning("Unexpected error reading CPU temperature: %s", exc)
         return None
 
 

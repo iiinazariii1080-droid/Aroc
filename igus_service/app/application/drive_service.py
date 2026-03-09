@@ -63,7 +63,8 @@ class DriveService:
         """Check that the drive is not in FAULT state.
 
         Reads the live statusword (bypasses telemetry cache) and raises
-        ``ServiceError(409, DRIVE_IN_FAULT)`` if the fault bit is set.
+        ``ServiceError(503, SAFETY_LOCKOUT)`` if fault + DI7 low (safety relay open),
+        or ``ServiceError(409, DRIVE_IN_FAULT)`` for a regular fault.
         Call this **before** acquiring ``motor_lock`` to fail fast.
         """
         drive = self.get_drive(require_connected=True)
@@ -73,6 +74,12 @@ class DriveService:
             # If we can't read status, let the downstream command handle it
             return
         if status.get("fault", False):
+            if not status.get("remote", True):
+                raise ServiceError(
+                    503,
+                    error_codes.SAFETY_LOCKOUT.code,
+                    error_codes.SAFETY_LOCKOUT.message,
+                )
             raise ServiceError(
                 409,
                 error_codes.DRIVE_IN_FAULT.code,

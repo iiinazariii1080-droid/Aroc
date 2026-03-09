@@ -25,6 +25,8 @@
       this._gen = 0;
       this._observers = new Set();
       this._destroyingByUs = false;
+      /** Serialize init/destroy/recreate to prevent concurrent lifecycle operations. */
+      this._lifecycleMutex = Promise.resolve();
     }
 
     /**
@@ -56,6 +58,14 @@
       if (rtcConfig) this.setRtcConfig(rtcConfig);
       if (this.janus) return;
 
+      // Serialize against concurrent destroy/init/recreate
+      const ticket = this._lifecycleMutex.then(() => this._initInner());
+      this._lifecycleMutex = ticket.catch(() => {});
+      return ticket;
+    }
+
+    async _initInner(){
+      if (this.janus) return;
       if (this._ensurePromise) return this._ensurePromise;
 
       const that = this;
@@ -87,15 +97,17 @@
               withCredentials: false,
               destroyOnUnload: true,
               success: () => {
+                if (that._gen !== initGen) return; // stale callback after timeout/destroy
                 that._emit('SESSION_READY', { gen: that._gen });
                 resolve(true);
               },
               error: (err) => {
+                if (that._gen !== initGen) return; // stale callback after timeout/destroy
                 that._emit('SESSION_ERROR', { where: 'create_session', error: err });
                 reject(err);
               },
               destroyed: () => {
-                // Only emit when session died externally; we already emit in destroy() when we call j.destroy()
+                if (that._gen !== initGen) return; // stale callback after timeout/destroy
                 if (!that._destroyingByUs) that._emit('SESSION_DESTROYED', { gen: that._gen });
               },
             });
@@ -167,6 +179,13 @@
     }
 
     async destroy(){
+      // Serialize against concurrent init/recreate
+      const ticket = this._lifecycleMutex.then(() => this._destroyInner());
+      this._lifecycleMutex = ticket.catch(() => {});
+      return ticket;
+    }
+
+    async _destroyInner(){
       const j = this.janus;
       this.janus = null;
       this._gen += 1;

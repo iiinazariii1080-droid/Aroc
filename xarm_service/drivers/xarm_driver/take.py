@@ -141,6 +141,6 @@ class RobotMain(object):
             self._arm.release_count_changed_callback(self._count_changed_callback)
 
 
-# arm = XArmAPI('192.168.1.220', baud_checkset=False)
+# arm = XArmAPI(os.getenv('XARM_IP', '192.168.1.220'), baud_checkset=False)
 # robot_main = RobotMain(arm)
 # result = robot_main.run()

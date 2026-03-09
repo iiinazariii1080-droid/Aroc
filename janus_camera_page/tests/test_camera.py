@@ -18,9 +18,10 @@ class TestSettings:
     def test_default_janus_url(self, settings):
         assert "janus" in settings.janus_url.lower() or "8088" in settings.janus_url
 
-    def test_cors_origins_is_list(self, settings):
-        assert isinstance(settings.cors_origins, list)
-        assert len(settings.cors_origins) > 0
+    def test_cors_origin_regex_is_valid(self, settings):
+        import re
+        pat = re.compile(settings.cors_origin_regex)
+        assert pat.fullmatch("http://192.168.1.10:8900")
 
     def test_camera_device_default(self, settings):
         assert settings.camera_device  # non-empty string

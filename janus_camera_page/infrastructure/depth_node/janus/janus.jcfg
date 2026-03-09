@@ -1,9 +1,9 @@
 general: {
-  debug_level = 2
+  debug_level = 1
   debug_timestamps = true
   server_name = "AE-ROBOT-55"
-  session_timeout = 30
-  admin_secret = "e3ec4ead6a41e9b631c8dbd4c3b4ac0e"
+  session_timeout = 60
+  admin_secret = "__JANUS_ADMIN_SECRET__"
 }
 
 media: {
@@ -32,6 +32,6 @@ nat: {
   turn_port   = 3478
   turn_type   = "tcp"
   turn_user   = "webrtc"
-  turn_pwd    = "G456AH37gbc"
+  turn_pwd    = "__TURN_PWD__"
 }
 # END NAT AUTO

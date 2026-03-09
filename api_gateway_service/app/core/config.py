@@ -1,36 +1,141 @@
-from pathlib import Path
-from typing import Dict
+from __future__ import annotations
+
 import json
 import logging
 import os
+from pathlib import Path
+from typing import Dict
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from shared_config.network import DEVICES, PORTS
 
 logger = logging.getLogger(__name__)
 
 
-def _bool_env(name: str, default: bool) -> bool:
-    v = os.getenv(name)
-    return default if v is None else v.strip().lower() in {"1", "true", "yes", "on"}
+# ── Settings class ──────────────────────────────────────────────────────────
 
+class GatewaySettings(BaseSettings):
+    """API Gateway configuration — single source of truth.
+
+    All values are loaded from env vars (with ``.env`` fallback).
+    Module-level constants below are derived from an instance for
+    backward compatibility with ``from app.core.config import X``.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    # ── Network topology ─────────────────────────────────────────
+    host_lan_ip: str = Field(default=DEVICES.HOST_LAN_IP, alias="HOST_LAN_IP")
+    depth_camera_ip: str = Field(default=DEVICES.DEPTH_CAMERA_IP, alias="DEPTH_CAMERA_IP")
+    public_host: str = Field(default=DEVICES.HOST_LAN_IP, alias="PUBLIC_HOST")
+    app_env: str = Field(default="dev", alias="APP_ENV")
+
+    # ── Service URL overrides (optional) ─────────────────────────
+    service_igus_url: str | None = Field(default=None, alias="SERVICE_IGUS_URL")
+    service_xarm_url: str | None = Field(default=None, alias="SERVICE_XARM_URL")
+    service_symovo_url: str | None = Field(default=None, alias="SERVICE_SYMOVO_URL")
+    service_robot_url: str | None = Field(default=None, alias="SERVICE_ROBOT_URL")
+    service_color_camera_url: str | None = Field(default=None, alias="SERVICE_COLOR_CAMERA_URL")
+    service_depth_camera_url: str | None = Field(default=None, alias="SERVICE_DEPTH_CAMERA_URL")
+    service_map_json: str | None = Field(default=None, alias="SERVICE_MAP_JSON")
+
+    # ── WebSocket backends ───────────────────────────────────────
+    ws_xarm_url: str = Field(
+        default=f"ws://{DEVICES.XARM_IP}:{PORTS.XARM_WS}/ws",
+        alias="WS_XARM_URL",
+    )
+    ws_color_camera_url: str = Field(
+        default=f"ws://{DEVICES.HOST_LAN_IP}:{PORTS.JANUS_WS}/janus-ws",
+        alias="WS_COLOR_CAMERA_URL",
+    )
+    ws_depth_camera_url: str = Field(
+        default=f"ws://{DEVICES.DEPTH_CAMERA_IP}:{PORTS.JANUS_WS}/janus-ws",
+        alias="WS_DEPTH_CAMERA_URL",
+    )
+
+    # ── HTTP client tuning ───────────────────────────────────────
+    verify_tls: bool = Field(default=True, alias="VERIFY_TLS")
+    http_connect_timeout: float = Field(default=2.0, alias="HTTP_CONNECT_TIMEOUT")
+    http_read_timeout: float = Field(default=5.0, alias="HTTP_READ_TIMEOUT")
+    http_write_timeout: float = Field(default=10.0, alias="HTTP_WRITE_TIMEOUT")
+    http_pool_timeout: float = Field(default=3.0, alias="HTTP_POOL_TIMEOUT")
+    http_max_connections: int = Field(default=30, alias="HTTP_MAX_CONNECTIONS")
+    http_max_keepalive_connections: int = Field(default=15, alias="HTTP_MAX_KEEPALIVE_CONNECTIONS")
+    http_keepalive_expiry: float = Field(default=30.0, alias="HTTP_KEEPALIVE_EXPIRY")
+    http_retry_attempts: int = Field(default=1, alias="HTTP_RETRY_ATTEMPTS")
+    http_retry_backoff: float = Field(default=0.15, alias="HTTP_RETRY_BACKOFF")
+
+    # ── Camera HTTP client (isolated pool) ───────────────────────
+    cam_connect_timeout: float = Field(default=2.0, alias="CAM_CONNECT_TIMEOUT")
+    cam_read_timeout: float = Field(default=30.0, alias="CAM_READ_TIMEOUT")
+    cam_write_timeout: float = Field(default=8.0, alias="CAM_WRITE_TIMEOUT")
+    cam_pool_timeout: float = Field(default=2.0, alias="CAM_POOL_TIMEOUT")
+    cam_max_connections: int = Field(default=20, alias="CAM_MAX_CONNECTIONS")
+    cam_max_keepalive: int = Field(default=10, alias="CAM_MAX_KEEPALIVE")
+    camera_services_csv: str = Field(default="color_camera,depth_camera", alias="CAMERA_SERVICES")
+
+    # ── Concurrency ──────────────────────────────────────────────
+    default_service_concurrency: int = Field(default=10, alias="DEFAULT_SERVICE_CONCURRENCY")
+    camera_service_concurrency: int = Field(default=15, alias="CAMERA_SERVICE_CONCURRENCY")
+
+    # ── WebSocket proxy limits ───────────────────────────────────
+    ws_max_concurrent: int = Field(default=30, alias="WS_MAX_CONCURRENT")
+    ws_acquire_timeout: float = Field(default=5.0, alias="WS_ACQUIRE_TIMEOUT")
+    ws_connect_timeout: float = Field(default=5.0, alias="WS_CONNECT_TIMEOUT")
+    ws_total_timeout: float = Field(default=3600.0, alias="WS_TOTAL_TIMEOUT")
+
+    # ── Proxy lifecycle ──────────────────────────────────────────
+    proxy_connect_timeout: float = Field(default=8.0, alias="PROXY_CONNECT_TIMEOUT")
+    proxy_body_timeout: float = Field(default=15.0, alias="PROXY_BODY_TIMEOUT")
+
+    # ── Hub / auth ───────────────────────────────────────────────
+    default_hub_base_url: str | None = Field(default=None, alias="DEFAULT_HUB_BASE_URL")
+    default_robot_id: str | None = Field(default=None, alias="DEFAULT_ROBOT_ID")
+    default_robot_api_key: str | None = Field(default=None, alias="DEFAULT_ROBOT_API_KEY")
+    default_robot_display_name: str | None = Field(default=None, alias="DEFAULT_ROBOT_DISPLAY_NAME")
+    robot_api_key_file: str | None = Field(default=None, alias="ROBOT_API_KEY_FILE")
+
+    # ── CORS / security ──────────────────────────────────────────
+    frontend_origin: str | None = Field(default=None, alias="FRONTEND_ORIGIN")
+    allowed_origins_csv: str | None = Field(default=None, alias="ALLOWED_ORIGINS")
+    allow_insecure_tls: bool = Field(default=False, alias="ALLOW_INSECURE_TLS")
+    strict_runtime: bool | None = Field(default=None, alias="STRICT_RUNTIME")
+    max_request_body_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_REQUEST_BODY_BYTES")
+
+    # ── Readiness ────────────────────────────────────────────────
+    readiness_check_services: bool = Field(default=True, alias="READINESS_CHECK_SERVICES")
+    readiness_check_auth: bool = Field(default=True, alias="READINESS_CHECK_AUTH")
+    readiness_check_timeout: float = Field(default=2.5, alias="READINESS_CHECK_TIMEOUT")
+
+
+# ── Instantiate settings ────────────────────────────────────────────────────
+
+_settings = GatewaySettings()
+
+
+# ── Service map builder ─────────────────────────────────────────────────────
 
 def load_service_map() -> Dict[str, Dict[str, str]]:
-    """
-    Статическая конфигурация сервисов:
-      - url: базовый адрес HTTP сервиса
-      - prefix: префикс его API
-    Внешний маршрут:  /api/v1/{service}/{path}
-    Прокси на апстрим: {url}{prefix}/{path}
-    """
-    local_ip = os.environ.get("LOCAL_IP", "192.168.1.10")
-    depth_camera_ip = os.environ.get("DEPTH_CAMERA_IP", "192.168.1.55")
+    """Build service map from settings — no hardcoded IPs."""
+    s = _settings
+    lip = s.host_lan_ip
+    dip = s.depth_camera_ip
     base: Dict[str, Dict[str, str]] = {
-        "igus": {"url": f"http://{local_ip}:8101", "prefix": ""},
-        "xarm": {"url": f"http://{local_ip}:8102", "prefix": ""},
-        "symovo": {"url": f"http://{local_ip}:7905", "prefix": ""},
-        "robot": {"url": f"http://{local_ip}:8110", "prefix": ""},
-        "color_camera": {"url": f"http://{local_ip}:8900", "prefix": ""},
-        "depth_camera": {"url": f"http://{depth_camera_ip}:8900", "prefix": ""},
+        "igus":         {"url": s.service_igus_url or f"http://{lip}:{PORTS.IGUS}", "prefix": ""},
+        "xarm":         {"url": s.service_xarm_url or f"http://{lip}:{PORTS.XARM}", "prefix": ""},
+        "symovo":       {"url": s.service_symovo_url or f"http://{lip}:{PORTS.SYMOVO}", "prefix": ""},
+        "robot":        {"url": s.service_robot_url or f"http://{lip}:{PORTS.ROBOT}", "prefix": ""},
+        "color_camera": {"url": s.service_color_camera_url or f"http://{lip}:{PORTS.COLOR_CAMERA}", "prefix": ""},
+        "depth_camera": {"url": s.service_depth_camera_url or f"http://{dip}:{PORTS.COLOR_CAMERA}", "prefix": ""},
     }
-    # ENV overrides per service
+    # ENV overrides per service (legacy SERVICE_<NAME>_URL pattern)
     for key, cfg in base.items():
         env_key = key.replace("-", "_").upper()
         url_override = os.getenv(f"SERVICE_{env_key}_URL")
@@ -39,8 +144,8 @@ def load_service_map() -> Dict[str, Dict[str, str]]:
         prefix_override = os.getenv(f"SERVICE_{env_key}_PREFIX")
         if prefix_override is not None:
             cfg["prefix"] = prefix_override
-    # SERVICE_MAP_JSON='{"igus":{"url":"http://...","prefix":"/api/v1"}, "newsvc":"http://..."}'
-    raw = os.getenv("SERVICE_MAP_JSON")
+    # SERVICE_MAP_JSON override
+    raw = s.service_map_json
     if raw:
         try:
             m = json.loads(raw)
@@ -58,51 +163,48 @@ def load_service_map() -> Dict[str, Dict[str, str]]:
     return base
 
 
+# ── Module-level constants (backward compat) ────────────────────────────────
+
 SERVICE_MAP: Dict[str, Dict[str, str]] = load_service_map()
 
-APP_ENV = os.getenv("APP_ENV", "dev").strip().lower()
-STRICT_RUNTIME = _bool_env("STRICT_RUNTIME", APP_ENV in {"prod", "production"})
+APP_ENV = _settings.app_env.strip().lower()
+STRICT_RUNTIME = _settings.strict_runtime if _settings.strict_runtime is not None else (APP_ENV in {"prod", "production"})
 
-VERIFY_TLS = _bool_env("VERIFY_TLS", True)
+VERIFY_TLS = _settings.verify_tls
 
-CONNECT_TIMEOUT_S = float(os.getenv("HTTP_CONNECT_TIMEOUT", "2.0"))
-READ_TIMEOUT_S = float(os.getenv("HTTP_READ_TIMEOUT", "5.0"))
-WRITE_TIMEOUT_S = float(os.getenv("HTTP_WRITE_TIMEOUT", "10.0"))
-POOL_TIMEOUT_S = float(os.getenv("HTTP_POOL_TIMEOUT", "3.0"))
+CONNECT_TIMEOUT_S = _settings.http_connect_timeout
+READ_TIMEOUT_S = _settings.http_read_timeout
+WRITE_TIMEOUT_S = _settings.http_write_timeout
+POOL_TIMEOUT_S = _settings.http_pool_timeout
 
-MAX_CONNECTIONS = int(os.getenv("HTTP_MAX_CONNECTIONS", "30"))
-MAX_KEEPALIVE_CONNECTIONS = int(os.getenv("HTTP_MAX_KEEPALIVE_CONNECTIONS", "15"))
-KEEPALIVE_EXPIRY_S = float(os.getenv("HTTP_KEEPALIVE_EXPIRY", "30.0"))
+MAX_CONNECTIONS = _settings.http_max_connections
+MAX_KEEPALIVE_CONNECTIONS = _settings.http_max_keepalive_connections
+KEEPALIVE_EXPIRY_S = _settings.http_keepalive_expiry
 
-# WebSocket backend addresses (host:port/path)
-WS_XARM_URL = os.getenv("WS_XARM_URL", "ws://192.168.1.220:18333/ws")
-WS_COLOR_CAMERA_URL = os.getenv("WS_COLOR_CAMERA_URL", "ws://192.168.1.10:8188/janus-ws")
-WS_DEPTH_CAMERA_URL = os.getenv("WS_DEPTH_CAMERA_URL", "ws://192.168.1.55:8188/janus-ws")
+WS_XARM_URL = _settings.ws_xarm_url
+WS_COLOR_CAMERA_URL = _settings.ws_color_camera_url
+WS_DEPTH_CAMERA_URL = _settings.ws_depth_camera_url
 
-RETRY_ATTEMPTS = int(os.getenv("HTTP_RETRY_ATTEMPTS", "1"))
-RETRY_BACKOFF_S = float(os.getenv("HTTP_RETRY_BACKOFF", "0.15"))
+RETRY_ATTEMPTS = _settings.http_retry_attempts
+RETRY_BACKOFF_S = _settings.http_retry_backoff
 
 # ── Camera-specific HTTP client (isolated pool) ────────────────
-CAM_CONNECT_TIMEOUT_S = float(os.getenv("CAM_CONNECT_TIMEOUT", "2.0"))
-CAM_READ_TIMEOUT_S = float(os.getenv("CAM_READ_TIMEOUT", "8.0"))
-CAM_WRITE_TIMEOUT_S = float(os.getenv("CAM_WRITE_TIMEOUT", "8.0"))
-CAM_POOL_TIMEOUT_S = float(os.getenv("CAM_POOL_TIMEOUT", "2.0"))
-CAM_MAX_CONNECTIONS = int(os.getenv("CAM_MAX_CONNECTIONS", "20"))
-CAM_MAX_KEEPALIVE = int(os.getenv("CAM_MAX_KEEPALIVE", "10"))
+CAM_CONNECT_TIMEOUT_S = _settings.cam_connect_timeout
+CAM_READ_TIMEOUT_S = _settings.cam_read_timeout
+CAM_WRITE_TIMEOUT_S = _settings.cam_write_timeout
+CAM_POOL_TIMEOUT_S = _settings.cam_pool_timeout
+CAM_MAX_CONNECTIONS = _settings.cam_max_connections
+CAM_MAX_KEEPALIVE = _settings.cam_max_keepalive
 
-# Services that use the camera HTTP client instead of the main one
-CAMERA_SERVICES = frozenset(s.strip() for s in os.getenv(
-    "CAMERA_SERVICES", "color_camera,depth_camera"
-).split(",") if s.strip())
+CAMERA_SERVICES = frozenset(
+    s.strip() for s in _settings.camera_services_csv.split(",") if s.strip()
+)
 
 # ── Per-service concurrency (asyncio.Semaphore) ────────────────
-# Max in-flight proxy requests per service. Prevents one slow service
-# from monopolizing the single worker.
-DEFAULT_SERVICE_CONCURRENCY = int(os.getenv("DEFAULT_SERVICE_CONCURRENCY", "10"))
-CAMERA_SERVICE_CONCURRENCY = int(os.getenv("CAMERA_SERVICE_CONCURRENCY", "15"))
+DEFAULT_SERVICE_CONCURRENCY = _settings.default_service_concurrency
+CAMERA_SERVICE_CONCURRENCY = _settings.camera_service_concurrency
 
-# Per-service concurrency overrides: SERVICE_<NAME>_CONCURRENCY=N
-# e.g. SERVICE_SYMOVO_CONCURRENCY=5
+
 def _service_concurrency(name: str) -> int:
     env_key = f"SERVICE_{name.replace('-', '_').upper()}_CONCURRENCY"
     val = os.getenv(env_key)
@@ -118,17 +220,14 @@ SERVICE_CONCURRENCY: Dict[str, int] = {
 }
 
 # ── WebSocket proxy limits ─────────────────────────────────────
-# 10 clients × 2 streams (color+depth) + xarm = ~21, set to 30 with headroom
-WS_MAX_CONCURRENT = int(os.getenv("WS_MAX_CONCURRENT", "30"))
-WS_ACQUIRE_TIMEOUT_S = float(os.getenv("WS_ACQUIRE_TIMEOUT", "5.0"))  # wait for a slot before rejecting
-WS_CONNECT_TIMEOUT_S = float(os.getenv("WS_CONNECT_TIMEOUT", "5.0"))
-WS_TOTAL_TIMEOUT_S = float(os.getenv("WS_TOTAL_TIMEOUT", "3600.0"))  # 1 hour max per WS session
+WS_MAX_CONCURRENT = _settings.ws_max_concurrent
+WS_ACQUIRE_TIMEOUT_S = _settings.ws_acquire_timeout
+WS_CONNECT_TIMEOUT_S = _settings.ws_connect_timeout
+WS_TOTAL_TIMEOUT_S = _settings.ws_total_timeout
 
 # ── HTTP proxy request lifecycle ──────────────────────────────
-# Connect timeout covers semaphore acquisition + upstream connection + headers.
-PROXY_CONNECT_TIMEOUT_S = float(os.getenv("PROXY_CONNECT_TIMEOUT", "8.0"))
-# Body timeout covers streaming the response body back to the client.
-PROXY_BODY_TIMEOUT_S = float(os.getenv("PROXY_BODY_TIMEOUT", "15.0"))
+PROXY_CONNECT_TIMEOUT_S = _settings.proxy_connect_timeout
+PROXY_BODY_TIMEOUT_S = _settings.proxy_body_timeout
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -143,31 +242,30 @@ HOP_BY_HOP_HEADERS = {
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-DEFAULT_HUB_BASE_URL = os.getenv("DEFAULT_HUB_BASE_URL")
-DEFAULT_ROBOT_ID = os.getenv("DEFAULT_ROBOT_ID")
-DEFAULT_ROBOT_API_KEY = os.getenv("DEFAULT_ROBOT_API_KEY")
-DEFAULT_ROBOT_DISPLAY_NAME = os.getenv("DEFAULT_ROBOT_DISPLAY_NAME")
-ROBOT_API_KEY_FILE = os.getenv("ROBOT_API_KEY_FILE")
+DEFAULT_HUB_BASE_URL = _settings.default_hub_base_url
+DEFAULT_ROBOT_ID = _settings.default_robot_id
+DEFAULT_ROBOT_API_KEY = _settings.default_robot_api_key
+DEFAULT_ROBOT_DISPLAY_NAME = _settings.default_robot_display_name
+ROBOT_API_KEY_FILE = _settings.robot_api_key_file
 
-PUBLIC_HOST = os.getenv("PUBLIC_HOST", "192.168.1.10")
+PUBLIC_HOST = _settings.public_host
 
 ALLOWED_ORIGINS = [
-    os.getenv("FRONTEND_ORIGIN", f"http://{PUBLIC_HOST}:8401"),
-    "http://localhost:8401",
-    "http://127.0.0.1:8401",
+    _settings.frontend_origin or f"http://{PUBLIC_HOST}:{PORTS.FRONTEND}",
+    f"http://localhost:{PORTS.FRONTEND}",
+    f"http://127.0.0.1:{PORTS.FRONTEND}",
 ]
-_extra_origins = os.getenv("ALLOWED_ORIGINS")
-if _extra_origins:
-    ALLOWED_ORIGINS.extend([o.strip() for o in _extra_origins.split(",") if o.strip()])
+if _settings.allowed_origins_csv:
+    ALLOWED_ORIGINS.extend([o.strip() for o in _settings.allowed_origins_csv.split(",") if o.strip()])
 ALLOWED_ORIGINS = list(dict.fromkeys([o for o in ALLOWED_ORIGINS if o]))
 
-ALLOW_INSECURE_TLS = os.getenv("ALLOW_INSECURE_TLS", "0") == "1"
+ALLOW_INSECURE_TLS = _settings.allow_insecure_tls
 
-MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", str(50 * 1024 * 1024)))  # 50 MB
+MAX_REQUEST_BODY_BYTES = _settings.max_request_body_bytes
 
-READINESS_CHECK_SERVICES = _bool_env("READINESS_CHECK_SERVICES", True)
-READINESS_CHECK_AUTH = _bool_env("READINESS_CHECK_AUTH", True)
-READINESS_CHECK_TIMEOUT_S = float(os.getenv("READINESS_CHECK_TIMEOUT", "2.5"))
+READINESS_CHECK_SERVICES = _settings.readiness_check_services
+READINESS_CHECK_AUTH = _settings.readiness_check_auth
+READINESS_CHECK_TIMEOUT_S = _settings.readiness_check_timeout
 
 
 def validate_runtime_config() -> None:

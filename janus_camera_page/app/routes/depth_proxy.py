@@ -152,7 +152,7 @@ async def proxy_depth_favicon(request: Request) -> Response:
 def _depth_ws_url() -> str:
     """Compute the upstream WS URL for the depth camera's Janus."""
     settings = get_settings()
-    base = settings.depth_camera_url.rstrip("/")
+    base = settings.depth_cam_url.rstrip("/")
     # Convert http→ws, https→wss
     if base.startswith("https://"):
         ws_base = "wss://" + base[len("https://"):]

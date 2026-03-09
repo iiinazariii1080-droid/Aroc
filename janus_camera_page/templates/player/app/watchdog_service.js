@@ -65,7 +65,8 @@
       const spanMs = now - oldest;
       if (spanMs <= 0) return 0;
 
-      return (count / spanMs) * 1000;
+      // FPS = (intervals / span) * 1000; intervals = count - 1
+      return ((count - 1) / spanMs) * 1000;
     }
 
     /**
@@ -78,7 +79,10 @@
     }
 
     start(){
-      if (this._timer != null) return;
+      if (this._timer != null) {
+        this.clock.clearInterval(this._timer);
+        this._timer = null;
+      }
       this._lastFrameAt = this._lastFrameAt || this.clock.nowMs();
       this._timer = this.clock.setInterval(() => {
         const now = this.clock.nowMs();
@@ -86,7 +90,7 @@
 
         // Classic no-frame watchdog
         if (age > this.cfg.noFrameThresholdMs) {
-          this.onTimeout(age);
+          try { this.onTimeout(age); } catch (e) { console.error('[watchdog] onTimeout threw:', e); }
           return; // no-frame already triggers recovery; skip FPS check
         }
 
@@ -100,7 +104,7 @@
               this._fpsDropSince = now;
             } else if (!this._fpsDropFired && (now - this._fpsDropSince) >= thresholdMs) {
               this._fpsDropFired = true;
-              this.onFpsDrop(fps);
+              try { this.onFpsDrop(fps); } catch (e) { console.error('[watchdog] onFpsDrop threw:', e); }
             }
           } else {
             // FPS recovered — reset latch

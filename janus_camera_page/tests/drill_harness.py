@@ -197,3 +197,145 @@ class TestDrill05_HealthzSLO:
         p95 = sorted(times)[int(len(times) * 0.95)]
         assert p95 < 500, f"/healthz p95={p95:.0f}ms > 500ms SLO"
         print(f"  ✓ /healthz latency p95={p95:.0f}ms")
+
+
+# ── Extended drills (06–10) ──────────────────────────────────────────
+
+DEPTH_NODE_IP = os.getenv("DRILL_DEPTH_NODE", "192.168.1.55")
+DEPTH_BASE_URL = f"http://{DEPTH_NODE_IP}:{API_PORT}"
+
+
+def _ssh_depth(cmd: str, timeout: int = 15) -> str:
+    """Run command on the depth node (.55) via SSH."""
+    import paramiko
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(DEPTH_NODE_IP, username=SSH_USER, password=SSH_PASS, timeout=10)
+    try:
+        stdin, stdout, stderr = client.exec_command(
+            f"echo '{SSH_PASS}' | sudo -S {cmd}",
+            timeout=timeout,
+        )
+        return stdout.read().decode()
+    finally:
+        client.close()
+
+
+def _wait_depth_healthy(timeout: int = RECOVERY_TIMEOUT) -> float:
+    """Poll depth node /healthz until 200 or timeout."""
+    start = time.monotonic()
+    deadline = start + timeout
+    while time.monotonic() < deadline:
+        try:
+            r = httpx.get(f"{DEPTH_BASE_URL}/healthz", timeout=5)
+            if r.status_code == 200:
+                return time.monotonic() - start
+        except Exception:
+            pass
+        time.sleep(POLL_INTERVAL)
+    pytest.fail(f"Depth node did not recover within {timeout}s")
+
+
+class TestDrill06_ColdBootE2E:
+    """Drill 6: Cold-boot both nodes → measure time-to-first-frame."""
+
+    def test_cold_boot_ttff(self):
+        # Reboot color node
+        _ssh_cmd("systemctl reboot", timeout=5)
+        time.sleep(30)  # wait for reboot
+        recovery_sec = _wait_healthy(timeout=180)
+        assert recovery_sec < 120, f"Color node cold-boot took {recovery_sec:.1f}s (budget: 120s)"
+
+        # Verify stream is publishing frames
+        r = httpx.get(f"{BASE_URL}/health/stream", timeout=10)
+        assert r.status_code == 200
+        print(f"  ✓ Cold boot → first frame in {recovery_sec:.1f}s")
+
+
+class TestDrill07_DepthNodeIsolation:
+    """Drill 7: Kill depth node network → color node stays NOMINAL."""
+
+    def test_depth_isolation_no_cascade(self):
+        _wait_healthy(timeout=30)
+
+        # Block traffic from depth node to color node
+        _ssh_cmd(f"iptables -I INPUT -s {DEPTH_NODE_IP} -j DROP")
+        time.sleep(20)
+
+        # Color node must remain healthy (depth proxy returns 502 but
+        # the color stream is independent)
+        r = httpx.get(f"{BASE_URL}/healthz", timeout=5)
+        assert r.status_code == 200, "Color node should remain healthy when depth is isolated"
+
+        mode = _get_mode()
+        assert mode in ("nominal", "degraded"), f"Expected nominal/degraded, got {mode}"
+
+        # Cleanup
+        _ssh_cmd(f"iptables -D INPUT -s {DEPTH_NODE_IP} -j DROP")
+        print(f"  ✓ Depth isolation → color node stayed {mode}")
+
+
+class TestDrill08_UplinkFlap:
+    """Drill 8: Drop all WAN traffic for 20s → verify LOCAL_ONLY mode."""
+
+    def test_uplink_flap(self):
+        _wait_healthy(timeout=30)
+
+        # Block all WAN (non-LAN) egress
+        _ssh_cmd("iptables -I OUTPUT -d 0.0.0.0/0 ! -d 192.168.1.0/24 -j DROP")
+        time.sleep(20)
+
+        mode = _get_mode()
+        assert mode in ("local_only", "degraded"), f"Expected LOCAL_ONLY or degraded, got {mode}"
+
+        # Restore
+        _ssh_cmd("iptables -D OUTPUT -d 0.0.0.0/0 ! -d 192.168.1.0/24 -j DROP")
+        recovery_sec = _wait_healthy()
+        assert recovery_sec < RECOVERY_TIMEOUT
+        print(f"  ✓ Uplink flap → mode={mode}, recovery in {recovery_sec:.1f}s")
+
+
+class TestDrill09_DualFault:
+    """Drill 9: Kill Janus + pipeline simultaneously → verify ladder escalation."""
+
+    def test_dual_fault_escalation(self):
+        _wait_healthy(timeout=30)
+
+        # Inject two faults at once
+        _ssh_cmd("systemctl stop janus.service && pkill -9 ffmpeg || true")
+        time.sleep(10)
+
+        level = _get_ladder_level()
+        assert level >= 1, f"Dual fault should escalate ladder past level 0, got {level}"
+
+        # Wait for full recovery
+        recovery_sec = _wait_healthy(timeout=RECOVERY_TIMEOUT * 2)
+        final_mode = _get_mode()
+        print(f"  ✓ Dual fault → ladder level={level}, mode={final_mode}, "
+              f"recovery in {recovery_sec:.1f}s")
+
+
+class TestDrill10_DepthProxyFailover:
+    """Drill 10: Stop depth node service → verify color proxy returns 502."""
+
+    def test_depth_proxy_502(self):
+        _wait_healthy(timeout=30)
+
+        # Stop depth camera-page on .55
+        try:
+            _ssh_depth("systemctl stop janus-camera-page.service")
+        except Exception:
+            pytest.skip("Cannot SSH to depth node .55")
+
+        time.sleep(5)
+
+        # Color node depth proxy should return 502
+        r = httpx.get(f"{BASE_URL}/api/v1/depth_camera/healthz", timeout=10)
+        assert r.status_code == 502, f"Expected 502 from depth proxy, got {r.status_code}"
+
+        # Restore
+        _ssh_depth("systemctl start janus-camera-page.service")
+        time.sleep(5)
+        r2 = httpx.get(f"{BASE_URL}/api/v1/depth_camera/healthz", timeout=10)
+        assert r2.status_code == 200
+        print("  ✓ Depth proxy failover → 502 while down, 200 after restart")

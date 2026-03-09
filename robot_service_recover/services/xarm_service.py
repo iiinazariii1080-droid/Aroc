@@ -2,6 +2,7 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from shared_config.network import get_service_url
 import aiohttp
 import asyncio
 import argparse
@@ -21,7 +22,7 @@ class XarmManipulatorClient:
                 from core.connection_config import web_server_ip, web_server_port  # type: ignore
                 base_url = f"http://{web_server_ip}:{web_server_port}"
             except Exception:
-                base_url = "http://192.168.1.10:8102"
+                base_url = get_service_url("xarm")
 
         self.base_url = base_url.rstrip("/")
         self._session: Optional[aiohttp.ClientSession] = None
@@ -172,7 +173,7 @@ class XarmManipulatorClient:
         return await self._get("/status")
 
 async def main():
-    url = "http://192.168.1.10:8102"
+    url = get_service_url("xarm")
 
     status = None
     with XarmManipulatorClient(base_url=url) as client:

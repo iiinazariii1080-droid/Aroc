@@ -2,6 +2,7 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from shared_config.network import get_service_url
 import aiohttp
 import asyncio
 import argparse
@@ -20,7 +21,7 @@ class IgusMotorClient:
                 from core.connection_config import web_server_ip, web_server_port  # type: ignore
                 base_url = f"http://{web_server_ip}:{web_server_port}"
             except Exception:
-                base_url = "http://192.168.1.10:8101"
+                base_url = get_service_url("igus")
 
         self.base_url = base_url.rstrip("/")
         self._session: Optional[aiohttp.ClientSession] = None
@@ -217,7 +218,7 @@ class IgusMotorClient:
 
 
 async def main():
-    url = "http://192.168.1.10:8101"
+    url = get_service_url("igus")
 
     status = None
     with IgusMotorClient(base_url=url) as client:

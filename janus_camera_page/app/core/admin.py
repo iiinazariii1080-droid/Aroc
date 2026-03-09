@@ -6,7 +6,7 @@ import os
 from fastapi import HTTPException, Request
 
 ADMIN_TOKEN = os.getenv("CAM_ADMIN_TOKEN", "change-me")
-_ENFORCE = os.getenv("CAM_ADMIN_ENFORCE", "0") == "1"
+_ENFORCE = os.getenv("CAM_ADMIN_ENFORCE", "1") == "1"
 
 logger = logging.getLogger("admin")
 
@@ -15,22 +15,23 @@ async def require_admin(request: Request) -> None:
     """
     Admin gate for privileged endpoints.
 
-    When ``CAM_ADMIN_ENFORCE=1`` the client **must** present a valid
-    ``X-Admin-Token`` header matching ``CAM_ADMIN_TOKEN``.
-    When enforcement is off (default for backward compatibility), the
-    default token is injected into ``request.state`` but the check is
-    permissive — a warning is logged instead.
+    When ``CAM_ADMIN_ENFORCE=1`` (default) the client **must** present a
+    valid ``X-Admin-Token`` header matching ``CAM_ADMIN_TOKEN``.
+    Set ``CAM_ADMIN_ENFORCE=0`` to disable enforcement for local
+    development only.
 
-    Set ``CAM_ADMIN_ENFORCE=1`` and a strong ``CAM_ADMIN_TOKEN`` in
-    production for rover-grade deployments.
+    Set a strong ``CAM_ADMIN_TOKEN`` in production via
+    ``camera-secrets.env`` for rover-grade deployments.
     """
     supplied = request.headers.get("X-Admin-Token", "")
 
     if _ENFORCE:
         if ADMIN_TOKEN == "change-me":
-            logger.error(
-                "CAM_ADMIN_ENFORCE=1 but CAM_ADMIN_TOKEN is the default. "
-                "Set a strong token before enabling enforcement."
+            raise HTTPException(
+                status_code=503,
+                detail="Admin endpoint disabled: CAM_ADMIN_TOKEN is still "
+                       "the default placeholder. Set a strong token in "
+                       "camera-secrets.env before using admin routes.",
             )
         if supplied != ADMIN_TOKEN:
             raise HTTPException(status_code=403, detail="Invalid admin token")

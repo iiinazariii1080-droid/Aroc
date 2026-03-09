@@ -18,6 +18,7 @@ from app.config import settings
 from services.event_bus import EventBus, event_bus
 from services import charger_workflow
 from services.navigation_progress import update_session_from_current
+from services.safety_state_tracker import SafetyStateTracker
 from domain.events import (
     StateProgressEvent,
     ResultSuccessEvent,
@@ -42,6 +43,7 @@ class StatusPublisher:
         self.symovo_client = symovo_client
         self.mqtt_adapter = mqtt_adapter
         self.bus = bus
+        self.safety_tracker = SafetyStateTracker()
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._transport_tasks: Dict[str, tuple[str, asyncio.Task]] = {}
@@ -840,6 +842,10 @@ class StatusPublisher:
                             await state_store.set_last_raw_status(raw_status)
                             _LOGGER.debug("Cached raw status from controller")
                             consecutive_errors = 0
+                            # Evaluate safety state and publish on transition / heartbeat
+                            safety = self.safety_tracker.evaluate(raw_status)
+                            if safety is not None and self.mqtt_adapter is not None:
+                                await self.mqtt_adapter.publish_safety_state(safety.to_dict())
                         else:
                             _LOGGER.warning("status_uncached() returned non-dict: %s", type(raw_status))
                     except asyncio.CancelledError:

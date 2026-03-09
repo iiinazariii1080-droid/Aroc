@@ -4,6 +4,9 @@ metadata:
   name: robot-service-config
 data:
   # Application YAML configuration consumed by app/config.py
+  # NOTE: Override these values per-deployment via Kustomize/Helm.
+  # Env var equivalents: SERVER_IP, IGUS_CONTAINER_IP, XARM_CONTAINER_IP,
+  # SYMOVO_NAV2ADAPTER_HOST, DEPTH_CAMERA_IP, XARM_WS_URL
   config.yaml: |
     # Base server IP (used as fallback for service IPs below)
     server_ip: 127.0.0.1
@@ -18,7 +21,8 @@ data:
     symovo_container_ip: 127.0.0.1
     symovo_container_port: 7905
 
-    depth_camera_container_ip: 192.168.1.55
+    # Depth camera lives on physical LAN — set per-cluster
+    depth_camera_container_ip: 192.168.1.55  # override: DEPTH_CAMERA_IP
     depth_camera_container_port: 8000
 
     # Joystick defaults (HTTP)

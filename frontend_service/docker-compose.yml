@@ -13,7 +13,7 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
       - ALLOWED_ORIGINS=*
-      - API_GATEWAY_URL=http://192.168.1.10:8201
+      - API_GATEWAY_URL=http://${HOST_LAN_IP:-192.168.1.10}:${API_GATEWAY_PORT:-8201}
     restart: unless-stopped
     logging:
       driver: json-file

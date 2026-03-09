@@ -29,7 +29,7 @@ from models.base_types import TaskStatus
 from models.types import ActionResponse,JoystickCommand,JoystickFrame
 import app.robot_scripts as robot
 from typing import Any, Optional
-from routes.decorators import safe_getter, tasked_getter, task_manager
+from routes.decorators import safe_getter, tasked_getter, task_manager, check_safety_lockout
 import asyncio
 import json
 import time
@@ -44,6 +44,7 @@ from app.config import (
     JOYSTICK_MODE,
     SYMOVO_TELEOP_MOVE_URL,
     SYMOVO_DRIVE_MODE_URL,
+    SAFETY_STATE_URL,
 )
 import aiohttp
 
@@ -163,6 +164,7 @@ def _to_obj(params_dict: dict) -> SimpleNamespace:
 )
 @safe_getter(ActionResponse)
 async def joystick_frame(request: Request, frame: JoystickFrame):
+    await check_safety_lockout()
     payload = {"ts": frame.ts, "axes": frame.axes, "buttons": frame.buttons, "ttl": frame.ttl}
     data, error_msg = _prepare_frame_payload(payload)
     if error_msg:
@@ -174,6 +176,17 @@ async def joystick_frame(request: Request, frame: JoystickFrame):
 async def joystick_connect(websocket: WebSocket):
     await websocket.accept()
     app_state = websocket.app.state
+
+    # Safety lockout check — reject WS early if E-Stop active
+    try:
+        await check_safety_lockout()
+    except Exception as exc:
+        await websocket.send_json(
+            {"type": "ack", "seq": None, "success": False, "error": f"safety_lockout: {exc}"}
+        )
+        await websocket.close(code=1008)
+        return
+
     if getattr(app_state, "joystick_pipeline", None) is None:
         await websocket.send_json(
             {"type": "ack", "seq": None, "success": False, "error": "joystick_pipeline_unavailable"}
@@ -721,3 +734,88 @@ async def cancel_task(task_id: str):
 async def cancel_current_task():
     tid = task_manager.current_id()
     return await task_manager.cancel(tid) if tid else TaskStatusResponse(status=TaskStatus.NOT_FOUND, result=None)
+
+
+# ----------------------------
+# Safety recovery
+# ----------------------------
+
+import logging as _logging
+_safety_log = _logging.getLogger("robot_service.safety_recover")
+
+
+@router.post(
+    "/safety/recover",
+    summary="Attempt sequential recovery from safety lockout",
+    description=(
+        "After E-Stop release / safety relay restoration, call this endpoint to "
+        "clear faults on all subsystems and re-enable motion. Steps: "
+        "1) verify safety relay closed, 2) igus fault_reset, "
+        "3) xArm recover + enable_motion, 4) drive_mode enable."
+    ),
+)
+async def safety_recover():
+    steps: list[dict] = []
+
+    # Step 1 — verify safety relay is closed
+    relay_ok = False
+    try:
+        timeout = aiohttp.ClientTimeout(total=3)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(SAFETY_STATE_URL) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("safety_lockout"):
+                        reason = data.get("reason", "safety lockout active")
+                        steps.append({"name": "check_safety_relay", "status": "failed", "error": reason})
+                        return {"success": False, "steps": steps, "message": "Safety relay still open — release E-Stop first"}
+                    relay_ok = True
+                    steps.append({"name": "check_safety_relay", "status": "ok"})
+                else:
+                    steps.append({"name": "check_safety_relay", "status": "skipped", "reason": f"nav2adapter returned {resp.status}"})
+    except Exception as exc:
+        steps.append({"name": "check_safety_relay", "status": "skipped", "reason": str(exc)})
+
+    # Step 2 — igus fault_reset
+    try:
+        await robot.lift.fault_reset()
+        steps.append({"name": "igus_fault_reset", "status": "ok"})
+    except Exception as exc:
+        _safety_log.warning("igus fault_reset failed: %s", exc)
+        steps.append({"name": "igus_fault_reset", "status": "failed", "error": str(exc)})
+
+    # Step 3 — xArm recover + enable_motion
+    try:
+        await robot.manipulator.fault_reset()
+        steps.append({"name": "xarm_recover", "status": "ok"})
+    except Exception as exc:
+        _safety_log.warning("xarm recover failed: %s", exc)
+        steps.append({"name": "xarm_recover", "status": "failed", "error": str(exc)})
+
+    try:
+        await robot.manipulator.enable_motion()
+        steps.append({"name": "xarm_enable_motion", "status": "ok"})
+    except Exception as exc:
+        _safety_log.warning("xarm enable_motion failed: %s", exc)
+        steps.append({"name": "xarm_enable_motion", "status": "failed", "error": str(exc)})
+
+    # Step 4 — drive_mode enable
+    if SYMOVO_DRIVE_MODE_URL:
+        try:
+            url = f"{SYMOVO_DRIVE_MODE_URL.rstrip('/').rstrip('?')}?enable=true"
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.put(url) as resp:
+                    if resp.status < 400:
+                        steps.append({"name": "drive_mode_enable", "status": "ok"})
+                    else:
+                        body = await resp.text()
+                        steps.append({"name": "drive_mode_enable", "status": "failed", "error": f"HTTP {resp.status}: {body[:200]}"})
+        except Exception as exc:
+            _safety_log.warning("drive_mode enable failed: %s", exc)
+            steps.append({"name": "drive_mode_enable", "status": "failed", "error": str(exc)})
+    else:
+        steps.append({"name": "drive_mode_enable", "status": "skipped", "reason": "SYMOVO_DRIVE_MODE_URL not set"})
+
+    all_ok = all(s["status"] == "ok" for s in steps)
+    _safety_log.info("Safety recovery %s: %s", "succeeded" if all_ok else "partial", steps)
+    return {"success": all_ok, "steps": steps}

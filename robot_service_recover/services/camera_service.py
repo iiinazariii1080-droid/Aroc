@@ -1,6 +1,7 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from shared_config.network import DEVICES
 import aiohttp
 import asyncio
 import json
@@ -18,7 +19,7 @@ class CameraClient:
         operation_timeout_seconds: Optional[float] = None,
     ):
         # Default camera API base URL
-        self.base_url = (base_url or "http://192.168.1.55:8000").rstrip("/")
+        self.base_url = (base_url or f"http://{DEVICES.DEPTH_CAMERA_IP}:8000").rstrip("/")
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)

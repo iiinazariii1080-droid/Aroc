@@ -531,6 +531,36 @@ class MqttAdapter:
             self._mark_disconnected("unexpected error publishing position status", e)
             return
 
+    async def publish_safety_state(self, safety_state: dict) -> None:
+        """Publish safety state with reliable delivery (QoS=1, retained)."""
+        if not self._connected or not self.client:
+            reliability_metrics.inc("mqtt.publish.safety.skipped_disconnected")
+            return
+
+        topic = self._get_status_topic("safety")
+        payload = json.dumps(safety_state, ensure_ascii=False)
+        started = time.perf_counter()
+
+        try:
+            try:
+                await self.client.publish(topic, payload, qos=1, retain=True)
+            except TypeError:
+                await self.client.publish(topic, payload)
+            reliability_metrics.inc("mqtt.publish.safety.success")
+            reliability_metrics.observe_duration(
+                "mqtt.publish.safety.latency_s",
+                time.perf_counter() - started,
+            )
+            _LOGGER.debug("[MQTT OUT] %s -> %s", topic, payload)
+        except (MqttCodeError, OSError) as e:
+            reliability_metrics.inc("mqtt.publish.safety.failure")
+            self._mark_disconnected("publish safety state failed", e)
+            return
+        except Exception as e:
+            reliability_metrics.inc("mqtt.publish.safety.failure")
+            self._mark_disconnected("unexpected error publishing safety state", e)
+            return
+
     async def publish_event(self, kind: str, event: dict) -> None:
         """Publish an ack/state/result event."""
         if not self._connected or not self.client:

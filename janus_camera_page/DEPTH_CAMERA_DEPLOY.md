@@ -92,6 +92,7 @@ Environment=JANUS_MOUNT_ID=1306
 Environment=CAM_ENV_PATH=/etc/robot/cam-depth.env
 Environment=CAM_ENV_LOCK_PATH=/tmp/cam-depth.env.lock
 Environment=CAM_DEVICE=/dev/cam-depth
+Environment=PYTHONPATH=/home/boris/robot
 ```
 
 ### watchdog.conf
@@ -100,6 +101,7 @@ Environment=CAM_DEVICE=/dev/cam-depth
 [Service]
 Environment=CAM_SERVICE=realsense-mux.service
 Environment=CAM_WATCHDOG=1
+Environment=CAM_SNAPSHOT_WATCHDOG=0
 Environment=CAM_WATCHDOG_INTERVAL=8
 Environment=CAM_WATCHDOG_STALE_MS=8000
 ```
@@ -220,7 +222,7 @@ USB device lost
 | Joystick | Enabled (relay on server) | Disabled (no relay) |
 | TextRoom | Enabled | Disabled |
 | Depth API | N/A | `/depth?x=&y=` → meters |
-| ICE Policy | `relay` (TURN only) | `all` (default) |
+| ICE Policy | `relay` (TURN only) | `relay` (hardcoded for depth) |
 | Watchdog target | rtp-rgb@cam-rgb.service | realsense-mux.service |
 
 ---

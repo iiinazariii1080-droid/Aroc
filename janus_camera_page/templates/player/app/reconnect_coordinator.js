@@ -334,12 +334,18 @@
         this._settleStartTimeoutTimer = this.clock.setTimeout(() => {
           this._settleStartTimeoutTimer = null;
           if (this._settleTimer) return; // startSettleWindow() was already called
+          if (token !== this._ctx.getToken()) return; // stale timer from previous cycle
+          if (!this._ctx.shouldContinue()) { this._inFlight = false; return; }
           this.log.debug('reconnect_settle_start_timeout', { attempt: this._attempt, token });
           this._inFlight = false;
           this._scheduleNext();
         }, settleStartTimeoutMs);
       } catch (e) {
         if (timeoutId != null) this.clock.clearTimeout(timeoutId);
+        if (this._settleStartTimeoutTimer) {
+          this.clock.clearTimeout(this._settleStartTimeoutTimer);
+          this._settleStartTimeoutTimer = null;
+        }
         const errMsg = String(e?.message || e);
         this.log.warn('reconnect_attempt_failed', { attempt: this._attempt, error: errMsg, token });
         // On timeout, escalate to HARD so next attempt skips straight to RECREATE_SESSION.

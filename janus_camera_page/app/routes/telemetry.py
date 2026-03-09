@@ -10,6 +10,7 @@ import logging
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("telemetry")
@@ -47,8 +48,8 @@ class TelemetryPayload(BaseModel):
 
 # ── Endpoint ────────────────────────────────────────────────────────
 
-@router.post("/telemetry", status_code=204, summary="Ingest client WebRTC telemetry")
-async def ingest_telemetry(payload: TelemetryPayload, request: Request) -> None:
+@router.post("/telemetry", status_code=204, response_class=Response, summary="Ingest client WebRTC telemetry")
+async def ingest_telemetry(payload: TelemetryPayload, request: Request) -> Response:
     """Accept a telemetry report from the browser player.
 
     Data is logged as JSON and pushed into Prometheus metrics.
@@ -68,12 +69,29 @@ async def ingest_telemetry(payload: TelemetryPayload, request: Request) -> None:
         from app.routes.metrics import (
             ice_connects_total,
             ice_connect_duration_seconds,
+            ttff_seconds,
+            client_packet_loss_ratio,
+            client_frames_decoded_total,
+            client_last_report_age_seconds,
         )
 
         if payload.event == "ice_connected":
             ice_connects_total.inc()
             if payload.ice_connect_ms is not None:
                 ice_connect_duration_seconds.observe(payload.ice_connect_ms / 1000.0)
+            if payload.time_to_first_frame_ms is not None:
+                ttff_seconds.observe(payload.time_to_first_frame_ms / 1000.0)
+
+        if payload.event == "stats_report":
+            client_last_report_age_seconds.set(0)  # reset on each report
+            if payload.frames_decoded is not None:
+                client_frames_decoded_total.set(payload.frames_decoded)
+            if payload.packets_lost is not None and payload.packets_received:
+                total = (payload.packets_lost or 0) + payload.packets_received
+                if total > 0:
+                    client_packet_loss_ratio.set(payload.packets_lost / total)
 
     except Exception:
         pass  # metrics not available — non-fatal
+
+    return Response(status_code=204)

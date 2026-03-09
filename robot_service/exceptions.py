@@ -22,6 +22,10 @@ class InputError(RobotBaseError):
 class DeviceReadyError(RobotBaseError):
     pass
 
+class SafetyLockoutError(RobotBaseError):
+    """Safety lockout active (E-Stop / relay open). No motion commands allowed."""
+    pass
+
 class TransportMoveError(RobotBaseError):
     pass
 

@@ -13,6 +13,7 @@ Modes form a lattice:
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import threading
@@ -42,6 +43,10 @@ def _ensure_metrics():  # noqa: D401
     except Exception:  # pragma: no cover
         pass
     _metrics_loaded = True
+
+
+# Maximum time (seconds) to wait for a single mode listener callback
+_LISTENER_TIMEOUT_SEC = float(os.getenv("MODE_LISTENER_TIMEOUT_SEC", "5"))
 
 
 class SystemMode(str, Enum):
@@ -152,29 +157,13 @@ def mode_info() -> Dict[str, Any]:
         }
 
 
-def transition(target: SystemMode, reason: str) -> bool:
-    """
-    Transition to *target* mode.
-
-    Returns True if transition occurred, False if already in that mode.
-    Emits an FDIR event for every transition.
-    """
-    with _state.lock:
-        previous = _state.current
-        if previous == target:
-            return False
-
-        _state.current = target
-        _state.entered_at = time.time()
-        _state.reason = reason
-        listeners = list(_state.listeners)
-
+def _post_transition(previous: SystemMode, target: SystemMode, reason: str, listeners: list) -> None:
+    """Run side-effects after a state mutation (logging, metrics, callbacks)."""
     logger.warning(
         "MODE TRANSITION: %s → %s  reason=%s",
         previous.value, target.value, reason,
     )
 
-    # Update Prometheus metrics
     _ensure_metrics()
     if _system_mode_gauge is not None:
         _system_mode_gauge.set(target.level)
@@ -194,10 +183,38 @@ def transition(target: SystemMode, reason: str) -> bool:
 
     for cb in listeners:
         try:
-            cb(previous, target, reason)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(cb, previous, target, reason)
+                future.result(timeout=_LISTENER_TIMEOUT_SEC)
+        except concurrent.futures.TimeoutError:
+            logger.error(
+                "mode listener %s timed out after %.1fs during %s → %s",
+                getattr(cb, "__name__", repr(cb)),
+                _LISTENER_TIMEOUT_SEC,
+                previous.value, target.value,
+            )
         except Exception:
             logger.exception("mode listener error")
 
+
+def transition(target: SystemMode, reason: str) -> bool:
+    """
+    Transition to *target* mode.
+
+    Returns True if transition occurred, False if already in that mode.
+    Emits an FDIR event for every transition.
+    """
+    with _state.lock:
+        previous = _state.current
+        if previous == target:
+            return False
+
+        _state.current = target
+        _state.entered_at = time.time()
+        _state.reason = reason
+        listeners = list(_state.listeners)
+
+    _post_transition(previous, target, reason, listeners)
     return True
 
 
@@ -205,9 +222,15 @@ def degrade(reason: str) -> None:
     """Drop one level (NOMINAL→DEGRADED→LOCAL_ONLY→SAFE)."""
     with _state.lock:
         cur = _state.current
-    nxt_level = min(cur.level + 1, SystemMode.SAFE.level)
-    target = [m for m in SystemMode if m.level == nxt_level][0]
-    transition(target, reason)
+        nxt_level = min(cur.level + 1, SystemMode.SAFE.level)
+        target = [m for m in SystemMode if m.level == nxt_level][0]
+        if cur == target:
+            return
+        _state.current = target
+        _state.entered_at = time.time()
+        _state.reason = reason
+        listeners = list(_state.listeners)
+    _post_transition(cur, target, reason, listeners)
 
 
 def promote(target: SystemMode, reason: str) -> bool:
@@ -215,7 +238,13 @@ def promote(target: SystemMode, reason: str) -> bool:
     with _state.lock:
         if target.level >= _state.current.level:
             return False
-    return transition(target, reason)
+        previous = _state.current
+        _state.current = target
+        _state.entered_at = time.time()
+        _state.reason = reason
+        listeners = list(_state.listeners)
+    _post_transition(previous, target, reason, listeners)
+    return True
 
 
 def on_transition(callback: Callable[[SystemMode, SystemMode, str], None]) -> None:

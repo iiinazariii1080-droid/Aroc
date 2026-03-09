@@ -9,8 +9,8 @@ from functools import wraps
 T = TypeVar('T', bound=Callable[..., Awaitable[Any]])
 from fastapi import HTTPException, status
 
-from exceptions import DeviceBusyError, RobotBaseError, RobotError, InputError, DeviceError, Conflict, DeviceReadyError, DeviceConnectionError
-ALLOWED_ERRORS = (DeviceBusyError, RobotError, Conflict, DeviceError, InputError, DeviceReadyError, DeviceConnectionError)
+from exceptions import DeviceBusyError, RobotBaseError, RobotError, InputError, DeviceError, Conflict, DeviceReadyError, DeviceConnectionError, SafetyLockoutError
+ALLOWED_ERRORS = (DeviceBusyError, RobotError, Conflict, DeviceError, InputError, DeviceReadyError, DeviceConnectionError, SafetyLockoutError)
 
 def safe_getter(response_model: Type[Any]):
     def decorator(fn: Callable[..., Awaitable[Any]]):
@@ -28,6 +28,11 @@ def safe_getter(response_model: Type[Any]):
                 raise HTTPException(
                     status_code=status.HTTP_202_ACCEPTED,
                     detail={"error": str(e)}
+                )
+            except SafetyLockoutError as e:
+                raise HTTPException(
+                    status_code=423,
+                    detail={"error": str(e), "safety_lockout": True}
                 )
             except RobotError as e:
                 raise HTTPException(
@@ -172,6 +177,28 @@ class _TaskManager:
 task_manager = _TaskManager()
 
 
+import aiohttp
+import logging as _logging
+
+_safety_logger = _logging.getLogger("robot_service.safety")
+
+async def check_safety_lockout() -> None:
+    """Pre-flight check: query nav2adapter /safety/state. Raise SafetyLockoutError if locked."""
+    from app.config import SAFETY_STATE_URL
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(SAFETY_STATE_URL, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                if resp.status != 200:
+                    return  # nav2adapter unavailable — fail open (don't block operations)
+                data = await resp.json()
+    except Exception:
+        return  # network error — fail open
+    if data.get("safety_lockout"):
+        reason = data.get("reason", "safety lockout active")
+        _safety_logger.warning("Safety lockout active: %s", reason)
+        raise SafetyLockoutError(f"Safety lockout: {reason}")
+
+
 def tasked_getter(response_model: Type[Any]):
     """Decorator: runs wrapped async function as an exclusive background task.
 
@@ -183,6 +210,8 @@ def tasked_getter(response_model: Type[Any]):
         @wraps(fn)
         async def wrapper(*args, **kwargs):
             try:
+                await check_safety_lockout()
+
                 async def _factory():
                     return await fn(*args, **kwargs)
 
@@ -198,6 +227,11 @@ def tasked_getter(response_model: Type[Any]):
                 raise HTTPException(
                     status_code=status.HTTP_202_ACCEPTED,
                     detail={"error": str(e), "task_id": task_manager.current_id()}
+                )
+            except SafetyLockoutError as e:
+                raise HTTPException(
+                    status_code=423,
+                    detail={"error": str(e), "safety_lockout": True}
                 )
             except RobotError as e:
                 raise HTTPException(

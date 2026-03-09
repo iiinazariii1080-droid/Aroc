@@ -95,6 +95,20 @@
 | P2.9 | ~~CSP / frame-ancestors / security headers~~ | Client | ✅ DONE | `SecurityHeadersMiddleware` in `app/core/app.py` |
 | P2.10 | ~~Remove SSH password from deploy docs~~ | Security | ✅ DONE | DEPTH_CAMERA_DEPLOY.md, DEPLOY_COLOR_FRAME.md |
 
+### P3 — E2E provability & architecture clarity (v1.6)
+
+| # | Task | Domain | Status | Where |
+|---|------|--------|--------|-------|
+| P3.1 | ~~Formalize component roles (CF/TURN/Janus/FastAPI/.55)~~ | Architecture | ✅ DONE | Spec §1 "Component Roles" table |
+| P3.2 | ~~Cross-layer timeout contract (source of truth)~~ | Contract | ✅ DONE | Spec §9 "Timeout Contract" table |
+| P3.3 | ~~Stream-level health endpoint (`/health/stream`)~~ | Observability | ✅ DONE | `app/routes/system.py` |
+| P3.4 | ~~TTFF histogram + client loss/frames metrics~~ | Observability | ✅ DONE | `app/routes/metrics.py` + `telemetry.py` |
+| P3.5 | ~~Synthetic browser canary (Playwright)~~ | Verification | ✅ DONE | `scripts/browser_canary.py` |
+| P3.6 | ~~Grafana dashboards provisioned~~ | Observability | ✅ DONE | `monitoring/grafana-dashboard.json` |
+| P3.7 | ~~Alertmanager rules for SLO burn-rate~~ | Observability | ✅ DONE | `monitoring/camstack-alert-rules.yml` |
+| P3.8 | ~~External synthetic probe (cron outside LAN)~~ | Verification | ✅ DONE | `scripts/browser_canary.py --http-only --external` |
+| P3.9 | ~~Fault injection matrix — automated~~ | Verification | ✅ DONE | `scripts/fault_drills.py` (8 drills) |
+
 ---
 
 ## Critical Configuration Diffs (found during audit)

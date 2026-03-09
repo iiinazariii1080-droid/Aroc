@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import httpx
@@ -9,39 +10,43 @@ from fastapi.responses import Response
 from app.core.settings import get_settings
 
 _janus_client: httpx.AsyncClient | None = None
+_janus_client_lock = asyncio.Lock()
 
 
 async def start_client() -> None:
     global _janus_client
-    if _janus_client is not None:
-        return
-    _janus_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=5.0, read=90.0, write=30.0, pool=60.0),
-        limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
-        headers={"Connection": "keep-alive"},
-    )
+    async with _janus_client_lock:
+        if _janus_client is not None:
+            return
+        _janus_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=90.0, write=30.0, pool=60.0),
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+            headers={"Connection": "keep-alive"},
+        )
 
 
 async def stop_client() -> None:
     global _janus_client
-    if _janus_client is None:
-        return
-    await _janus_client.aclose()
-    _janus_client = None
+    async with _janus_client_lock:
+        if _janus_client is None:
+            return
+        await _janus_client.aclose()
+        _janus_client = None
 
 
 async def forward_request(request: Request) -> Response:
-    global _janus_client
     if _janus_client is None:
         await start_client()
-    assert _janus_client is not None
+    client = _janus_client
+    if client is None:
+        raise HTTPException(status_code=503, detail="Janus proxy client not ready")
 
     settings = get_settings()
     url = f"{settings.janus_http_base.rstrip('/')}/janus"
     if request.query_params:
         url = f"{url}?{request.query_params}"
     try:
-        resp = await _janus_client.request(
+        resp = await client.request(
             method=request.method,
             url=url,
             headers={k: v for k, v in request.headers.items() if k.lower() != "host"},

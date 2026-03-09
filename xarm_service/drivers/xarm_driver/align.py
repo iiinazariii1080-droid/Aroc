@@ -22,6 +22,7 @@ from xarm import version
 from xarm.wrapper import XArmAPI
 import sys
 import json
+import os
 import time
 import websocket
 import socket
@@ -213,7 +214,7 @@ class RobotMain(object):
 if __name__ == '__main__':
     try:
         RobotMain.pprint('xArm-Python-SDK Version:{}'.format(version.__version__))
-        arm = XArmAPI('192.168.1.220', baud_checkset=False)
+        arm = XArmAPI(os.getenv('XARM_IP', '192.168.1.220'), baud_checkset=False)
         robot_main = RobotMain(arm)
 
         if robot_main.run():

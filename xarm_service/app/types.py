@@ -63,6 +63,9 @@ class MoveWithToolParams(BaseModel):
     z_offset_mm: Parameters.offset_mm
     velocity_percent: Parameters.velocity_percent
     reset_faults: Parameters.reset_faults
+    roll_offset_deg: Optional[float] = Field(None, description="Roll offset in degrees")
+    pitch_offset_deg: Optional[float] = Field(None, description="Pitch offset in degrees")
+    yaw_offset_deg: Optional[float] = Field(None, description="Yaw offset in degrees")
 
 class ActionResponse(BaseModel):
     success: bool
@@ -81,6 +84,7 @@ class XarmStatusResponse(BaseModel):
     has_error: Parameters.has_error
     has_warn: Parameters.has_warn
     error_code: Parameters.error_code
+    safety_lockout_hint: bool = False
 
 class XarmMoveWithJointsDictParams(BaseModel):
     points: List[Joints]

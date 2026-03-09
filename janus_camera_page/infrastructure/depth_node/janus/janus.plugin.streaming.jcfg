@@ -5,7 +5,7 @@ general :
   load_all = "true";
   configs_folder = "/opt/janus/etc/janus/streams.d";
   allow_persistent = "true";
-  admin_key = "stream-admin-123";
+  admin_key = "__STREAM_ADMIN_KEY__";
 };
 
 rgb-1305: {

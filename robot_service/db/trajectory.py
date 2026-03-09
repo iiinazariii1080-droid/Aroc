@@ -70,6 +70,21 @@ def init_trajectory_table():
                 "maxReadErrors": 2,
                 "velocityPercent": 20
             },
+            "graspAnalysis": {
+                "enabled": False,
+                "abortOnCollision": False,
+                "minSealScore": 0.70,
+                "minSingleCupSeal": 0.50,
+                "allowSingleCupPick": True,
+                "maxRollDeg": 8.0,
+                "maxPitchDeg": 8.0,
+                "maxYawDeg": 30.0,
+                "yawSearchStepDeg": 5.0,
+                "collisionEnvelopeMm": 70,
+                "sealPerimeterPoints": 24,
+                "cupGridStepMm": 2.0,
+                "frameTtlMs": 5000
+            },
             "return": {"active": True}
         })
         c.execute("INSERT INTO trajectory (id, data) VALUES (1, ?)", (default_config,))

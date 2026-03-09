@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from shared_config.network import DEVICES, PORTS
+
 
 # ── Default response payloads ───────────────────────────────────────────────
 
@@ -51,7 +53,7 @@ DEPTH_CAMERA_HEALTH_OK = {"ok": True}
 
 # ── respx helpers (for httpx-based services) ─────────────────────────────
 
-def mock_xarm_service(router: Any, base: str = "http://192.168.1.10:8102") -> None:
+def mock_xarm_service(router: Any, base: str = f"http://{DEVICES.HOST_LAN_IP}:{PORTS.XARM}") -> None:
     """Register mock routes for xarm_service on a respx router."""
     router.get(f"{base}/health/live").respond(json=XARM_HEALTH_OK)
     router.get(f"{base}/health/ready").respond(json=XARM_READY_OK)
@@ -60,7 +62,7 @@ def mock_xarm_service(router: Any, base: str = "http://192.168.1.10:8102") -> No
     router.post(f"{base}/move/change_pose").respond(json={"success": True, "message": None})
 
 
-def mock_igus_service(router: Any, base: str = "http://192.168.1.10:8101") -> None:
+def mock_igus_service(router: Any, base: str = f"http://{DEVICES.HOST_LAN_IP}:{PORTS.IGUS}") -> None:
     """Register mock routes for igus_service on a respx router."""
     router.get(f"{base}/healthz").respond(json=IGUS_HEALTH_OK)
     router.get(f"{base}/status").respond(json=IGUS_STATUS_OK)
@@ -69,7 +71,7 @@ def mock_igus_service(router: Any, base: str = "http://192.168.1.10:8101") -> No
     router.post(f"{base}/stop").respond(json={"success": True})
 
 
-def mock_symovo_service(router: Any, base: str = "http://192.168.1.10:7905") -> None:
+def mock_symovo_service(router: Any, base: str = f"http://{DEVICES.HOST_LAN_IP}:{PORTS.SYMOVO}") -> None:
     """Register mock routes for nav2adapter (symovo) on a respx router."""
     router.get(f"{base}/healthz").respond(json=SYMOVO_HEALTH_OK)
     router.get(f"{base}/api/v1/robots/fahrdummy-01/pose").respond(json=SYMOVO_POSE_OK)
@@ -77,7 +79,7 @@ def mock_symovo_service(router: Any, base: str = "http://192.168.1.10:7905") -> 
     router.post(f"{base}/drive_mode").respond(json={"ok": True})
 
 
-def mock_depth_camera(router: Any, base: str = "http://192.168.1.55:8000") -> None:
+def mock_depth_camera(router: Any, base: str = f"http://{DEVICES.DEPTH_CAMERA_IP}:8000") -> None:
     """Register mock routes for depth camera service."""
     router.get(f"{base}/healthz").respond(json=DEPTH_CAMERA_HEALTH_OK)
     router.get(f"{base}/depth").respond(content=b"\x00" * (640 * 480 * 2))
@@ -93,7 +95,7 @@ def mock_all_services(router: Any) -> None:
 
 # ── aioresponses helpers (for aiohttp-based services like robot_service) ──
 
-def mock_xarm_service_aiohttp(m: Any, base: str = "http://192.168.1.10:8102") -> None:
+def mock_xarm_service_aiohttp(m: Any, base: str = f"http://{DEVICES.HOST_LAN_IP}:{PORTS.XARM}") -> None:
     """Register mock routes on an aioresponses instance."""
     m.get(f"{base}/health/live", payload=XARM_HEALTH_OK, repeat=True)
     m.get(f"{base}/health/ready", payload=XARM_READY_OK, repeat=True)
@@ -101,14 +103,14 @@ def mock_xarm_service_aiohttp(m: Any, base: str = "http://192.168.1.10:8102") ->
     m.post(f"{base}/move/change_joints", payload={"success": True}, repeat=True)
 
 
-def mock_igus_service_aiohttp(m: Any, base: str = "http://192.168.1.10:8101") -> None:
+def mock_igus_service_aiohttp(m: Any, base: str = f"http://{DEVICES.HOST_LAN_IP}:{PORTS.IGUS}") -> None:
     m.get(f"{base}/healthz", payload=IGUS_HEALTH_OK, repeat=True)
     m.get(f"{base}/status", payload=IGUS_STATUS_OK, repeat=True)
     m.post(f"{base}/move", payload={"success": True}, repeat=True)
     m.post(f"{base}/stop", payload={"success": True}, repeat=True)
 
 
-def mock_symovo_service_aiohttp(m: Any, base: str = "http://192.168.1.10:7905") -> None:
+def mock_symovo_service_aiohttp(m: Any, base: str = f"http://{DEVICES.HOST_LAN_IP}:{PORTS.SYMOVO}") -> None:
     m.get(f"{base}/healthz", payload=SYMOVO_HEALTH_OK, repeat=True)
     m.post(f"{base}/api/v1/robots/fahrdummy-01/move/speed", payload={"ok": True}, repeat=True)
     m.post(f"{base}/drive_mode", payload={"ok": True}, repeat=True)

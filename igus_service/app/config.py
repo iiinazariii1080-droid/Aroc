@@ -9,12 +9,14 @@ from drivers.dryve_d1.config.runtime_policy import (
 	default_unit_id_wildcard_tolerance,
 )
 
-# Legacy compatibility
-IGUS_MOTOR_IP = os.getenv("IGUS_MOTOR_IP", "82.165.177.194")
+from shared_config.network import DEVICES, PORTS
+
+# Legacy compatibility — defaults from shared_config
+IGUS_MOTOR_IP = os.getenv("IGUS_MOTOR_IP", DEVICES.IGUS_MOTOR_IP)
 IGUS_MOTOR_PORT = int(os.getenv("IGUS_MOTOR_PORT", "502"))
 
 # DryveD1 configuration
-DRYVE_HOST = os.getenv("DRYVE_HOST", os.getenv("IGUS_MOTOR_IP", "82.165.177.194"))
+DRYVE_HOST = os.getenv("DRYVE_HOST", os.getenv("IGUS_MOTOR_IP", DEVICES.IGUS_MOTOR_IP))
 DRYVE_PORT = int(os.getenv("DRYVE_PORT", os.getenv("IGUS_MOTOR_PORT", "502")))
 DRYVE_UNIT_ID = int(os.getenv("DRYVE_UNIT_ID", "0"))  # Per igus dryve D1 Modbus TCP Gateway telegram spec: Unit Identifier is not used; send 0 by default.
 

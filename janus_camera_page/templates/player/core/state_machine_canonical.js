@@ -114,7 +114,7 @@
               generation: snap.generation,
               reconnectAttempts: 0,
               webrtcUp: true,
-              firstFrameReceived: true,
+              firstFrameReceived: snap.firstFrameReceived || false,
               iceState: snap.iceState || 'new',
             },
             actions: [{ type: A.CANCEL_ALL_TIMERS }, { type: A.RENDER }],

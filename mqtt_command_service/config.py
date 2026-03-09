@@ -9,6 +9,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from paho.mqtt import client as mqtt_client
+from shared_config.network import PORTS
 
 # Load environment variables from .env file
 env_path = Path(__file__).parent / ".env"
@@ -116,12 +117,12 @@ def load_service_configs(local_ip: str, depth_camera_ip: str) -> dict[str, Servi
     if env.service_use_local:
         default_services.update(
             {
-                "robot": {"base_url": f"http://{local_ip}:8110", "watch_tasks": True},
-                "igus": {"base_url": f"http://{local_ip}:8101"},
-                "xarm": {"base_url": f"http://{local_ip}:8102"},
-                "symovo": {"base_url": f"http://{local_ip}:7905"},
-                "color_camera": {"base_url": f"http://{local_ip}:8900"},
-                "depth_camera": {"base_url": f"http://{depth_camera_ip}:8900"},
+                "robot": {"base_url": f"http://{local_ip}:{PORTS.ROBOT}", "watch_tasks": True},
+                "igus": {"base_url": f"http://{local_ip}:{PORTS.IGUS}"},
+                "xarm": {"base_url": f"http://{local_ip}:{PORTS.XARM}"},
+                "symovo": {"base_url": f"http://{local_ip}:{PORTS.SYMOVO}"},
+                "color_camera": {"base_url": f"http://{local_ip}:{PORTS.COLOR_CAMERA}"},
+                "depth_camera": {"base_url": f"http://{depth_camera_ip}:{PORTS.COLOR_CAMERA}"},
                 "mqtt": {"base_url": f"http://localhost:{api_port}"},
             }
         )

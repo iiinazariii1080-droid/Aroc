@@ -15,6 +15,7 @@ from models.api_types import ErrorStatus
 from services.state_store import state_store
 from app.dependencies import SymovoClient
 from app.config import settings
+from exceptions import DeviceConnectionError
 from models.api_types import (
     SymovoStatusResponse,
     GenericResponse,
@@ -145,7 +146,28 @@ async def get_status(client: SymovoClient) -> Any:
 )
 @safe_getter(GenericResponse)
 async def set_drive_mode(client: SymovoClient, enable: bool = True) -> Any:
-    result = await client.set_drive_mode(enable=enable)
+    try:
+        result = await client.set_drive_mode(enable=enable)
+    except DeviceConnectionError as e:
+        # 503 from controller means robot is physically not ready
+        # (waiting_for_scanner, drive_ready=false, charging, etc.)
+        # Enrich the error with state_flags if available.
+        detail = str(e)
+        try:
+            raw = await client.status_uncached()
+            flags = raw.get("state_flags", {}) if isinstance(raw, dict) else {}
+            if flags:
+                reasons = [k for k, v in flags.items() if v and k in (
+                    "waiting_for_scanner", "laser_timeout", "emergency_stop_reset_request",
+                    "drive_manual", "safety_relais_reset_request",
+                )]
+                if not flags.get("drive_ready", True):
+                    reasons.insert(0, "drive_ready=false")
+                if reasons:
+                    detail = f"Robot not ready: {', '.join(reasons)}"
+        except Exception:
+            pass
+        raise DeviceConnectionError(detail)
     return {"status": "ok", "result": result}
 
 
@@ -203,6 +225,40 @@ async def reset_emergency_stop(client: SymovoClient) -> Any:
 async def reset_software_fuse(client: SymovoClient) -> Any:
     result = await client.reset_software_fuse()
     return {"status": "ok", "result": result}
+
+
+@router.get(
+    "/safety/state",
+    response_model=GenericResponse,
+    summary="Get current safety state",
+    description=(
+        "Returns the current safety lockout state derived from Symovo state_flags.\n\n"
+        "Fields:\n"
+        "- **safety_lockout**: true if E-Stop, relay open, or fuse blown\n"
+        "- **reason**: estop | relay_open | sfuse_blown | null\n"
+        "- **recovery_available**: true when relay restored but subsystems not yet recovered\n"
+        "- **state_flags**: raw Symovo state_flags dict"
+    ),
+    response_model_exclude_none=True,
+)
+@safe_getter(GenericResponse)
+async def get_safety_state() -> Any:
+    """Return cached safety state from the background tracker."""
+    raw = await state_store.get_last_raw_status()
+    if raw is None:
+        return {
+            "status": "unknown",
+            "safety_lockout": True,
+            "reason": "no_data",
+            "state_flags": {},
+            "recovery_available": False,
+        }
+
+    from services.safety_state_tracker import SafetyStateTracker
+    tracker = SafetyStateTracker()
+    tracker.evaluate(raw)
+    state = tracker.current_state()
+    return {"status": "ok", **state.to_dict()}
 
 
 @router.get(

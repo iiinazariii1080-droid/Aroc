@@ -24,11 +24,14 @@ Every action is logged via fdir_events.emit().
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import subprocess
+import tempfile
 import time
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -122,15 +125,46 @@ def _read_reboot_count() -> int:
 
 
 def _write_reboot_count(n: int) -> None:
+    """Atomically write reboot count with file-level lock to prevent TOCTOU."""
     try:
         _REBOOT_COUNT_DIR.mkdir(parents=True, exist_ok=True)
-        _REBOOT_COUNT_PATH.write_text(str(n) + "\n")
+        fd = os.open(str(_REBOOT_COUNT_PATH), os.O_RDWR | os.O_CREAT)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, (str(n) + "\n").encode())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     except OSError as exc:
         logger.warning("Cannot write reboot count: %s", exc)
 
 
+def _atomic_increment_reboot_count() -> int:
+    """Atomically read-increment-write reboot count. Returns the NEW count."""
+    try:
+        _REBOOT_COUNT_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(_REBOOT_COUNT_PATH), os.O_RDWR | os.O_CREAT)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            raw = os.read(fd, 64).decode().strip()
+            current = int(raw) if raw else 0
+            new_val = current + 1
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, (str(new_val) + "\n").encode())
+            os.fsync(fd)
+            return new_val
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        logger.warning("Cannot increment reboot count: %s", exc)
+        return _read_reboot_count() + 1
+
+
 def _save_ladder_state(level: int, levels: List[LadderLevel], total: int) -> None:
-    """Persist ladder state to tmpfs (survives process restart, not reboot)."""
+    """Atomically persist ladder state to tmpfs (survives process restart, not reboot)."""
     try:
         _LADDER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         state = {
@@ -140,7 +174,22 @@ def _save_ladder_state(level: int, levels: List[LadderLevel], total: int) -> Non
             "total_recoveries": total,
             "ts": time.time(),
         }
-        _LADDER_STATE_PATH.write_text(json.dumps(state))
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(_LADDER_STATE_PATH.parent),
+            prefix=".fdir_ladder_",
+            suffix=".tmp",
+        )
+        try:
+            os.write(fd, json.dumps(state).encode())
+            os.fsync(fd)
+            os.close(fd)
+            fd = -1
+            os.rename(tmp_path, str(_LADDER_STATE_PATH))
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
     except OSError as exc:
         logger.warning("Cannot save ladder state: %s", exc)
 
@@ -148,7 +197,13 @@ def _save_ladder_state(level: int, levels: List[LadderLevel], total: int) -> Non
 def _load_ladder_state(levels: List[LadderLevel]) -> tuple[int, int]:
     """Load ladder state from tmpfs.  Returns (current_level, total_recoveries)."""
     try:
-        raw = json.loads(_LADDER_STATE_PATH.read_text())
+        fd = os.open(str(_LADDER_STATE_PATH), os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            raw_bytes = os.read(fd, 8192)
+        finally:
+            os.close(fd)
+        raw = json.loads(raw_bytes.decode())
         saved_level = int(raw.get("level", 0))
         total = int(raw.get("total_recoveries", 0))
         saved_attempts = raw.get("attempts", [])
@@ -162,7 +217,17 @@ def _load_ladder_state(levels: List[LadderLevel]) -> tuple[int, int]:
         saved_level = max(0, min(saved_level, len(levels)))
         logger.info("Loaded ladder state from disk: level=%d total=%d", saved_level, total)
         return saved_level, total
-    except (FileNotFoundError, json.JSONDecodeError, ValueError, KeyError):
+    except FileNotFoundError:
+        return 0, 0
+    except (json.JSONDecodeError, ValueError, KeyError) as exc:
+        logger.warning("Corrupted ladder state file %s: %s — resetting to level 0", _LADDER_STATE_PATH, exc)
+        emit(
+            domain=Domain.SYSTEM,
+            severity=Severity.WARN,
+            detection_signal="ladder_state_corrupt",
+            recovery_action=RecoveryAction.NONE,
+            outcome=f"ladder state lost ({exc}), reset to level 0",
+        )
         return 0, 0
 
 
@@ -178,6 +243,7 @@ class RecoveryLadder:
     """
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._levels = _default_ladder()
         self._current_level, self._total_recoveries = _load_ladder_state(self._levels)
         self._last_escalation_ts: float = 0.0
@@ -211,7 +277,12 @@ class RecoveryLadder:
 
         If the level's budget is exhausted ⇒ escalate.
         Returns a dict describing what was done.
+        Thread-safe: all state mutations are protected by _lock.
         """
+        with self._lock:
+            return self._escalate_locked(detection_signal, domain)
+
+    def _escalate_locked(self, detection_signal: str, domain: Domain) -> Dict[str, Any]:
         level = self._current_level_obj()
         if level is None:
             # All levels exhausted → SAFE mode
@@ -238,7 +309,7 @@ class RecoveryLadder:
 
         # Budget check → escalate if exhausted
         if level.attempts >= level.max_attempts:
-            return self._escalate_to_next(detection_signal, domain)
+            return self._escalate_to_next_locked(detection_signal, domain)
 
         # Execute recovery action
         level.attempts += 1
@@ -265,7 +336,11 @@ class RecoveryLadder:
         }
 
     def reset(self) -> None:
-        """Reset ladder to level 0 (system recovered to nominal)."""
+        """Reset ladder to level 0 (system recovered to nominal). Thread-safe."""
+        with self._lock:
+            self._reset_locked()
+
+    def _reset_locked(self) -> None:
         try:
             from app.routes.metrics import recovery_ladder_level
             recovery_ladder_level.set(0)
@@ -290,7 +365,11 @@ class RecoveryLadder:
         _write_reboot_count(0)
 
     def status(self) -> Dict[str, Any]:
-        """Return ladder status for diagnostics."""
+        """Return ladder status for diagnostics. Thread-safe."""
+        with self._lock:
+            return self._status_locked()
+
+    def _status_locked(self) -> Dict[str, Any]:
         return {
             "current_level": self._current_level,
             "current_level_name": self._current_level_obj().name if self._current_level_obj() else "exhausted",
@@ -316,7 +395,7 @@ class RecoveryLadder:
             return None
         return self._levels[self._current_level]
 
-    def _escalate_to_next(self, signal: str, domain: Domain) -> Dict[str, Any]:
+    def _escalate_to_next_locked(self, signal: str, domain: Domain) -> Dict[str, Any]:
         old_name = self._levels[self._current_level].name
         self._current_level += 1
         _save_ladder_state(self._current_level, self._levels, self._total_recoveries)
@@ -338,9 +417,9 @@ class RecoveryLadder:
             )
             # Degrade system mode on each escalation
             system_mode.degrade(f"fdir_escalate:{new_name}")
-            return self.escalate(signal, domain)  # immediately try next level
+            return self._escalate_locked(signal, domain)  # immediately try next level
         else:
-            return self.escalate(signal, domain)  # will hit exhausted branch
+            return self._escalate_locked(signal, domain)  # will hit exhausted branch
 
     def _execute(self, level: LadderLevel, signal: str, domain: Domain) -> bool:
         """Execute the actual recovery action. Returns success flag."""
@@ -363,11 +442,11 @@ class RecoveryLadder:
                 outcome = f"handle_retry: janus_ok, pipeline_active={pipeline_active}"
 
             elif action == RecoveryAction.RESTART_PIPELINE:
-                _run_cmd(["sudo", "systemctl", "restart", settings.service_name], timeout=15)
+                _run_cmd(["sudo", "systemctl", "restart", settings.service_name], timeout=45)
                 outcome = f"restarted {settings.service_name}"
 
             elif action == RecoveryAction.RESTART_JANUS:
-                _run_cmd(["sudo", "systemctl", "restart", "janus.service"], timeout=20)
+                _run_cmd(["sudo", "systemctl", "restart", "janus.service"], timeout=60)
                 outcome = "restarted janus.service"
 
             elif action == RecoveryAction.USB_RESET:
@@ -408,7 +487,7 @@ class RecoveryLadder:
                     return True
 
                 # Write reboot marker + increment counter
-                _write_reboot_count(reboots + 1)
+                _atomic_increment_reboot_count()
                 try:
                     _REBOOT_MARKER_PATH.write_text(
                         json.dumps({"ts": time.time(), "signal": signal}) + "\n"

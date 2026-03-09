@@ -97,8 +97,7 @@ class RobotActor:
                 )
 
             def _read_vacuum():
-                g = self._gripper
-                return g.read_vacuum_via_sdk() if g else -99
+                return self._read_vacuum_state()
 
             self._gripper_watchdog = GripperWatchdog(
                 state_store_getter=self._get_store,
@@ -434,8 +433,12 @@ class RobotActor:
                 from app.config import TCP_SPEED_MM_S, TCP_ACC_MM_S2
                 speed = max(1.0, min(TCP_SPEED_MM_S, (speed_pct / 100.0) * TCP_SPEED_MM_S))
                 acc = max(1.0, min(TCP_ACC_MM_S2, (speed_pct / 100.0) * TCP_ACC_MM_S2))
+                roll_off = float(params.get("roll_offset_deg", 0.0))
+                pitch_off = float(params.get("pitch_offset_deg", 0.0))
+                yaw_off = float(params.get("yaw_offset_deg", 0.0))
                 code = arm.set_tool_position(
                     x=int(x_off), y=int(y_off), z=int(z_off),
+                    roll=roll_off, pitch=pitch_off, yaw=yaw_off,
                     radius=0, speed=speed, mvacc=acc,
                     relative=True, wait=True
                 )
@@ -447,6 +450,29 @@ class RobotActor:
                         error_message=f"set_tool_position code={code}",
                     )
                 return CommandResult(command_id=command.command_id, status=ResultStatus.SUCCEEDED)
+
+            if command.type == CommandType.CHECK_IK:
+                # IK feasibility check — purely computational, no motion
+                pose = command.params.get("pose")  # [x, y, z, roll, pitch, yaw] in mm/degrees
+                if not pose or len(pose) != 6:
+                    return CommandResult(
+                        command_id=command.command_id,
+                        status=ResultStatus.FAILED,
+                        error_message="CHECK_IK requires pose=[x,y,z,roll,pitch,yaw]",
+                    )
+                code, angles = arm.get_inverse_kinematics(
+                    pose, input_is_radian=False, return_is_radian=False,
+                )
+                feasible = code == 0 and len(angles) > 0
+                return CommandResult(
+                    command_id=command.command_id,
+                    status=ResultStatus.SUCCEEDED,
+                    telemetry_snapshot={
+                        "feasible": feasible,
+                        "ik_code": code,
+                        "joint_angles": list(angles) if feasible else [],
+                    },
+                )
 
             if command.type == CommandType.GRIP_CLOSE:
                 if not self._gripper:

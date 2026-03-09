@@ -12,7 +12,7 @@ COVERAGE   ?= $(PYTHON) -m coverage
 # All services with tests (order: critical → important → other)
 SERVICES := xarm_service igus_service robot_service \
             mqtt_command_service nav2adapter api_gateway_service \
-            frontend_service proxt_camera_service janus_camera_page
+            frontend_service janus_camera_page
 
 # ── Help ────────────────────────────────────────────────────────────────────
 .PHONY: help
@@ -106,3 +106,28 @@ clean: ## Remove test artifacts
 	find . -type d -name htmlcov -exec rm -rf {} + 2>/dev/null || true
 	find . -name .coverage -delete 2>/dev/null || true
 	find . -name coverage.xml -delete 2>/dev/null || true
+
+# ── Docker ──────────────────────────────────────────────────────────────────
+.PHONY: up down up-prod env-check
+
+up: ## Start all services (docker compose up -d --build)
+	docker compose up -d --build
+
+down: ## Stop all services
+	docker compose down
+
+up-prod: ## Start with production hardening overlay
+	docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+env-check: ## Validate that .env exists and required vars are set
+	@if [ ! -f .env ]; then \
+	  echo "✗ .env not found — run: cp .env.example .env"; exit 1; \
+	fi; \
+	missing=0; \
+	for var in HOST_LAN_IP XARM_HARDWARE_IP IGUS_MOTOR_IP DEPTH_CAMERA_IP SYMOVO_CAR_IP; do \
+	  if ! grep -qE "^$$var=" .env; then \
+	    echo "✗ Missing $$var in .env"; missing=1; \
+	  fi; \
+	done; \
+	if [ $$missing -eq 1 ]; then echo ""; echo "See .env.example for reference"; exit 1; fi; \
+	echo "✓ .env looks good"

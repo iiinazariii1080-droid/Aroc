@@ -130,6 +130,7 @@ async def _janus_ws_proxy(client_ws: WebSocket, target: str):
                         if t.exception():
                             raise t.exception()
         except TimeoutError:
+            cb.record_failure()
             logger.warning("WS session timeout (%ss) for %s", WS_TOTAL_TIMEOUT_S, target_url)
             with suppress(Exception):
                 await client_ws.close(code=1000, reason="Session timeout")

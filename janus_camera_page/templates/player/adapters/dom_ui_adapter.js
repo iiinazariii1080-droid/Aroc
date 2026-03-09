@@ -53,27 +53,31 @@
     }
 
     _wireDom(){
-      this.playBtn.addEventListener('click', () => {
+      this._boundPlayClick = () => {
         const h = this._intentHandlers;
         if (this.playBtn.dataset.mode === 'retry') {
           h.onRetry && h.onRetry();
         } else {
           h.onTogglePlay && h.onTogglePlay();
         }
-      });
+      };
+      this.playBtn.addEventListener('click', this._boundPlayClick);
 
-      this.statsBtn.addEventListener('click', () => {
+      this._boundStatsClick = () => {
         this._statsVisible = !this._statsVisible;
         this.statsBox.style.display = this._statsVisible ? 'block' : 'none';
         this.statsBtn.textContent = this._statsVisible ? 'Hide stats' : 'Show stats';
         const h = this._intentHandlers;
         h.onToggleStats && h.onToggleStats(this._statsVisible);
-      });
+      };
+      this.statsBtn.addEventListener('click', this._boundStatsClick);
 
       // Video stall detection: browser fires 'stalled' when fetching media data has stalled
       // and 'waiting' when playback stopped because of temporary buffer underrun.
-      this._video.addEventListener('stalled', () => this._onVideoStallEvent('stalled'));
-      this._video.addEventListener('waiting', () => this._onVideoStallEvent('waiting'));
+      this._boundStalled = () => this._onVideoStallEvent('stalled');
+      this._boundWaiting = () => this._onVideoStallEvent('waiting');
+      this._video.addEventListener('stalled', this._boundStalled);
+      this._video.addEventListener('waiting', this._boundWaiting);
 
       // start hidden
       this.statsBox.style.display = 'none';
@@ -236,6 +240,18 @@
 
     onVideoEvent(type, handler){
       this._video.addEventListener(type, handler);
+    }
+
+    destroy(){
+      this.playBtn.removeEventListener('click', this._boundPlayClick);
+      this.statsBtn.removeEventListener('click', this._boundStatsClick);
+      this._video.removeEventListener('stalled', this._boundStalled);
+      this._video.removeEventListener('waiting', this._boundWaiting);
+      if (this._stalledDebounceTimer) {
+        this.clock.clearTimeout(this._stalledDebounceTimer);
+        this._stalledDebounceTimer = null;
+      }
+      this.stopFrameClock();
     }
   }
 

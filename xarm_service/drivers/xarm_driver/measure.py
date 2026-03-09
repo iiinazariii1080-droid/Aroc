@@ -123,7 +123,7 @@ class RobotMain(object):
 correct_position = False
 response_data = []
 
-# arm = XArmAPI('192.168.1.220', baud_checkset=False)
+# arm = XArmAPI(os.getenv('XARM_IP', '192.168.1.220'), baud_checkset=False)
 # robot_main = RobotMain(arm)
 
 # robot_main.run("",0)

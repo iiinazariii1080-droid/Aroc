@@ -158,6 +158,9 @@ async def startup(app: FastAPI) -> None:
     status_publisher = StatusPublisher(symovo_client=symovo_client, mqtt_adapter=mqtt_adapter, bus=event_bus)
     await status_publisher.start()
 
+    # Expose safety tracker for /safety/state route
+    app.state.safety_tracker = status_publisher.safety_tracker
+
     # Facade for routes
     navigation_facade = NavigationFacade(
         mqtt_adapter,

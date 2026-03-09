@@ -25,7 +25,6 @@ jobs:
           - xarm_service
           - robot_service
           - frontend_service
-          - proxt_camera_service
           - janus_camera_page
     steps:
       - uses: actions/checkout@v4
@@ -70,9 +69,6 @@ jobs:
           - service: frontend_service
             requirements: frontend_service/requirements.txt
             cov_source: frontend_service
-          - service: proxt_camera_service
-            requirements: requirements-dev.txt
-            cov_source: proxt_camera_service/app
           - service: janus_camera_page
             requirements: requirements-dev.txt
             cov_source: janus_camera_page/app
@@ -168,7 +164,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements-dev.txt
           # Install all service requirements
-          for svc in api_gateway_service igus_service mqtt_command_service nav2adapter xarm_service robot_service frontend_service proxt_camera_service janus_camera_page; do
+          for svc in api_gateway_service igus_service mqtt_command_service nav2adapter xarm_service robot_service frontend_service janus_camera_page; do
             if [ -f "$svc/requirements-dev.txt" ]; then
               pip install -r "$svc/requirements-dev.txt"
             fi
@@ -187,7 +183,7 @@ jobs:
           CONFIG_DB_PATH: ":memory:"
           API_ENABLED: "false"
         run: |
-          for svc in api_gateway_service igus_service mqtt_command_service nav2adapter xarm_service robot_service frontend_service proxt_camera_service janus_camera_page; do
+          for svc in api_gateway_service igus_service mqtt_command_service nav2adapter xarm_service robot_service frontend_service janus_camera_page; do
             if [ -d "$svc/tests" ]; then
               echo "── coverage: $svc ──"
               if [ "$svc" = "frontend_service" ] || [ "$svc" = "mqtt_command_service" ]; then

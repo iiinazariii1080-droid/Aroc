@@ -62,6 +62,7 @@ class CircuitBreaker:
     _failure_count: int = field(default=0, init=False, repr=False)
     _success_count: int = field(default=0, init=False, repr=False)
     _last_failure_time: float = field(default=0.0, init=False, repr=False)
+    _half_open_since: float = field(default=0.0, init=False, repr=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     # ── Public API ──────────────────────────────────────────────
@@ -76,11 +77,17 @@ class CircuitBreaker:
                 if time.monotonic() - self._last_failure_time >= self.recovery_timeout_s:
                     self._state = _State.HALF_OPEN
                     self._success_count = 0
+                    self._half_open_since = time.monotonic()
                     logger.info("Circuit %s → HALF_OPEN (probing)", self.service)
                     return True
                 return False
 
-            # HALF_OPEN – allow only one probe
+            # HALF_OPEN – timeout back to OPEN if probe hangs
+            if time.monotonic() - self._half_open_since >= self.recovery_timeout_s:
+                self._state = _State.OPEN
+                self._last_failure_time = time.monotonic()
+                logger.warning("Circuit %s → OPEN (probe timeout)", self.service)
+                return False
             return True
 
     def record_success(self) -> None:

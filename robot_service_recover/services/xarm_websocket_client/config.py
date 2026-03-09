@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Optional
 from pathlib import Path
 
+from shared_config.network import DEVICES, PORTS
+
 
 @dataclass
 class AppConfig:
@@ -18,7 +20,7 @@ class AppConfig:
 
 def load_config() -> AppConfig:
     return AppConfig(
-        ws_url=os.getenv("WS_URL", os.getenv("XARM_WS_URL", "ws://192.168.1.220:18333/ws?channel=prod&lang=en&v=1&id=test123")),
+        ws_url=os.getenv("WS_URL", os.getenv("XARM_WS_URL", f"ws://{DEVICES.XARM_IP}:{PORTS.XARM_WS}/ws?channel=prod&lang=en&v=1&id=test123")),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
         watchdog_timeout=float(os.getenv("WATCHDOG_TIMEOUT", "3.0")),
         hold_timeout=float(os.getenv("HOLD_TIMEOUT", "0.5")),
@@ -45,6 +47,6 @@ def build_ws_url_from_ip(ip: str, channel: str = "prod", lang: str = "en", versi
     """Helper to build a ws URL if the deployment uses direct addressing by IP.
     This does not replace the default cloud URL used in main; it's an opt-in utility.
     """
-    return f"ws://192.168.1.220:18333/ws?channel={channel}&lang={lang}&v={version}&id={client_id}"
+    return f"ws://{DEVICES.XARM_IP}:{PORTS.XARM_WS}/ws?channel={channel}&lang={lang}&v={version}&id={client_id}"
 
 
