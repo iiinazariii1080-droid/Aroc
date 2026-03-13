@@ -398,3 +398,80 @@ class TestLadderModeIntegration:
         switch_events = [e for e in items if e["recovery_action"] == "switch_mode"]
         assert len(switch_events) >= 1
         assert switch_events[0]["outcome"].startswith("mode:")
+
+
+# ===================================================================
+# 5. Node-local reboot targeting
+# ===================================================================
+
+class TestNodeLocalReboot:
+    """Each node reboots itself — never the other node."""
+
+    def _make_ladder(self, tmp_path, cam_type, mock_run):
+        """Create a fresh ladder with a single reboot_node level."""
+        from app.services.recovery_ladder import (
+            LadderLevel,
+            RecoveryAction as RA,
+            RecoveryLadder,
+        )
+
+        reboot_dir = tmp_path / "fdir-persist"
+        reboot_dir.mkdir(exist_ok=True)
+
+        p_state = patch("app.services.recovery_ladder._LADDER_STATE_PATH", tmp_path / "state.json")
+        p_rdir = patch("app.services.recovery_ladder._REBOOT_COUNT_DIR", reboot_dir)
+        p_rpath = patch("app.services.recovery_ladder._REBOOT_COUNT_PATH", reboot_dir / "reboot_count")
+        p_marker = patch("app.services.recovery_ladder._REBOOT_MARKER_PATH", reboot_dir / "last_reboot_request")
+        p_dedup = patch("app.services.recovery_ladder._DEDUP_WINDOW_SEC", 0)
+        p_run = patch("app.services.recovery_ladder.subprocess.run", mock_run)
+        p_dl = patch("app.services.recovery_ladder._default_ladder")
+        p_settings = patch("app.services.recovery_ladder.get_settings")
+
+        all_patches = [p_state, p_rdir, p_rpath, p_marker, p_dedup, p_run, p_dl, p_settings]
+        for p in all_patches:
+            p.start()
+
+        mock_dl = p_dl.start()
+        mock_settings = p_settings.start()
+
+        settings = MagicMock()
+        settings.camera_type = cam_type
+        settings.watchdog_reboot_enabled = True
+        settings.max_fdir_reboots = 2
+        settings.service_name = "test.service"
+        mock_settings.return_value = settings
+
+        fake_levels = [
+            LadderLevel("reboot_node", RA.REBOOT_NODE, max_attempts=1, cooldown_sec=0),
+        ]
+        mock_dl.return_value = fake_levels
+
+        _reset_mode()
+        rl = RecoveryLadder()
+        return rl, all_patches
+
+    def test_color_node_reboots_locally(self, tmp_path):
+        """Color node (192.168.1.10) reboots itself via systemctl reboot."""
+        mock_run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+        rl, patches = self._make_ladder(tmp_path, "color_camera", mock_run)
+        try:
+            result = rl.escalate("color_cam_fault")
+            assert result["action"] == "reboot_node"
+            reboot_calls = [c for c in mock_run.call_args_list if "reboot" in str(c)]
+            assert len(reboot_calls) >= 1, "color node must call systemctl reboot locally"
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_depth_node_reboots_locally(self, tmp_path):
+        """Depth node (192.168.1.55) reboots itself via systemctl reboot."""
+        mock_run = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+        rl, patches = self._make_ladder(tmp_path, "depth_camera", mock_run)
+        try:
+            result = rl.escalate("depth_cam_fault")
+            assert result["action"] == "reboot_node"
+            reboot_calls = [c for c in mock_run.call_args_list if "reboot" in str(c)]
+            assert len(reboot_calls) >= 1, "depth node must call systemctl reboot locally"
+        finally:
+            for p in patches:
+                p.stop()

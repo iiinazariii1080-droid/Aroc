@@ -184,8 +184,8 @@ class TestGetStatus:
         assert r.status_code == 200
         body = r.json()
         assert body["connected"] is True
-        assert body["motion_enabled"] is True
-        assert body["ready"] is True
+        assert body["state_code"] == 0
+        assert body["has_error"] is False
 
     def test_status_endpoint_rejected_returns_503(self, client, fake_svc):
         fake_svc.set_next_result(CommandResult(
@@ -195,3 +195,47 @@ class TestGetStatus:
         ))
         r = client.get("/status")
         assert r.status_code == 503
+
+    def test_status_safety_lockout_hint_true(self, client, fake_svc):
+        """state_code=4 + error + motion_disabled → safety_lockout_hint=True."""
+        fake_svc.set_next_result(CommandResult(
+            command_id="status-lockout",
+            status=ResultStatus.SUCCEEDED,
+            telemetry_snapshot={
+                "connected": True,
+                "state": 4,        # error state
+                "mode": 0,
+                "motion_enabled": False,
+                "ready": False,
+                "fault": True,
+                "warn_code": 0,
+                "error_code": 19,  # non-zero error
+                "angles": [0, 0, 0, 0, 0, 0],
+                "pose": [0, 0, 0, 0, 0, 0],
+            },
+        ))
+        r = client.get("/status")
+        assert r.status_code == 200
+        assert r.json()["safety_lockout_hint"] is True
+
+    def test_status_safety_lockout_hint_false_normal(self, client, fake_svc):
+        """Normal status → safety_lockout_hint=False."""
+        fake_svc.set_next_result(CommandResult(
+            command_id="status-normal",
+            status=ResultStatus.SUCCEEDED,
+            telemetry_snapshot={
+                "connected": True,
+                "state": 2,        # normal running state
+                "mode": 0,
+                "motion_enabled": True,
+                "ready": True,
+                "fault": False,
+                "warn_code": 0,
+                "error_code": 0,
+                "angles": [0, 0, 0, 0, 0, 0],
+                "pose": [0, 0, 0, 0, 0, 0],
+            },
+        ))
+        r = client.get("/status")
+        assert r.status_code == 200
+        assert r.json()["safety_lockout_hint"] is False

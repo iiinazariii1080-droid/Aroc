@@ -124,8 +124,11 @@ services:
       DEPTH_CAMERA_CONTAINER_IP: ${DEPTH_CAMERA_IP:-192.168.1.55}
       DEPTH_CAMERA_CONTAINER_PORT: "8900"
       XARM_WS_URL: "ws://${XARM_HARDWARE_IP:-192.168.1.220}:${XARM_WS_PORT:-18333}/ws?channel=prod&lang=en&v=1&id=robot"
+      ROBOT_DB_PATH: /app/data/database.db
     ports:
       - "${ROBOT_PORT:-8110}:${ROBOT_PORT:-8110}"
+    volumes:
+      - robot-service-data:/app/data
     restart: unless-stopped
     healthcheck:
       <<: *hc-defaults
@@ -219,6 +222,7 @@ services:
 
 # ── Volumes ─────────────────────────────────────────────────────────────────
 volumes:
+  robot-service-data:
   nav2adapter-data:
   mqtt-data:
   mqtt-certs:

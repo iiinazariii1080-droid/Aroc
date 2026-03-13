@@ -308,6 +308,70 @@ class TestHomingTargetReachedCompletion:
 
 
 # ---------------------------------------------------------------------------
+# Bug 5a: configure() wrote homing method (0x6098) which is RO on dryve D1
+# The dryve returns exception 0xFF for writes to read-only OD objects.
+# skip_method_write=True (default) prevents this write.
+# ---------------------------------------------------------------------------
+
+class TestHomingSkipMethodWrite:
+    """Verify skip_method_write controls whether 0x6098 is written."""
+
+    @pytest.mark.asyncio
+    async def test_skip_method_write_true_does_not_write_6098(self):
+        """With skip_method_write=True (default), configure() must not write 0x6098."""
+        from drivers.dryve_d1.motion.homing import Homing, HomingConfig
+        from drivers.dryve_d1.od.indices import ODIndex
+
+        writes: list[tuple[int, int]] = []
+
+        class RecordingOD:
+            async def read_u16(self, index, subindex=0): return 0x0627
+            async def read_i8(self, index, subindex=0): return 6
+            async def write_u16(self, index, value, subindex=0):
+                writes.append((index, value))
+            async def write_u8(self, index, value, subindex=0):
+                writes.append((index, value))
+            async def write_u32(self, index, value, subindex=0):
+                writes.append((index, value))
+
+        cfg = HomingConfig(skip_method_write=True, speed_search=None,
+                           speed_switch=None, acceleration=None)
+        homing = Homing(RecordingOD(), config=cfg)
+        await homing.configure()
+
+        written_indices = [idx for idx, _ in writes]
+        assert int(ODIndex.HOMING_METHOD) not in written_indices, \
+            "0x6098 should NOT be written when skip_method_write=True"
+
+    @pytest.mark.asyncio
+    async def test_skip_method_write_false_writes_6098(self):
+        """With skip_method_write=False, configure() must write 0x6098."""
+        from drivers.dryve_d1.motion.homing import Homing, HomingConfig
+        from drivers.dryve_d1.od.indices import ODIndex
+
+        writes: list[tuple[int, int]] = []
+
+        class RecordingOD:
+            async def read_u16(self, index, subindex=0): return 0x0627
+            async def read_i8(self, index, subindex=0): return 6
+            async def write_u16(self, index, value, subindex=0):
+                writes.append((index, value))
+            async def write_u8(self, index, value, subindex=0):
+                writes.append((index, value))
+            async def write_u32(self, index, value, subindex=0):
+                writes.append((index, value))
+
+        cfg = HomingConfig(skip_method_write=False, method=35,
+                           speed_search=None, speed_switch=None, acceleration=None)
+        homing = Homing(RecordingOD(), config=cfg)
+        await homing.configure()
+
+        written_indices = [idx for idx, _ in writes]
+        assert int(ODIndex.HOMING_METHOD) in written_indices, \
+            "0x6098 should be written when skip_method_write=False"
+
+
+# ---------------------------------------------------------------------------
 # Bug 6: close() raised RuntimeError when motion was active
 # Instead of raising, it should attempt best-effort stop and then close.
 # ---------------------------------------------------------------------------

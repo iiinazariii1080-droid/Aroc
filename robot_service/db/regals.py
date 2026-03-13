@@ -1,7 +1,8 @@
+import os
 import sqlite3
 from models.base_types import JsonDict, JsonList
 
-DB_PATH = "database.db"
+DB_PATH = os.path.abspath(os.environ.get("ROBOT_DB_PATH", "database.db"))
 
 def init_regals_table():
     """Initialize the regals table if it doesn't exist"""

@@ -36,6 +36,7 @@ class HomingConfig:
     """
 
     method: int = 35  # placeholder; must be set to your actual method
+    skip_method_write: bool = True  # 0x6098 is RO on dryve D1 (configured via CPG)
     speed_search: int | None = None       # 0x6099:01
     speed_switch: int | None = None       # 0x6099:02
     acceleration: int | None = None       # 0x609A
@@ -83,8 +84,10 @@ class Homing:
         s2 = self._cfg.speed_switch if speed_switch is None else speed_switch
         acc = self._cfg.acceleration if acceleration is None else acceleration
 
-        # 0x6098 Homing method is typically INT8, but write as U8 (value 0..255) is accepted by most gateways.
-        await self._od.write_u8(int(ODIndex.HOMING_METHOD), int(m) & 0xFF, 0)
+        # 0x6098 Homing method: read-only on dryve D1 (must be configured via CPG web UI).
+        # On drives where it is writable, set skip_method_write=False in HomingConfig.
+        if not self._cfg.skip_method_write:
+            await self._od.write_u8(int(ODIndex.HOMING_METHOD), int(m) & 0xFF, 0)
 
         if s1 is not None:
             await self._od.write_u32(int(ODIndex.HOMING_SPEEDS), int(s1), 1)

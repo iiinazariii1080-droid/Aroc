@@ -2,6 +2,8 @@
 Description=RGB (rgb24 FIFO -> H264 -> Janus mp 1305)
 After=network.target realsense-mux.service
 Requires=realsense-mux.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 ExecStart=/bin/bash -lc '\
@@ -17,6 +19,7 @@ ExecStart=/bin/bash -lc '\
     -an -f rtp "rtp://127.0.0.1:5003?pkt_size=1200" \
 '
 Restart=always
+RestartSec=3s
 
 [Install]
 WantedBy=multi-user.target

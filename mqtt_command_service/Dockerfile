@@ -1,6 +1,7 @@
 FROM python:3.11.11-slim
 
 WORKDIR /app
+ENV PYTHONPATH=/app
 
 # Create non-root user
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser

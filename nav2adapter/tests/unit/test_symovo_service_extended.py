@@ -60,7 +60,8 @@ class TestSetDriveMode:
     @pytest.mark.asyncio
     async def test_fallback_to_amr(self):
         client = _make_client()
-        client.put = AsyncMock(side_effect=[RuntimeError("fail"), {"ok": True}])
+        from exceptions import DeviceError
+        client.put = AsyncMock(side_effect=[DeviceError("fail"), {"ok": True}])
         _bind(client, "set_drive_mode")
         with patch("services.charger_workflow.maybe_deactivate_on_drive_mode", new_callable=AsyncMock):
             result = await client.set_drive_mode(enable=True)

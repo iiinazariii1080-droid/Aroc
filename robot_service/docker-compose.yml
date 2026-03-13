@@ -47,9 +47,11 @@ services:
       WATCHDOG_TIMEOUT: "10.0"
       HOLD_TIMEOUT: "2.0"
 
-    # Mount local config if you want to override the image default
-    # volumes:
-    #   - ./config.yaml:/app/config.yaml:ro
+      ROBOT_DB_PATH: /app/data/database.db
+
+    volumes:
+      - robot_service_data:/app/data
+      # - ./config.yaml:/app/config.yaml:ro
 
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://127.0.0.1:8110/healthz"]
@@ -63,4 +65,5 @@ services:
         max-size: "10m"
         max-file: "3"
 
-
+volumes:
+  robot_service_data:

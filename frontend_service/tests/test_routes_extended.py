@@ -19,7 +19,8 @@ async def test_spa_fallback_api_prefix_404(client):
 @pytest.mark.asyncio
 async def test_spa_fallback_static_prefix_404(client):
     """Static mount path traversal returns 404."""
-    r = await client.get("/static/../../../etc/passwd")
+    import main
+    r = await main.spa_fallback("static/../../../etc/passwd")
     assert r.status_code == 404
 
 

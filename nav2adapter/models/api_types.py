@@ -89,9 +89,10 @@ class PositionParams(BaseModel):
     Accepts both nested ``{"location": {"x_m": …}}`` and flat
     ``{"x_m": …}`` formats.  Flat keys are normalised into
     ``location`` before validation so storage is always consistent.
-    Extra keys (e.g. legacy ``lift_position_cm``) are preserved.
+    Only navigation-related fields are accepted (coordinates + heading).
+    Lift and manipulator data is managed by robot_service.
     """
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     location: PositionLocation
     description: Optional[str] = Field(default=None, description="Human-readable description")

@@ -13,6 +13,8 @@ services:
       DRYVE_UNIT_ID: ${DRYVE_UNIT_ID:-0}
       # Real motor — strict TID matching
       DRYVE_ALLOW_TID_MISMATCH: ${DRYVE_ALLOW_TID_MISMATCH:-0}
+    volumes:
+      - ../shared_config:/app/shared_config:ro
     # network_mode: host — ports section not needed, service listens on host 8101 directly
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:8101/health"]

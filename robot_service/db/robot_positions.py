@@ -1,8 +1,9 @@
+import os
 import sqlite3
 import json
 from typing import Dict, Any, Optional, List
 
-DB_PATH = "database.db"
+DB_PATH = os.path.abspath(os.environ.get("ROBOT_DB_PATH", "database.db"))
 
 
 def init_robot_positions_table() -> None:

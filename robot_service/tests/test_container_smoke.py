@@ -50,9 +50,10 @@ def _docker(args):
 
 
 _SERVICE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_REPO_ROOT = os.path.abspath(os.path.join(_SERVICE_DIR, ".."))
 
 
-@pytest.mark.skipif(os.getenv("CI") is None and _docker(["version"]).returncode != 0, reason="Docker not available")
+@pytest.mark.skipif(_docker(["version"]).returncode != 0, reason="Docker not available")
 def test_container_build_run_health_and_rate_limit():
     image_tag = f"robot-service-test:{uuid.uuid4().hex[:8]}"
     container_name = f"robot-service-test-{uuid.uuid4().hex[:8]}"
@@ -63,8 +64,8 @@ def test_container_build_run_health_and_rate_limit():
     }
 
     try:
-        # Build image (use service directory as build context)
-        build = _docker(["build", "-t", image_tag, _SERVICE_DIR])
+        # Build image (use repo root as build context so COPY shared_config/ works)
+        build = _docker(["build", "-t", image_tag, "-f", os.path.join(_SERVICE_DIR, "Dockerfile"), _REPO_ROOT])
         assert build.returncode == 0, f"docker build failed: {build.stderr}"
 
         # Run container

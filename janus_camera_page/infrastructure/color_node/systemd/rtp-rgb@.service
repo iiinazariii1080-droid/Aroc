@@ -3,8 +3,8 @@ Description=RTP push RGB (V4L2 %i) -> Janus 1305
 Requires=janus.service
 After=janus.service
 Conflicts=camera-webrtc-color.service
-StartLimitIntervalSec=30
-StartLimitBurst=20
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

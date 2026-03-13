@@ -1,8 +1,9 @@
 # db/trajectory.py
+import os
 import sqlite3
 import json
 
-DB_PATH = "database.db"
+DB_PATH = os.path.abspath(os.environ.get("ROBOT_DB_PATH", "database.db"))
 
 def calibrate_distance(raw_distance):
     """

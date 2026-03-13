@@ -38,8 +38,14 @@ class _MockApi:
         self.timeout_calls.append(value)
         return 0
 
+    # Valid PDI frame: index=0x0028, data_len=5, part_secured=True, CRC-valid
+    _PDI_RESPONSE = [1, 13, 4, 0, 0, 0, 40, 5, 0, 0, 2, 0, 0, 25, 76]
+
     def getset_tgpio_modbus_data(self, command, **kwargs):
         self.modbus_calls.append((list(command), kwargs))
+        # Return valid PDI frame for PDI read command, _EXPECTED_OK otherwise
+        if list(command) == [0x01, 0x04, 0x00, 0x00, 0x00, 0x28, 0xD8]:
+            return 0, list(self._PDI_RESPONSE)
         return 0, list(_EXPECTED_OK)
 
     def get_vacuum_gripper(self):

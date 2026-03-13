@@ -34,9 +34,8 @@ def test_validator_accepts_read_response_exact_size():
     validate_gateway_response(resp)
 
 
-def test_validator_rejects_exception_response_wrong_size():
-    # Exception response must be exactly 9 bytes per validator
-    # Build MBAP length=3 and PDU=2 bytes but append extra to trigger error
+def test_validator_rejects_exception_response_mbap_mismatch():
+    # MBAP length says 3 (9 bytes total) but frame has an extra byte → MBAP mismatch
     tid = 3
     unit = 1
     pdu = bytes([0x2B | 0x80, 0x01])
@@ -45,3 +44,20 @@ def test_validator_rejects_exception_response_wrong_size():
     bad = mbap + pdu + b"\x00"
     with pytest.raises(TelegramValidationError):
         validate_gateway_response(bad)
+
+
+def test_validator_accepts_long_exception_response():
+    """Some dryve firmware sends 17-byte exception frames with extra gateway fields.
+
+    As long as the MBAP length is consistent the validator should accept them.
+    """
+    tid = 4
+    unit = 1
+    # Exception PDU: func 0xAB + exc code + 8 extra bytes (MEI, index, etc.)
+    pdu = bytes([0x2B | 0x80, 0x02]) + bytes(8)
+    length = len(pdu) + 1  # unit_id counted in MBAP length
+    mbap = tid.to_bytes(2, "big") + (0).to_bytes(2, "big") + length.to_bytes(2, "big") + bytes([unit])
+    adu = mbap + pdu
+    assert len(adu) == 17
+    # Must not raise
+    validate_gateway_response(adu)

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from .exceptions import TelegramFormatError, TelegramValidationError
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,10 +117,18 @@ def validate_gateway_response(adu: bytes) -> None:
 
     func = adu[7]
     if func == (GATEWAY_FUNCTION_CODE | GATEWAY_EXCEPTION_MASK):
-        # Exception response: function code + exception code, nothing else required
-        if len(adu) != 9:
-            # some stacks might append extra; treat as format error because manual is strict
-            raise TelegramValidationError(f"Exception response must be exactly 9 bytes, got {len(adu)}")
+        # Exception response: function code + exception code (bytes 7-8).
+        # The manual specifies 9 bytes, but some dryve firmware versions
+        # include additional gateway fields (MEI type, index, etc.) making
+        # the frame longer (e.g. 17 bytes).  Accept any length >= 9 so the
+        # exception code can be parsed and reported to the caller.
+        if len(adu) > 9:
+            _log.debug(
+                "Exception response is %d bytes (expected 9); "
+                "extra bytes tolerated: %s",
+                len(adu),
+                adu[9:].hex(),
+            )
         return
 
     # Normal response: must contain MEI type and at least through byte_count

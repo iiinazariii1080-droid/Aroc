@@ -667,6 +667,57 @@ def api_save_robot_position(new_position: dict):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/robot_positions/record", status_code=status.HTTP_201_CREATED,
+             summary="Record current position of lift, xarm and vehicle",
+             description="Reads current lift height, xarm joints and symovo pose, then saves as a robot position.")
+async def api_record_robot_position(body: dict = Body(default={})):
+    try:
+        name = body.get("name") if isinstance(body, dict) else None
+
+        snapshot = await robot.record_current_position()
+
+        # Build params from live readings
+        lift_data = snapshot.get("lift") or {}
+        joints_data = snapshot.get("xarm_joints") or {}
+        vehicle_data = snapshot.get("vehicle_pose") or {}
+
+        lift_cm = lift_data.get("position", lift_data.get("position_cm", 0.0))
+        if isinstance(lift_cm, (int, float)):
+            lift_cm = float(lift_cm)
+        else:
+            lift_cm = 0.0
+
+        location = {
+            "x_m": float(vehicle_data.get("x_m", 0.0) or 0.0),
+            "y_m": float(vehicle_data.get("y_m", 0.0) or 0.0),
+            "theta_deg": float(vehicle_data.get("theta_deg", 0.0) or 0.0),
+            "map_id": int(vehicle_data.get("map_id", 0) or 0),
+        }
+
+        params = _deep_merge(DEFAULT_POSITION_PARAMS, {
+            "location": location,
+            "lift_position_cm": lift_cm,
+            "xarm_joints": joints_data,
+        })
+
+        position_id = uuid.uuid4().hex[:8]
+
+        save_robot_position({
+            "id": position_id,
+            "name": name,
+            "params": params,
+        })
+
+        return {
+            "status": "ok",
+            "message": "Current position recorded.",
+            "id": position_id,
+            "snapshot": snapshot,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/robot_positions/run", status_code=status.HTTP_201_CREATED, response_model=RobotActionResponse)
 @tasked_getter(RobotActionResponse)  
 async def run_robot_position(position_id: str):

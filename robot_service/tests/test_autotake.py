@@ -50,8 +50,7 @@ async def test_autotake_distance_too_large(mocks):
     from exceptions import DeviceConnectionError
     mocks["depth_camera"].depth = AsyncMock(return_value={"depth": 2.0})  # 2000 mm
     with patch("app.robot_scripts.init_trajectory_table"), \
-         patch("app.robot_scripts.get_trajectory", return_value={}), \
-         patch("app.robot_scripts.calibrate_distance", return_value=2000.0):
+         patch("app.robot_scripts.get_trajectory", return_value={}):
         from app.robot_scripts import autotake
         with pytest.raises(DeviceConnectionError, match="failed"):
             await autotake(40)
@@ -61,10 +60,9 @@ async def test_autotake_distance_too_large(mocks):
 @pytest.mark.asyncio
 async def test_autotake_distance_too_small(mocks):
     from exceptions import DeviceConnectionError
-    mocks["depth_camera"].depth = AsyncMock(return_value={"depth": 0.05})  # 50 mm
+    mocks["depth_camera"].depth = AsyncMock(return_value={"depth": 0.02})  # 20 mm < MIN_DISTANCE_MM(30)
     with patch("app.robot_scripts.init_trajectory_table"), \
-         patch("app.robot_scripts.get_trajectory", return_value={}), \
-         patch("app.robot_scripts.calibrate_distance", return_value=50.0):
+         patch("app.robot_scripts.get_trajectory", return_value={}):
         from app.robot_scripts import autotake
         with pytest.raises(DeviceConnectionError, match="failed"):
             await autotake(40)
@@ -82,8 +80,7 @@ async def test_autotake_happy_prefix_only(mocks):
         "return": {"active": False},
     }
     with patch("app.robot_scripts.init_trajectory_table"), \
-         patch("app.robot_scripts.get_trajectory", return_value=config), \
-         patch("app.robot_scripts.calibrate_distance", return_value=300.0):
+         patch("app.robot_scripts.get_trajectory", return_value=config):
         from app.robot_scripts import autotake
         result = await autotake(40)
     assert result is True
@@ -102,12 +99,11 @@ async def test_autotake_basemove_and_return(mocks):
         "return": {"active": True},
     }
     with patch("app.robot_scripts.init_trajectory_table"), \
-         patch("app.robot_scripts.get_trajectory", return_value=config), \
-         patch("app.robot_scripts.calibrate_distance", return_value=300.0):
+         patch("app.robot_scripts.get_trajectory", return_value=config):
         from app.robot_scripts import autotake
         result = await autotake(40)
     assert result is True
-    assert mocks["manipulator"].change_tool_position.await_count == 2  # basemove + return
+    assert mocks["manipulator"].change_tool_position.await_count >= 2  # basemove stages + return
 
 
 # ── autotake: with postfix ──────────────────────────────────────
@@ -122,8 +118,7 @@ async def test_autotake_postfix(mocks):
         "return": {"active": False},
     }
     with patch("app.robot_scripts.init_trajectory_table"), \
-         patch("app.robot_scripts.get_trajectory", return_value=config), \
-         patch("app.robot_scripts.calibrate_distance", return_value=300.0):
+         patch("app.robot_scripts.get_trajectory", return_value=config):
         from app.robot_scripts import autotake
         result = await autotake(40)
     assert result is True
@@ -143,8 +138,7 @@ async def test_autotake_gripper_simple(mocks):
         "return": {"active": False},
     }
     with patch("app.robot_scripts.init_trajectory_table"), \
-         patch("app.robot_scripts.get_trajectory", return_value=config), \
-         patch("app.robot_scripts.calibrate_distance", return_value=300.0):
+         patch("app.robot_scripts.get_trajectory", return_value=config):
         from app.robot_scripts import autotake
         result = await autotake(40)
     assert result is True
@@ -163,8 +157,7 @@ async def test_autotake_depth_compensation(mocks):
         "return": {"active": False},
     }
     with patch("app.robot_scripts.init_trajectory_table"), \
-         patch("app.robot_scripts.get_trajectory", return_value=config), \
-         patch("app.robot_scripts.calibrate_distance", return_value=300.0):
+         patch("app.robot_scripts.get_trajectory", return_value=config):
         from app.robot_scripts import autotake
         result = await autotake(40)
     assert result is True

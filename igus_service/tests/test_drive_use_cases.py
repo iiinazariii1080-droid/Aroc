@@ -301,6 +301,33 @@ async def test_fault_gate_tolerates_status_read_failure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Safety lockout gate — fault + remote=False (DI7 low) → SAFETY_LOCKOUT
+# ---------------------------------------------------------------------------
+
+def _make_uc_safety_lockout() -> tuple[DriveUseCases, _DriveFake]:
+    """Fake drive in fault with remote=False (safety relay open)."""
+    uc, drive = _make_uc()
+
+    async def _status_safety():
+        return {"fault": True, "remote": False, "operation_enabled": False}
+
+    drive.get_status_live = _status_safety  # type: ignore[assignment]
+    return uc, drive
+
+
+async def test_safety_lockout_returns_503() -> None:
+    """P0: fault + remote=False → ServiceError(503, SAFETY_LOCKOUT)."""
+    uc, _drive = _make_uc_safety_lockout()
+    req = JogMoveRequest(direction="positive", speed=5, ttl_ms=200)
+
+    with pytest.raises(ServiceError) as exc:
+        await uc.jog_start(req)
+
+    assert exc.value.status_code == 503
+    assert exc.value.code == "SAFETY_LOCKOUT"
+
+
+# ---------------------------------------------------------------------------
 # Enhanced fault_reset tests (Phase C)
 # ---------------------------------------------------------------------------
 

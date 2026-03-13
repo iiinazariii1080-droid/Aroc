@@ -1211,6 +1211,49 @@ async def move_robot_to_product(params) -> dict:
     logger.info("move_robot_to_product: done")
     return True
 
+
+async def record_current_position() -> dict:
+    """Read current lift height, xarm joints and symovo pose in parallel."""
+
+    async def _lift_pos():
+        try:
+            return await lift.position()
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _xarm_joints():
+        try:
+            return await manipulator.current_joints_position()
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def _symovo_pose():
+        try:
+            raw = await symovo.status()
+            norm = _normalize_symovo_status(raw)
+            if isinstance(norm, SymovoStatusResponse):
+                pose = norm.pose
+                if hasattr(pose, "model_dump"):
+                    return pose.model_dump()
+                elif isinstance(pose, dict):
+                    return pose
+                return {"x_m": getattr(pose, "x_m", None), "y_m": getattr(pose, "y_m", None),
+                        "theta_deg": getattr(pose, "theta_deg", None), "map_id": getattr(pose, "map_id", None)}
+            return {"error": str(norm)}
+        except Exception as e:
+            return {"error": str(e)}
+
+    lift_pos, joints, vehicle_pose = await asyncio.gather(
+        _lift_pos(), _xarm_joints(), _symovo_pose()
+    )
+
+    return {
+        "lift": lift_pos,
+        "xarm_joints": joints,
+        "vehicle_pose": vehicle_pose,
+    }
+
+
 async def get_robot_system_status() -> dict:
     async def fetch_xarm_state():
         # Cache-only xArm status: do not trigger extra manipulator status requests from /status.

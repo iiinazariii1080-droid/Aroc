@@ -711,7 +711,7 @@ async def single_pose_typo_alias():
 
 @app.get("/{full_path:path}")
 async def spa_fallback(full_path: str):
-    if full_path.startswith("api/") or full_path.startswith("static/"):
+    if full_path.startswith("api/") or full_path.startswith("static/") or ".." in full_path:
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
     return FileResponse("index.html")
 
