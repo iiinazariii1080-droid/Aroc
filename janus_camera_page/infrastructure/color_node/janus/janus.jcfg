@@ -15,7 +15,7 @@ nat: {
   ice_tcp = false
   full_trickle = true
   ignore_mdns = true
-  ice_ignore_list = [ "docker", "veth", "lo", "vmnet", "tailscale" ]
+  ice_ignore_list = [ "docker", "veth", "lo", "vmnet", "tailscale", "wlan", "br-" ]
   keep_private_host = true
 
   stun_server = "82.165.177.194"
