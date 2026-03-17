@@ -74,16 +74,15 @@ class TestJanusDestroy:
 class TestJanusSummary:
     @patch("app.services.janus.streaming_info")
     def test_extracts_fields(self, mock_info):
+        # Real Janus response: plugindata → data → info → {mount}
         mock_info.return_value = {
             "data": {
                 "info": {
-                    "info": {
-                        "id": 1,
-                        "enabled": True,
-                        "media": [
-                            {"age_ms": 100, "codec": "h264", "pt": 96, "fmtp": "profile-level-id=42e01f"}
-                        ],
-                    }
+                    "id": 1,
+                    "enabled": True,
+                    "media": [
+                        {"age_ms": 100, "codec": "h264", "pt": 96, "fmtp": "profile-level-id=42e01f"}
+                    ],
                 }
             }
         }
@@ -95,7 +94,7 @@ class TestJanusSummary:
     @patch("app.services.janus.streaming_info")
     def test_empty_media(self, mock_info):
         mock_info.return_value = {
-            "data": {"info": {"info": {"id": 1, "enabled": False, "media": [{}]}}}
+            "data": {"info": {"id": 1, "enabled": False, "media": [{}]}}
         }
         result = janus_summary(1)
         assert result["video_active"] is False

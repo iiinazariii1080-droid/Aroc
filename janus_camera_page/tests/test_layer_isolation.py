@@ -38,6 +38,7 @@ def _reset_mode() -> None:
     with _state.lock:
         _state.current = SystemMode.NOMINAL
         _state.entered_at = time.time()
+        _state.entered_at_mono = time.monotonic()
         _state.reason = "test_reset"
         _state.listeners.clear()
 

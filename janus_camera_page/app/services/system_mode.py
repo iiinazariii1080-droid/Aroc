@@ -13,7 +13,6 @@ Modes form a lattice:
 
 from __future__ import annotations
 
-import concurrent.futures
 import logging
 import os
 import threading
@@ -43,10 +42,6 @@ def _ensure_metrics():  # noqa: D401
     except Exception:  # pragma: no cover
         pass
     _metrics_loaded = True
-
-
-# Maximum time (seconds) to wait for a single mode listener callback
-_LISTENER_TIMEOUT_SEC = float(os.getenv("MODE_LISTENER_TIMEOUT_SEC", "5"))
 
 
 class SystemMode(str, Enum):
@@ -119,6 +114,7 @@ class _ModeState:
     """Thread-safe mutable mode state."""
     current: SystemMode = SystemMode.NOMINAL
     entered_at: float = field(default_factory=time.time)
+    entered_at_mono: float = field(default_factory=time.monotonic)
     reason: str = "initial"
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     listeners: List[Callable[[SystemMode, SystemMode, str], None]] = field(
@@ -144,17 +140,18 @@ def current_policy() -> ModePolicy:
 def mode_info() -> Dict[str, Any]:
     """Snapshot of current mode state (for API/diagnostics)."""
     with _state.lock:
+        policy = MODE_POLICIES[_state.current]
         return {
             "mode": _state.current.value,
             "since": _state.entered_at,
-            "uptime_s": round(time.time() - _state.entered_at, 1),
+            "uptime_s": round(time.monotonic() - _state.entered_at_mono, 1),
             "reason": _state.reason,
             "policy": {
-                "streams_enabled": current_policy().streams_enabled,
-                "max_fps": current_policy().max_fps,
-                "max_bitrate_kbps": current_policy().max_bitrate_kbps,
-                "require_turn": current_policy().require_turn,
-                "require_uplink": current_policy().require_uplink,
+                "streams_enabled": policy.streams_enabled,
+                "max_fps": policy.max_fps,
+                "max_bitrate_kbps": policy.max_bitrate_kbps,
+                "require_turn": policy.require_turn,
+                "require_uplink": policy.require_uplink,
             },
         }
 
@@ -185,18 +182,13 @@ def _post_transition(previous: SystemMode, target: SystemMode, reason: str, list
 
     for cb in listeners:
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(cb, previous, target, reason)
-                future.result(timeout=_LISTENER_TIMEOUT_SEC)
-        except concurrent.futures.TimeoutError:
-            logger.error(
-                "mode listener %s timed out after %.1fs during %s → %s",
+            cb(previous, target, reason)
+        except Exception:
+            logger.exception(
+                "mode listener %s failed during %s → %s",
                 getattr(cb, "__name__", repr(cb)),
-                _LISTENER_TIMEOUT_SEC,
                 previous.value, target.value,
             )
-        except Exception:
-            logger.exception("mode listener error")
 
 
 def transition(target: SystemMode, reason: str) -> bool:
@@ -213,6 +205,7 @@ def transition(target: SystemMode, reason: str) -> bool:
 
         _state.current = target
         _state.entered_at = time.time()
+        _state.entered_at_mono = time.monotonic()
         _state.reason = reason
         listeners = list(_state.listeners)
 
@@ -230,6 +223,7 @@ def degrade(reason: str) -> None:
             return
         _state.current = target
         _state.entered_at = time.time()
+        _state.entered_at_mono = time.monotonic()
         _state.reason = reason
         listeners = list(_state.listeners)
     _post_transition(cur, target, reason, listeners)
@@ -243,6 +237,7 @@ def promote(target: SystemMode, reason: str) -> bool:
         previous = _state.current
         _state.current = target
         _state.entered_at = time.time()
+        _state.entered_at_mono = time.monotonic()
         _state.reason = reason
         listeners = list(_state.listeners)
     _post_transition(previous, target, reason, listeners)
