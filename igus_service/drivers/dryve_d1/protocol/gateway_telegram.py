@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any
 
-from ..config.runtime_policy import allow_tid_mismatch, allow_unit_id_wildcard
 from .exceptions import (
     ModbusGatewayException,
     ResponseMismatch,
@@ -18,22 +20,40 @@ from .validator import (
     validate_gateway_response,
 )
 
+_WARN_INTERVAL_S = 10.0
+_last_warned: dict[str, float] = {}
+_warn_lock = threading.Lock()
+
+
+def _rate_limited_warning(logger: logging.Logger, key: str, msg: str, *args: Any) -> None:
+    """Log a WARNING at most once per _WARN_INTERVAL_S per key (thread-safe)."""
+    now = time.monotonic()
+    with _warn_lock:
+        if now - _last_warned.get(key, 0.0) >= _WARN_INTERVAL_S:
+            _last_warned[key] = now
+            logger.warning(msg, *args)
+
 
 @dataclass(frozen=True, slots=True)
 class GatewayTelegram:
     """A strict Modbus TCP Gateway telegram (ADU) for dryve D1."""
 
     adu: bytes
+    _tid: int = field(default=0, init=False, repr=False)
+    _uid: int = field(default=0, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        mbap = parse_mbap(self.adu)
+        object.__setattr__(self, "_tid", mbap.transaction_id)
+        object.__setattr__(self, "_uid", mbap.unit_id)
 
     @property
     def transaction_id(self) -> int:
-        mbap = parse_mbap(self.adu)
-        return mbap.transaction_id
+        return self._tid
 
     @property
     def unit_id(self) -> int:
-        mbap = parse_mbap(self.adu)
-        return mbap.unit_id
+        return self._uid
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,8 +177,19 @@ def build_write_adu(
     return GatewayTelegram(adu=adu)
 
 
-def parse_adu(adu: bytes, *, request: GatewayTelegram | None = None) -> GatewayResponse:
-    """Parse a received ADU, validate it, and (optionally) match it to a request."""
+def parse_adu(
+    adu: bytes,
+    *,
+    request: GatewayTelegram | None = None,
+    tid_mismatch_ok: bool | None = None,
+    unit_id_wildcard_ok: bool | None = None,
+) -> GatewayResponse:
+    """Parse a received ADU, validate it, and (optionally) match it to a request.
+
+    Args:
+        tid_mismatch_ok: Tolerate TID mismatch. ``None`` → consult runtime_policy.
+        unit_id_wildcard_ok: Tolerate unit-id wildcard. ``None`` → consult runtime_policy.
+    """
     if not isinstance(adu, (bytes, bytearray)):
         raise TypeError("adu must be bytes")
     adu = bytes(adu)
@@ -207,10 +238,15 @@ def parse_adu(adu: bytes, *, request: GatewayTelegram | None = None) -> GatewayR
             # We treat 0x00 and 0xFF as "wildcard" Unit IDs by default for compatibility with simulators,
             # while keeping strict validation for other mismatches.
             if resp.unit_id in (0x00, 0xFF):
-                allow = allow_unit_id_wildcard()
+                if unit_id_wildcard_ok is not None:
+                    allow = unit_id_wildcard_ok
+                else:
+                    from ..config.runtime_policy import allow_unit_id_wildcard
+                    allow = allow_unit_id_wildcard()
                 if allow:
-                    logger = logging.getLogger(__name__)
-                    logger.warning(
+                    _rate_limited_warning(
+                        logging.getLogger(__name__),
+                        "unit_id_mismatch",
                         "Unit ID mismatch tolerated (wildcard): resp=%d, req=%d (index=%04X:%d). "
                         "Set DRYVE_ALLOW_UNIT_ID_WILDCARD=0 to enforce strict Unit ID checking.",
                         resp.unit_id,
@@ -230,10 +266,15 @@ def parse_adu(adu: bytes, *, request: GatewayTelegram | None = None) -> GatewayR
         # Mismatch indicates protocol error or race condition - should not be ignored
         if resp.transaction_id != request.transaction_id:
             # Allow opt-in relaxation for simulators/devices that don't echo TID.
-            allow = allow_tid_mismatch()
+            if tid_mismatch_ok is not None:
+                allow = tid_mismatch_ok
+            else:
+                from ..config.runtime_policy import allow_tid_mismatch
+                allow = allow_tid_mismatch()
             if allow:
-                logger = logging.getLogger(__name__)
-                logger.warning(
+                _rate_limited_warning(
+                    logging.getLogger(__name__),
+                    "tid_mismatch",
                     "Transaction ID mismatch tolerated: resp=%d, req=%d (index=%04X:%d). "
                     "Set DRYVE_ALLOW_TID_MISMATCH=0 to re-enable strict checking.",
                     resp.transaction_id,
@@ -250,13 +291,36 @@ def parse_adu(adu: bytes, *, request: GatewayTelegram | None = None) -> GatewayR
         # Read requests expect data length = byte_count; write requests typically ack with byte_count=0.
         req_is_write = request.adu[9] == 0x01
         if not req_is_write:
-            # Tolerate simulators/devices that return more bytes than requested
-            # (e.g. returning 2 bytes for an INT8 read — common for Modbus 16-bit registers).
-            # We only raise if the response has FEWER bytes than requested.
             resp_byte_count = int(resp.byte_count) if resp.byte_count is not None else 0
-            if resp_byte_count < request.adu[18]:
-                raise ResponseMismatch(f"Byte count mismatch in read response: resp={resp_byte_count}, req={request.adu[18]}")
+            req_byte_count = request.adu[18]
             if len(resp.data) != resp_byte_count:
                 raise ResponseMismatch(f"Data length mismatch in read response: got {len(resp.data)}, expected {resp_byte_count}")
+            # Tolerate devices that return fewer bytes than requested:
+            # the dryve D1 gateway may return 2 bytes for a 4-byte read when
+            # the OD object is 16-bit.  Zero-pad (little-endian) so the
+            # caller always sees the requested width.
+            if resp_byte_count < req_byte_count:
+                _rate_limited_warning(
+                    logging.getLogger(__name__),
+                    "byte_count_short",
+                    "Read response shorter than requested: resp=%d, req=%d (index=%04X:%d). "
+                    "Zero-padding to requested size.",
+                    resp_byte_count,
+                    req_byte_count,
+                    resp.index if resp.index is not None else 0,
+                    resp.subindex if resp.subindex is not None else 0,
+                )
+                padded_data = resp.data + b"\x00" * (req_byte_count - resp_byte_count)
+                resp = GatewayResponse(
+                    transaction_id=resp.transaction_id,
+                    unit_id=resp.unit_id,
+                    function_code=resp.function_code,
+                    protocol_control=resp.protocol_control,
+                    index=resp.index,
+                    subindex=resp.subindex,
+                    byte_count=req_byte_count,
+                    data=padded_data,
+                    exception_code=resp.exception_code,
+                )
 
     return resp

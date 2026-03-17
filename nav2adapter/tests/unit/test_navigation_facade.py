@@ -23,7 +23,7 @@ def mock_mqtt():
 @pytest.fixture
 def mock_handler():
     m = MagicMock()
-    m.handle_navigate_to = AsyncMock()
+    m.handle_drive_to_position = AsyncMock()
     m.handle_cancel = AsyncMock()
     return m
 
@@ -33,13 +33,13 @@ def _patch_settings(**extra):
     return patch("app.navigation_facade.settings", **merged)
 
 
-# ── send_navigate_to ────────────────────────────────────────────
-class TestSendNavigateTo:
+# ── send_drive_to_position ────────────────────────────────────────────
+class TestSendDriveToPosition:
     @pytest.mark.asyncio
     async def test_mqtt_happy_path(self, mock_mqtt):
         facade = NavigationFacade(mock_mqtt)
         with _patch_settings():
-            result = await facade.send_navigate_to(target_id="station_A")
+            result = await facade.send_drive_to_position(target_id="station_A")
         assert result.delivery == "mqtt"
         mock_mqtt.publish_command.assert_awaited_once()
 
@@ -49,7 +49,7 @@ class TestSendNavigateTo:
         facade = NavigationFacade(mock_mqtt)
         with _patch_settings():
             with pytest.raises(MqttUnavailableError):
-                await facade.send_navigate_to(target_id="station_A")
+                await facade.send_drive_to_position(target_id="station_A")
 
     @pytest.mark.asyncio
     async def test_mqtt_generic_error_wraps(self, mock_mqtt):
@@ -57,7 +57,7 @@ class TestSendNavigateTo:
         facade = NavigationFacade(mock_mqtt)
         with _patch_settings():
             with pytest.raises(MqttUnavailableError, match="publish_failed"):
-                await facade.send_navigate_to(target_id="station_A")
+                await facade.send_drive_to_position(target_id="station_A")
 
     @pytest.mark.asyncio
     async def test_local_fallback(self, mock_handler):
@@ -65,22 +65,22 @@ class TestSendNavigateTo:
             None, command_handler=mock_handler, allow_direct_http_commands=True
         )
         with _patch_settings():
-            result = await facade.send_navigate_to(target_id="station_B")
+            result = await facade.send_drive_to_position(target_id="station_B")
         assert result.delivery == "local"
-        mock_handler.handle_navigate_to.assert_awaited_once()
+        mock_handler.handle_drive_to_position.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_no_mqtt_no_local_raises(self):
         facade = NavigationFacade(None)
         with _patch_settings():
             with pytest.raises(MqttUnavailableError, match="not connected"):
-                await facade.send_navigate_to(target_id="X")
+                await facade.send_drive_to_position(target_id="X")
 
     @pytest.mark.asyncio
     async def test_custom_command_id(self, mock_mqtt):
         facade = NavigationFacade(mock_mqtt)
         with _patch_settings():
-            result = await facade.send_navigate_to(
+            result = await facade.send_drive_to_position(
                 target_id="dock", command_id="custom-id", timestamp="2024-01-01T00:00:00Z"
             )
         assert result.payload["command_id"] == "custom-id"
@@ -93,7 +93,7 @@ class TestSendNavigateTo:
             mock_mqtt, command_handler=mock_handler, allow_direct_http_commands=True
         )
         with _patch_settings(mqtt_command_retry_wait_s=0):
-            result = await facade.send_navigate_to(target_id="station_C")
+            result = await facade.send_drive_to_position(target_id="station_C")
         assert result.delivery == "local"
 
 
@@ -165,7 +165,7 @@ class TestMqttReconnectWait:
 
         facade = NavigationFacade(mock_mqtt)
         with _patch_settings(mqtt_command_retry_wait_s=2.0, mqtt_command_retry_poll_s=0.1):
-            result = await facade.send_navigate_to(target_id="pos_A")
+            result = await facade.send_drive_to_position(target_id="pos_A")
 
         assert result.delivery == "mqtt"
         mock_mqtt.publish_command.assert_awaited_once()
@@ -178,7 +178,7 @@ class TestMqttReconnectWait:
 
         with _patch_settings(mqtt_command_retry_wait_s=0.3, mqtt_command_retry_poll_s=0.1):
             with pytest.raises(MqttUnavailableError):
-                await facade.send_navigate_to(target_id="X")
+                await facade.send_drive_to_position(target_id="X")
 
     @pytest.mark.asyncio
     async def test_wait_timeout_falls_to_local(self, mock_mqtt, mock_handler):
@@ -189,7 +189,7 @@ class TestMqttReconnectWait:
         )
 
         with _patch_settings(mqtt_command_retry_wait_s=0.3, mqtt_command_retry_poll_s=0.1):
-            result = await facade.send_navigate_to(target_id="pos_B")
+            result = await facade.send_drive_to_position(target_id="pos_B")
 
         assert result.delivery == "local"
 
@@ -201,7 +201,7 @@ class TestMqttReconnectWait:
 
         with _patch_settings(mqtt_command_retry_wait_s=0):
             with pytest.raises(MqttUnavailableError):
-                await facade.send_navigate_to(target_id="X")
+                await facade.send_drive_to_position(target_id="X")
 
     @pytest.mark.asyncio
     async def test_cancel_also_waits(self, mock_mqtt):

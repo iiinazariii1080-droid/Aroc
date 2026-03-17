@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
-from typing import Protocol
+
+_LOGGER = logging.getLogger(__name__)
 
 from ..od.controlword import (
     CWBit,
@@ -13,18 +15,8 @@ from ..od.controlword import (
 )
 from ..od.indices import ODIndex
 from ..od.statusword import decode_statusword
+from ..protocol.accessor import AsyncODAccessor
 from ..transport.clock import monotonic_s
-
-
-class AsyncODAccessor(Protocol):
-    """Minimal async OD accessor required by motion primitives."""
-
-    async def read_u16(self, index: int, subindex: int = 0) -> int: ...
-    async def read_i8(self, index: int, subindex: int = 0) -> int: ...
-    async def write_u16(self, index: int, value: int, subindex: int = 0) -> None: ...
-    async def write_u8(self, index: int, value: int, subindex: int = 0) -> None: ...
-    async def write_u32(self, index: int, value: int, subindex: int = 0) -> None: ...
-    async def write_i32(self, index: int, value: int, subindex: int = 0) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,11 +46,19 @@ class ProfileVelocity:
     It assumes the drive is already in Operation Enabled when you command motion.
     """
 
-    def __init__(self, od: AsyncODAccessor, *, config: ProfileVelocityConfig | None = None) -> None:
+    def __init__(
+        self,
+        od: AsyncODAccessor,
+        *,
+        config: ProfileVelocityConfig | None = None,
+        abort_event: asyncio.Event | None = None,
+    ) -> None:
         self._od = od
         self._cfg = config or ProfileVelocityConfig()
+        self._abort: asyncio.Event | None = abort_event
 
     async def ensure_mode(self) -> None:
+        _LOGGER.debug("PV: setting mode=%d", MODE_PROFILE_VELOCITY)
         await self._od.write_u8(int(ODIndex.MODES_OF_OPERATION), MODE_PROFILE_VELOCITY, 0)
         if not self._cfg.verify_mode:
             # Rely on fixed delay instead of 0x6061 (avoids timeout when gateway returns stale 0x6061)
@@ -91,6 +91,7 @@ class ProfileVelocity:
 
     async def set_target_velocity(self, velocity: int) -> None:
         """Set Target Velocity (0x60FF). Value is typically INT32."""
+        _LOGGER.debug("PV: set_target_velocity=%d", velocity)
         await self._od.write_i32(int(ODIndex.TARGET_VELOCITY), int(velocity), 0)
 
     async def latch_new_setpoint(self) -> None:
@@ -103,6 +104,7 @@ class ProfileVelocity:
 
     async def stop_velocity_zero(self) -> None:
         """Stop by commanding target velocity to 0."""
+        _LOGGER.info("PV: stop (velocity → 0)")
         await self.set_target_velocity(0)
 
     async def stop(self) -> None:
@@ -127,6 +129,9 @@ class ProfileVelocity:
         This method writes Controlword, thus it includes hold bits (0..3).
         Per manual: after Operation Enabled, bits 0..3 must always be sent.
         """
+        if self._abort is not None and self._abort.is_set():
+            _LOGGER.debug("PV: halt skipped — abort event active")
+            return
         # Per manual: after Operation Enabled, bits 0..3 must always be sent
         # Start with base containing hold bits (0x000F)
         base = cw_enable_operation()  # 0x000F = bits 0,1,2,3 set

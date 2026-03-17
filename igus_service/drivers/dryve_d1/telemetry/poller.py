@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
-
 from ..od.indices import ODIndex
 from ..od.statusword import decode_statusword, infer_cia402_state
+from ..protocol.accessor import AsyncODAccessor
 from ..transport.clock import monotonic_s
 from .snapshots import DriveSnapshot
 
-
-class AsyncODAccessor(Protocol):
-    async def read_u16(self, index: int, subindex: int = 0) -> int: ...
-    async def read_i32(self, index: int, subindex: int = 0) -> int: ...
-    async def read_i8(self, index: int, subindex: int = 0) -> int: ...
+_LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class TelemetryConfig:
@@ -54,6 +50,10 @@ class TelemetryPoller:
         return self._latest
 
     @property
+    def interval_s(self) -> float:
+        return float(self._cfg.interval_s)
+
+    @property
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
 
@@ -75,7 +75,8 @@ class TelemetryPoller:
         if not self.is_running:
             return
         self._stop_evt.set()
-        assert self._task is not None
+        if self._task is None:
+            raise RuntimeError("Poller task is None despite is_running=True")
         try:
             await self._task
         finally:
@@ -83,7 +84,6 @@ class TelemetryPoller:
 
     async def _run(self) -> None:
         interval = max(0.02, float(self._cfg.interval_s))
-        iteration = 0
         while not self._stop_evt.is_set():
             t0 = monotonic_s()
             try:
@@ -113,12 +113,13 @@ class TelemetryPoller:
                     try:
                         self._on(snap)
                     except Exception:
-                        # callback errors must not kill the poller
-                        pass
+                        _LOGGER.warning(
+                            "Snapshot callback raised — ignored to keep poller alive",
+                            exc_info=True,
+                        )
             except Exception:
                 if not self._cfg.tolerate_errors:
                     raise
             # sleep remaining time
             dt = monotonic_s() - t0
-            iteration += 1
             await asyncio.sleep(max(0.0, interval - dt))

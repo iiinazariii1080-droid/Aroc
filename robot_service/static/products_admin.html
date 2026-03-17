@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Products — Admin</title>
+  <style>
+    :root {
+      --bg:        #0f172a;
+      --surface:   #1e293b;
+      --surface2:  #263047;
+      --border:    #334155;
+      --text:      #f1f5f9;
+      --muted:     #94a3b8;
+      --blue:      #3b82f6;
+      --blue-dark: #1d4ed8;
+      --green:     #22c55e;
+      --red:       #ef4444;
+      --yellow:    #f59e0b;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ─────────────────────────────────────── */
+    .header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .header h1 { font-size: 18px; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+    .header-actions { display: flex; gap: 8px; align-items: center; }
+
+    /* ── Layout ─────────────────────────────────────── */
+    .main {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 28px 16px 60px;
+    }
+
+    /* ── Record card ─────────────────────────────────── */
+    .record-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px 24px;
+      margin-bottom: 28px;
+    }
+    .card-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--muted);
+      margin-bottom: 16px;
+    }
+    .record-row {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+    .field { display: flex; flex-direction: column; gap: 5px; }
+    .field label { font-size: 12px; color: var(--muted); }
+    .field input {
+      background: var(--bg);
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 8px 12px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .field input:focus { border-color: var(--blue); }
+    .field-name input { min-width: 240px; }
+    .field-vel input  { width: 80px; }
+
+    /* ── Buttons ─────────────────────────────────────── */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      border: none; border-radius: 8px; padding: 9px 16px;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: opacity .15s, background .15s;
+      white-space: nowrap;
+    }
+    .btn:hover:not(:disabled) { opacity: .85; }
+    .btn:disabled { opacity: .35; cursor: not-allowed; }
+    .btn-primary { background: var(--blue); color: #fff; }
+    .btn-success { background: var(--green); color: #fff; }
+    .btn-danger  { background: var(--red);   color: #fff; }
+    .btn-ghost   { background: var(--surface2); color: var(--text); border: 1.5px solid var(--border); }
+    .btn-sm { padding: 6px 12px; font-size: 12px; border-radius: 6px; }
+    .btn-icon { padding: 7px 11px; font-size: 15px; border-radius: 7px; }
+
+    /* ── Section header ──────────────────────────────── */
+    .section-head {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .section-head h2 {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .07em; color: var(--muted);
+    }
+
+    /* ── Waypoint card ───────────────────────────────── */
+    .wp-list { display: flex; flex-direction: column; gap: 10px; }
+
+    .wp-card {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: 14px;
+      overflow: hidden;
+      transition: border-color .2s;
+    }
+    .wp-card.is-running { border-color: var(--blue); }
+    .wp-card.is-editing { border-color: var(--yellow); }
+    .wp-card.is-done    { border-color: var(--green); }
+    .wp-card.is-error   { border-color: var(--red); }
+
+    .wp-top {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 16px 18px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .wp-info { flex: 1; min-width: 0; }
+    .wp-name {
+      font-size: 15px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .wp-name.unnamed { color: var(--muted); font-style: italic; }
+    .wp-chips { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+    .chip {
+      font-size: 11px; color: var(--muted);
+      display: flex; align-items: center; gap: 3px;
+    }
+    .chip b { color: var(--text); font-weight: 500; }
+
+    .wp-btns {
+      display: flex; gap: 6px; align-items: center;
+      flex-shrink: 0;
+    }
+
+    /* ── Status bar (running) ────────────────────────── */
+    .wp-status {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 18px;
+      background: var(--surface2);
+      border-top: 1px solid var(--border);
+      font-size: 13px; color: var(--muted);
+    }
+    .wp-status.success { color: var(--green); }
+    .wp-status.error   { color: var(--red); }
+
+    .spinner {
+      width: 15px; height: 15px; flex-shrink: 0;
+      border: 2px solid var(--border);
+      border-top-color: var(--blue);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Edit panel ──────────────────────────────────── */
+    .wp-edit {
+      background: var(--surface2);
+      border-top: 1px solid var(--border);
+      padding: 16px 18px;
+    }
+    .edit-row {
+      display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;
+    }
+
+    /* ── Details panel ───────────────────────────────── */
+    .wp-details {
+      background: var(--surface2);
+      border-top: 1px solid var(--border);
+      padding: 16px 18px;
+    }
+    .details-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+    .det-group h4 {
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .07em; color: var(--muted); margin-bottom: 8px;
+    }
+    .det-row {
+      display: flex; justify-content: space-between;
+      font-size: 12px; margin-bottom: 3px;
+    }
+    .det-row .k { color: var(--muted); }
+    .det-row .v { color: var(--text); font-weight: 500; font-family: monospace; }
+
+    /* ── Empty ───────────────────────────────────────── */
+    .empty {
+      text-align: center; padding: 64px 20px; color: var(--muted);
+    }
+
+    /* ── Toast ───────────────────────────────────────── */
+    #toasts {
+      position: fixed; bottom: 20px; right: 20px;
+      display: flex; flex-direction: column; gap: 8px;
+      z-index: 100; pointer-events: none;
+    }
+    .toast {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: 10px;
+      padding: 11px 16px;
+      font-size: 13px;
+      min-width: 220px;
+      pointer-events: auto;
+      animation: toast-in .2s ease;
+    }
+    .toast.success { border-color: var(--green); }
+    .toast.error   { border-color: var(--red);   }
+    @keyframes toast-in { from { opacity:0; transform:translateY(8px); } }
+
+    /* ── Icon refresh btn ────────────────────────────── */
+    .icon-btn {
+      background: var(--surface2); border: 1.5px solid var(--border);
+      color: var(--text); border-radius: 8px; padding: 7px 13px;
+      cursor: pointer; font-size: 16px; transition: opacity .15s;
+    }
+    .icon-btn:hover { opacity: .8; }
+
+    @media (max-width: 600px) {
+      .details-grid { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<header class="header">
+  <h1>Products</h1>
+  <div class="header-actions">
+    <a href="/" style="color:var(--muted);font-size:13px;text-decoration:none;">← Home</a>
+    <button class="icon-btn" onclick="loadWaypoints()" title="Refresh">⟳</button>
+  </div>
+</header>
+
+<main class="main">
+
+  <!-- Global speed -->
+  <div class="record-card" style="margin-bottom:16px">
+    <div class="card-title">Global speed</div>
+    <div class="record-row">
+      <div class="field field-vel">
+        <label>Speed, %</label>
+        <input id="globalVel" type="number" min="1" max="100" style="width:90px" />
+      </div>
+      <button class="btn btn-ghost" id="speedBtn" onclick="handleSaveSpeed()">Set speed</button>
+      <span id="speedStatus" style="font-size:12px;color:var(--muted);align-self:center"></span>
+    </div>
+  </div>
+
+  <!-- Record new -->
+  <div class="record-card">
+    <div class="card-title">Record new position</div>
+    <div class="record-row">
+      <div class="field field-name">
+        <label>Name</label>
+        <input id="newName" type="text" placeholder="Shelf A, row 1" />
+      </div>
+      <button class="btn btn-primary" id="recordBtn" onclick="handleRecord()">
+        Record current position
+      </button>
+    </div>
+  </div>
+
+  <!-- List -->
+  <div class="section-head">
+    <h2 id="listTitle">Saved positions</h2>
+  </div>
+  <div class="wp-list" id="wpList">
+    <div class="empty">Loading...</div>
+  </div>
+
+</main>
+
+<div id="toasts"></div>
+
+<script>
+/* ───────────────────────────────────────────────────────────
+   State
+──────────────────────────────────────────────────────────── */
+let waypoints   = [];
+let editingId   = null;
+let expandedId  = null;
+let runningId   = null;
+let runningTask = null;   // { id, status, message }
+let pollTimer   = null;
+
+/* ───────────────────────────────────────────────────────────
+   API helpers
+──────────────────────────────────────────────────────────── */
+const BASE = '/api/v1/robot';
+
+async function apiFetch(method, path, body) {
+  const opts = { method, headers: { Accept: 'application/json' } };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(BASE + path, opts);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d?.detail || d?.message || `HTTP ${r.status}`);
+  return d;
+}
+const apiGet  = p      => apiFetch('GET',  p);
+const apiPost = (p, b) => apiFetch('POST', p, b);
+const apiPut  = (p, b) => apiFetch('PUT',  p, b);
+
+/* ───────────────────────────────────────────────────────────
+   Settings
+──────────────────────────────────────────────────────────── */
+async function loadSettings() {
+  try {
+    const s = await apiGet('/settings');
+    document.getElementById('globalVel').value = s.velocity_percent ?? 20;
+  } catch (_) {}
+}
+
+async function handleSaveSpeed() {
+  const v = parseFloat(document.getElementById('globalVel').value);
+  if (!v || v < 1 || v > 100) { toast('Speed must be 1–100', 'error'); return; }
+  const btn = document.getElementById('speedBtn');
+  btn.disabled = true;
+  try {
+    await apiPut('/settings', { velocity_percent: v });
+    document.getElementById('speedStatus').textContent = 'Saved';
+    setTimeout(() => { document.getElementById('speedStatus').textContent = ''; }, 2000);
+  } catch (e) {
+    toast('Speed save error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ───────────────────────────────────────────────────────────
+   Load
+──────────────────────────────────────────────────────────── */
+async function loadWaypoints() {
+  try {
+    waypoints = await apiGet('/waypoints/list');
+    render();
+  } catch (e) {
+    toast('Load error: ' + e.message, 'error');
+  }
+}
+
+/* ───────────────────────────────────────────────────────────
+   Actions
+──────────────────────────────────────────────────────────── */
+async function handleRecord() {
+  const name = document.getElementById('newName').value.trim();
+  const btn  = document.getElementById('recordBtn');
+  btn.disabled = true; btn.textContent = 'Recording...';
+  try {
+    const r = await apiPost('/waypoints/save', { name });
+    toast(`Position "${name || r.id}" recorded`, 'success');
+    document.getElementById('newName').value = '';
+    await loadWaypoints();
+  } catch (e) {
+    toast('Record error: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Record current position';
+  }
+}
+
+async function handleDelete(id, evt) {
+  evt.stopPropagation();
+  const wp = waypoints.find(w => w.id === id);
+  if (!confirm(`Delete position "${wp?.name || id}"?`)) return;
+  try {
+    await apiPost(`/waypoints/delete?position_id=${enc(id)}`, {});
+    toast('Position deleted', 'success');
+    if (editingId  === id) editingId  = null;
+    if (expandedId === id) expandedId = null;
+    await loadWaypoints();
+  } catch (e) {
+    toast('Delete error: ' + e.message, 'error');
+  }
+}
+
+function startEdit(id, evt) {
+  evt.stopPropagation();
+  editingId  = id;
+  expandedId = id;
+  render();
+  setTimeout(() => document.getElementById(`ename-${id}`)?.focus(), 50);
+}
+
+function cancelEdit(evt) {
+  if (evt) evt.stopPropagation();
+  editingId = null;
+  render();
+}
+
+async function handleUpdate(id, evt) {
+  evt.stopPropagation();
+  const name = document.getElementById(`ename-${id}`).value.trim();
+  const vel  = parseFloat(document.getElementById(`evel-${id}`).value)  || 20;
+  try {
+    await apiPut(`/waypoints/update?position_id=${enc(id)}`, { name, velocity_percent: vel });
+    toast('Saved', 'success');
+    editingId = null;
+    await loadWaypoints();
+  } catch (e) {
+    toast('Save error: ' + e.message, 'error');
+  }
+}
+
+async function handleRun(id, evt) {
+  evt.stopPropagation();
+  if (runningId) { toast('A task is already running', 'error'); return; }
+  runningId   = id;
+  runningTask = { id: null, status: 'starting', message: 'Starting...' };
+  render();
+  try {
+    const r = await apiPost(`/waypoints/run?position_id=${enc(id)}`, {});
+    runningTask = { id: r.task_id, status: 'working', message: 'Running...' };
+    render();
+    startPolling();
+  } catch (e) {
+    runningTask = { id: null, status: 'error', message: e.message };
+    render();
+    toast('Start error: ' + e.message, 'error');
+    setTimeout(() => { if (runningId === id) { runningId = null; runningTask = null; render(); } }, 3000);
+  }
+}
+
+async function handleCancel(evt) {
+  evt.stopPropagation();
+  if (!runningTask?.id) return;
+  try {
+    await apiPost(`/tasks/cancel/${enc(runningTask.id)}`, {});
+    toast('Task cancelled', 'success');
+  } catch (e) {
+    toast('Cancel error: ' + e.message, 'error');
+  }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    if (!runningTask?.id) { clearInterval(pollTimer); return; }
+    try {
+      const s = await apiGet(`/tasks/status/${enc(runningTask.id)}`);
+      const active = s.status === 'pending' || s.status === 'working';
+      runningTask = { ...runningTask, status: s.status };
+      if (!active) {
+        clearInterval(pollTimer);
+        const ok = s.status === 'finished' && s.result?.result?.success !== false;
+        runningTask = {
+          ...runningTask,
+          message: ok ? 'Done' : (s.result?.error || s.status),
+        };
+        render();
+        if (ok) toast('Movement completed', 'success');
+        else    toast(`Task finished: ${s.status}`, 'error');
+        setTimeout(() => { runningId = null; runningTask = null; render(); }, 2500);
+      } else {
+        render();
+      }
+    } catch (_) { /* network blip */ }
+  }, 1200);
+}
+
+function toggleExpand(id) {
+  if (editingId === id) return;
+  expandedId = expandedId === id ? null : id;
+  render();
+}
+
+/* ───────────────────────────────────────────────────────────
+   Render
+──────────────────────────────────────────────────────────── */
+function fmt(v, d = 1) {
+  const n = parseFloat(v);
+  return isNaN(n) ? '—' : n.toFixed(d);
+}
+function enc(s) { return encodeURIComponent(s); }
+function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function escAttr(s) { return String(s ?? '').replace(/"/g, '&quot;'); }
+
+function renderCard(wp) {
+  const p      = wp.params || {};
+  const loc    = p.location || {};
+  const lift   = fmt(p.lift_position_cm, 1);
+  const vel    = fmt(p.velocity_percent, 0);
+  const xj     = p.xarm_joints;
+  const joints = xj?.joints || {};
+  const name   = wp.name || '';
+
+  const isRun  = runningId === wp.id;
+  const isEdit = editingId === wp.id;
+  const isExp  = expandedId === wp.id && !isEdit;
+
+  // card classes
+  let cls = 'wp-card';
+  if (isRun) {
+    const st = runningTask?.status;
+    if (st === 'finished') cls += ' is-done';
+    else if (st === 'error') cls += ' is-error';
+    else cls += ' is-running';
+  }
+  if (isEdit) cls += ' is-editing';
+
+  let html = `<div class="${cls}" id="wpcard-${wp.id}">`;
+
+  // ── top row
+  html += `<div class="wp-top" onclick="toggleExpand('${esc(wp.id)}')">
+    <div class="wp-info">
+      <div class="wp-name ${name ? '' : 'unnamed'}">${esc(name || '(unnamed)')}</div>
+      <div class="wp-chips">
+        <div class="chip">pos <b>${fmt(loc.x_m,2)}m, ${fmt(loc.y_m,2)}m</b></div>
+        <div class="chip">lift <b>${lift} cm</b></div>
+        <div class="chip">speed <b>${vel}%</b></div>
+        ${xj ? `<div class="chip">arm <b>J1:${fmt(joints.j1,1)}°</b></div>` : ''}
+      </div>
+    </div>
+    <div class="wp-btns" onclick="event.stopPropagation()">`;
+
+  if (isRun) {
+    const done = runningTask?.status === 'finished' || runningTask?.status === 'error' || runningTask?.status === 'cancelled';
+    html += done
+      ? `<span style="font-size:12px;color:var(--muted)">${esc(runningTask.message)}</span>`
+      : `<div class="spinner"></div>
+         <button class="btn btn-ghost btn-sm" onclick="handleCancel(event)">Cancel</button>`;
+  } else {
+    html += `
+      <button class="btn btn-success btn-icon" onclick="handleRun('${esc(wp.id)}',event)" title="Run" ${isEdit ? 'disabled' : ''}>▶</button>
+      <button class="btn btn-ghost  btn-icon" onclick="startEdit('${esc(wp.id)}',event)" title="Edit">✏</button>
+      <button class="btn btn-danger btn-icon" onclick="handleDelete('${esc(wp.id)}',event)" title="Delete">✕</button>`;
+  }
+
+  html += `</div></div>`;
+
+  // ── edit panel
+  if (isEdit) {
+    html += `<div class="wp-edit">
+      <div class="edit-row">
+        <div class="field field-name">
+          <label>Name</label>
+          <input id="ename-${esc(wp.id)}" type="text" value="${escAttr(name)}" placeholder="Name" />
+        </div>
+        <div class="field field-vel">
+          <label>Speed, %</label>
+          <input id="evel-${esc(wp.id)}" type="number" value="${vel}" min="1" max="100" />
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="handleUpdate('${esc(wp.id)}',event)">Save</button>
+        <button class="btn btn-ghost  btn-sm" onclick="cancelEdit(event)">Cancel</button>
+      </div>
+    </div>`;
+  }
+
+  // ── details panel
+  if (isExp) {
+    const j = joints;
+    html += `<div class="wp-details">
+      <div class="details-grid">
+        <div class="det-group">
+          <h4>AGV Position</h4>
+          <div class="det-row"><span class="k">X</span><span class="v">${fmt(loc.x_m,3)} m</span></div>
+          <div class="det-row"><span class="k">Y</span><span class="v">${fmt(loc.y_m,3)} m</span></div>
+          <div class="det-row"><span class="k">θ</span><span class="v">${fmt(loc.theta_deg,1)}°</span></div>
+          <div class="det-row"><span class="k">Map</span><span class="v">${loc.map_id ?? 0}</span></div>
+        </div>
+        <div class="det-group">
+          <h4>Lift / Motion</h4>
+          <div class="det-row"><span class="k">Height</span><span class="v">${lift} cm</span></div>
+          <div class="det-row"><span class="k">Speed</span><span class="v">${vel}%</span></div>
+          <div class="det-row"><span class="k" style="margin-top:6px">ID</span><span class="v" style="font-size:10px">${esc(wp.id)}</span></div>
+        </div>
+        ${xj ? `<div class="det-group">
+          <h4>Joint Angles</h4>
+          ${['j1','j2','j3','j4','j5','j6'].map(k =>
+            `<div class="det-row"><span class="k">${k.toUpperCase()}</span><span class="v">${fmt(j[k],2)}°</span></div>`
+          ).join('')}
+        </div>` : '<div class="det-group"></div>'}
+      </div>
+    </div>`;
+  }
+
+  html += `</div>`;
+  return html;
+}
+
+function render() {
+  const el    = document.getElementById('wpList');
+  const title = document.getElementById('listTitle');
+  title.textContent = `Saved positions (${waypoints.length})`;
+
+  if (!waypoints.length) {
+    el.innerHTML = `<div class="empty">
+      <div style="font-size:15px;margin-bottom:6px">No positions found</div>
+      <div style="font-size:13px">Record the first position using the form above</div>
+    </div>`;
+    return;
+  }
+
+  el.innerHTML = waypoints.map(renderCard).join('');
+}
+
+/* ───────────────────────────────────────────────────────────
+   Toast
+──────────────────────────────────────────────────────────── */
+function toast(msg, type = 'info') {
+  const c  = document.getElementById('toasts');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  c.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+/* ───────────────────────────────────────────────────────────
+   Enter key on record form
+──────────────────────────────────────────────────────────── */
+document.getElementById('newName').addEventListener('keydown', e => {
+  if (e.key === 'Enter') handleRecord();
+});
+
+/* ── Init ── */
+loadSettings();
+loadWaypoints();
+</script>
+</body>
+</html>

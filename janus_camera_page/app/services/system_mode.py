@@ -131,12 +131,14 @@ _state = _ModeState()
 
 def current_mode() -> SystemMode:
     """Return the current system operating mode."""
-    return _state.current
+    with _state.lock:
+        return _state.current
 
 
 def current_policy() -> ModePolicy:
     """Return the policy for the current operating mode."""
-    return MODE_POLICIES[_state.current]
+    with _state.lock:
+        return MODE_POLICIES[_state.current]
 
 
 def mode_info() -> Dict[str, Any]:

@@ -21,6 +21,8 @@ class CommandType(str, Enum):
     RECOVER_FAULTS = "RECOVER_FAULTS"
     ENABLE_MOTION = "ENABLE_MOTION"
     DISABLE_MOTION = "DISABLE_MOTION"
+    GET_TCP_POSITION = "GET_TCP_POSITION"
+    SET_TCP_POSITION = "SET_TCP_POSITION"
 
 
 class ExecutionPolicy(str, Enum):

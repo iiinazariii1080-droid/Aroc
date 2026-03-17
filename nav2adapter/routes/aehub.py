@@ -63,8 +63,8 @@ class PositionListResponse(BaseModel):
     """Response for positions list."""
     positions: List[PositionInfo]
 
-class NavigateToRequest(BaseModel):
-    """Request to send navigateTo command via backend -> MQTT."""
+class DriveToPositionRequest(BaseModel):
+    """Request to send driveToPosition command (AGV base only) via backend -> MQTT."""
     target_id: str = Field(..., min_length=1, description="Target position name (must match DB name)")
     command_id: Optional[str] = Field(default=None, description="Optional UUIDv4; generated if missing")
     timestamp: Optional[str] = Field(default=None, description="Optional ISO8601 timestamp; generated if missing")
@@ -408,12 +408,12 @@ async def get_position_status(
 
 
 @router.post(
-    "/robots/{robot_id}/commands/navigateTo",
+    "/robots/{robot_id}/commands/driveToPosition",
     response_model=CommandSendResponse,
-    summary="Send navigateTo command via backend (publishes to MQTT)",
+    summary="Send driveToPosition command (AGV base only, publishes to MQTT)",
 )
-async def send_navigate_to(
-    req: NavigateToRequest,
+async def send_drive_to_position(
+    req: DriveToPositionRequest,
     request: Request,
     robot_id: str = Path(..., description="Robot ID"),
 ) -> CommandSendResponse:
@@ -428,7 +428,7 @@ async def send_navigate_to(
         raise HTTPException(status_code=503, detail={"error": {"type": "NotReady", "msg": "Navigation service not ready"}})
 
     try:
-        res = await facade.send_navigate_to(target_id=req.target_id, command_id=command_id, timestamp=ts)
+        res = await facade.send_drive_to_position(target_id=req.target_id, command_id=command_id, timestamp=ts)
     except MqttUnavailableError as e:
         raise HTTPException(status_code=503, detail={"error": {"type": "MQTTUnavailable", "msg": str(e)}})
     except Exception as e:

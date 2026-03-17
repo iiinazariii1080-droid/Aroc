@@ -171,6 +171,10 @@ async def aggregate_services_openapi(app: FastAPI) -> Dict[str, Any]:
             stripped = strip_prefix(path_url, upstream_prefix)
             if not stripped.startswith("/"):
                 stripped = "/" + stripped
+            # Prefix operationId to avoid collisions across services in Swagger UI
+            for method_item in path_item.values():
+                if isinstance(method_item, dict) and "operationId" in method_item:
+                    method_item["operationId"] = f"{service_key}_{method_item['operationId']}"
             base_paths[f"/api/v1/{service_key}{stripped}"] = path_item
 
         comps = spec.get("components") or {}

@@ -11,32 +11,30 @@ This module implements an async state machine runner on top of a minimal OD acce
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
-from typing import Protocol
+
+_LOGGER = logging.getLogger(__name__)
 
 from ..od.controlword import (
     CWBit,
     cw_disable_voltage,
     cw_enable_operation,
     cw_fault_reset,
+    cw_quick_stop as _cw_quick_stop,
     cw_set_bits,
     cw_shutdown,
     cw_switch_on,
 )
 from ..od.indices import ODIndex
-from ..od.statusword import CiA402State, infer_cia402_state
+from ..od.statusword import CiA402State, SWBit, infer_cia402_state
+from ..protocol.accessor import AsyncODAccessor
 from ..transport.clock import monotonic_s
+from .bits import bit_is_set
 from .dominance import require_remote_enabled
 
 _U16_MASK = 0xFFFF
 _INVALID_BOOT_STATE = 0x2704  # documented as invalid state (restart required)
-
-
-class AsyncODAccessor(Protocol):
-    """Minimal async OD access required by this state machine."""
-
-    async def read_u16(self, index: int, subindex: int = 0) -> int: ...
-    async def write_u16(self, index: int, value: int, subindex: int = 0) -> None: ...
 
 
 class StateMachineError(RuntimeError):
@@ -121,30 +119,16 @@ class CiA402StateMachine:
 
     async def quick_stop(self) -> None:
         """Request quick stop.
-        
-        According to manual: quick stop is achieved by transitioning bit 2 from 1 to 0
-        while maintaining bits 0..3 (hold bits) to preserve Operation Enabled context.
-        
+
+        Per CiA402: clear bit 2 while maintaining hold bits (0,1,3).
         The drive should transition to Quick Stop Active state.
         """
-        from ..od.controlword import CWBit, cw_clear_bits, cw_enable_operation
-        
-        # Per manual: quick stop is bit2 transition from 1 to 0
-        # We must maintain bits 0..3 (hold bits) after Operation Enabled
-        base = _ensure_hold_bits(cw_enable_operation())  # 0x000F (bits 0,1,2,3 set)
-        
-        # Transition: 0x000F (bit2=1) -> 0x000D (bit2=0, keep 0,1,3)
-        quick_stop_cw = cw_clear_bits(base, CWBit.QUICK_STOP)  # Clear bit 2, keep 0,1,3
-        
-        await self.write_controlword(quick_stop_cw)
-        
-        # Wait for quick stop active state
+        await self.write_controlword(_cw_quick_stop())
+
         try:
             await self._wait_for_states({CiA402State.QUICK_STOP_ACTIVE}, timeout_s=2.0)
         except StateMachineTimeout:
-            # If quick stop active state is not reached, that's acceptable per contract
-            # (may remain in OPERATION_ENABLED if stop already active)
-            pass
+            _LOGGER.warning("Quick stop: did not reach QUICK_STOP_ACTIVE within 2s")
 
     async def shutdown(self) -> None:
         await self.write_controlword(cw_shutdown())
@@ -173,11 +157,11 @@ class CiA402StateMachine:
         """
         # Per manual, remote must be enabled for fault reset to work.
         sw = await self.read_statusword()
-        if not (sw & (1 << 3)):  # bit 3 = FAULT
+        if not bit_is_set(sw, SWBit.FAULT):
             return  # not in fault, safe to return without effect
-        
+
         # Check REMOTE bit (bit 9) - required for dryve D1
-        if not (sw & (1 << 9)):  # bit 9 = REMOTE
+        if not bit_is_set(sw, SWBit.REMOTE):
             raise StateMachineError("REMOTE bit (bit 9) must be enabled for fault reset to work")
         
         await self.write_controlword(cw_fault_reset())
@@ -185,6 +169,10 @@ class CiA402StateMachine:
         # Per contract: fault reset pulse should be at least 100ms
         await asyncio.sleep(max(0.1, self._cfg.poll_interval_s))
         await self.write_controlword(cw_shutdown())
+        # Safety: set HALT=1 after reset per manual guidance — prevents
+        # uncontrolled motion when later transitioning to Operation Enabled.
+        safe_halt = cw_set_bits(cw_shutdown(), CWBit.HALT)
+        await self.write_controlword(safe_halt)
         # Wait until fault clears with fault_reset_timeout_s
         await self._wait_for_states({
             CiA402State.SWITCH_ON_DISABLED,

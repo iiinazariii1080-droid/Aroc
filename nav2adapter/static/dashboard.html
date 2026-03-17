@@ -437,7 +437,7 @@ var positionsCache = [];
 async function loadPositions() {
     if (!ROBOT_ID) return;
     try {
-        var r = await fetch(SYMOVO+'/robot_positions/list');
+        var r = await fetch('/api/v1/robot/waypoints/list');
         var data = await r.json();
         positionsCache = Array.isArray(data) ? data : (data.positions||data.list||[]);
     } catch(e) { positionsCache = []; }
@@ -524,9 +524,9 @@ async function savePosition() {
     var editId = $('posEditId').value;
     if (editId) body.id = editId;
     try {
-        var r = await fetch(SYMOVO+'/robot_positions/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        var r = await fetch('/api/v1/robot/waypoints/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
         var j = await r.json();
-        logReq('POST','/robot_positions/save',r.status,j);
+        logReq('POST','/waypoints/save',r.status,j);
         if (!r.ok) { alert('Save failed: '+JSON.stringify(j)); return; }
         closePosForm();
         await loadPositions();
@@ -536,9 +536,9 @@ async function savePosition() {
 async function deletePosition(id, name) {
     if (!confirm('Delete position "'+name+'"?')) return;
     try {
-        var r = await fetch(SYMOVO+'/robot_positions/'+encodeURIComponent(id),{method:'DELETE'});
+        var r = await fetch('/api/v1/robot/waypoints/delete?position_id='+encodeURIComponent(id),{method:'POST'});
         var j = await r.json().catch(function(){return {status:r.status}});
-        logReq('DELETE','/robot_positions/'+id,r.status,j);
+        logReq('POST','/waypoints/delete/'+id,r.status,j);
         await loadPositions();
     } catch(e) { alert('Error: '+e.message); }
 }
@@ -673,12 +673,12 @@ async function sendNavigate() {
 
 async function sendNavigateTo(target) {
     if (!ROBOT_ID) return alert('No robot');
-    var body = {command_id:uuid(),timestamp:new Date().toISOString(),target_id:target};
+    var body = {command_id:uuid(),target_id:target,priority:'normal',timestamp:new Date().toISOString()};
     try {
-        var r = await fetch(API_BASE+'/commands/navigateTo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        var r = await fetch('/api/v1/robot/tasks/navigate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
         var j = await r.json();
         addEvent('cmd.navigateTo',j);
-        logReq('POST','/commands/navigateTo',r.status,j);
+        logReq('POST','/tasks/navigate',r.status,j);
         if (!r.ok) alert('Failed '+r.status+'\n'+JSON.stringify(j,null,2));
         pollNav();
     } catch(e) { alert('Send failed: '+e.message); }
@@ -843,10 +843,17 @@ async function saveTeleopConfig() {
 /* ========== Safety & Charging ========== */
 async function goToCharging(id) {
     try {
-        var r = await fetch(SYMOVO+'/go_to_charging_station/'+encodeURIComponent(id),{method:'POST'});
+        var r = await fetch('/api/v1/robot/tasks/go_to_charging_station', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({station_id: parseInt(id)})
+        });
         var j = await r.json().catch(function(){return {status:r.status}});
-        logReq('POST','/go_to_charging_station/'+id,r.status,j);
-    } catch(e) { logReq('POST','/go_to_charging_station/'+id,0,{error:e.message}); }
+        addEvent('cmd.goToCharging', j);
+        logReq('POST','/tasks/go_to_charging_station',r.status,j);
+        if (!r.ok) alert('Failed '+r.status+'\n'+JSON.stringify(j,null,2));
+        pollNav();
+    } catch(e) { alert('Send failed: '+e.message); }
 }
 
 async function resetSafety(endpoint, label) {

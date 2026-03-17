@@ -6,8 +6,8 @@
   // v2 is enabled by default; set false only for emergency rollback.
   const USE_V2 = true;
   const IFRAME_SRC = USE_V2
-    ? "/arm3d_v2?axes=all&camera_frustum&depth_cloud&transform&fallback=0&v=20260226_mount"
-    : "/arm3d_viewer?axes=all&camera_frustum&depth_cloud&transform&fallback=0&v=20260226_mount";
+    ? "/arm3d_v2?fallback=0&v=20260226_mount"
+    : "/arm3d_viewer?fallback=0&v=20260226_mount";
 
   const PUSH_INTERVAL_MS = 100;
   let pushTimer = null;

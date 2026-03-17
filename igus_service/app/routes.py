@@ -1,92 +1,56 @@
 import logging
-import uuid
-from collections.abc import Awaitable, Callable
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request
 
-from app.api_models import FaultResetRequest, MoveToPositionRequest, ProfileConfig, ReferenceRequest
-from app.application.drive_service import ServiceError
+from app.auth import require_api_key
+
+from app.application.commands import FaultResetCommand, MotionProfile, MoveCommand, ReferenceCommand
+from app.application.drive_service import DriveService, ServiceError
 from app.application.use_cases import DriveUseCases
-from app.command_trace import publish_command_trace_event
-from app.decorator import safe_getter
-from app.http_errors import error_detail, is_drive_connected
+from app.command_executor import run_command
+from app.config import get_settings
 from app.service_error_http import raise_service_error_http
 from app.types import ActionResponse, MotionResponse, MoveParams, PositionResponse, StatusResponse
 
 router = APIRouter(tags=["AE.01 (Igus)"])
 
-# Default values for velocity/acceleration conversion (percent to absolute)
-DEFAULT_MAX_VELOCITY = 10000  # drive units/s
-DEFAULT_MAX_ACCELERATION = 5000  # drive units/s²
-
 _LOGGER = logging.getLogger(__name__)
 
-
-def _get_drive(request: Request, *, require_connected: bool = False):
-    drive = getattr(request.app.state, "drive", None)
-    if drive is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=error_detail("DRIVE_NOT_INITIALIZED", "Driver not initialized"),
-        )
-    if require_connected and not is_drive_connected(drive):
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=error_detail("DRIVE_OFFLINE", "Driver is not connected"),
-        )
-    return drive
+# ---------------------------------------------------------------------------
+# NOTE: LEGACY_ENDPOINTS is derived at the bottom of this module (after all
+# routes are registered) so middleware can import it without a hardcoded copy.
+# ---------------------------------------------------------------------------
 
 
 def _use_cases(request: Request) -> DriveUseCases:
     return DriveUseCases(request.app.state)
 
 
-async def _execute_legacy_command(
-    request: Request,
-    *,
-    operation: str,
-    invoke: Callable[[str], Awaitable[dict]],
-) -> tuple[str, dict]:
-    command_id = uuid.uuid4().hex
-    op_id = uuid.uuid4().hex[:8]
-    try:
-        data = await invoke(op_id)
-    except ServiceError as exc:
-        raise_service_error_http(exc, request=request, operation=operation)
-        raise RuntimeError("Unreachable") from exc
-
-    await publish_command_trace_event(
-        request,
-        command_id=command_id,
-        op_id=op_id,
-        operation=operation,
-        result=data,
-        logger=_LOGGER,
-        log_prefix="legacy command",
-    )
-    return command_id, data
-
-
-@router.post("/move", response_model=ActionResponse)
-@safe_getter(ActionResponse)
+@router.post("/move", response_model=ActionResponse, dependencies=[Depends(require_api_key)])
 async def move_lift(params: MoveParams, request: Request):
-    velocity = int(params.velocity_percent / 100.0 * DEFAULT_MAX_VELOCITY)
-    accel = int(params.acceleration_percent / 100.0 * DEFAULT_MAX_ACCELERATION)
-    req = MoveToPositionRequest(
-        target_position=float(params.position),
+    s = get_settings()
+    velocity = int(params.velocity_percent / 100.0 * s.legacy_max_velocity)
+    accel = int(params.acceleration_percent / 100.0 * s.legacy_max_acceleration)
+    # Known limitation: the legacy /move endpoint has no separate
+    # deceleration parameter, so deceleration is set equal to acceleration.
+    # Use POST /drive/move_to_position for independent decel control.
+    cmd = MoveCommand(
+        target_position=int(params.position),
         relative=False,
-        profile=ProfileConfig(
-            velocity=float(velocity),
-            acceleration=float(accel),
-            deceleration=float(accel),
+        profile=MotionProfile(
+            velocity=velocity,
+            acceleration=accel,
+            deceleration=accel,
         ),
         timeout_ms=30000,
     )
 
-    command_id, data = await _execute_legacy_command(
+    command_id, data = await run_command(
         request,
         operation="move_to_position",
-        invoke=lambda op_id: _use_cases(request).move_to_position(req, op_id=op_id),
+        invoke=lambda op_id: _use_cases(request).move_to_position(cmd, op_id=op_id),
+        log_prefix="legacy command",
+        logger=_LOGGER,
     )
 
     return ActionResponse(
@@ -97,13 +61,14 @@ async def move_lift(params: MoveParams, request: Request):
     )
 
 
-@router.post("/reference", response_model=ActionResponse)
-@safe_getter(ActionResponse)
+@router.post("/reference", response_model=ActionResponse, dependencies=[Depends(require_api_key)])
 async def reference(request: Request):
-    command_id, data = await _execute_legacy_command(
+    command_id, data = await run_command(
         request,
         operation="reference",
-        invoke=lambda op_id: _use_cases(request).reference(ReferenceRequest(timeout_ms=60000), op_id=op_id),
+        invoke=lambda op_id: _use_cases(request).reference(ReferenceCommand(timeout_ms=60000), op_id=op_id),
+        log_prefix="legacy command",
+        logger=_LOGGER,
     )
 
     return ActionResponse(
@@ -114,16 +79,17 @@ async def reference(request: Request):
     )
 
 
-@router.post("/fault_reset", response_model=ActionResponse)
-@safe_getter(ActionResponse)
+@router.post("/fault_reset", response_model=ActionResponse, dependencies=[Depends(require_api_key)])
 async def fault_reset(request: Request):
-    command_id, _ = await _execute_legacy_command(
+    command_id, _ = await run_command(
         request,
         operation="fault_reset",
         invoke=lambda op_id: _use_cases(request).fault_reset(
-            FaultResetRequest(after_reset={"auto_enable": True}, timeout_ms=15000),
+            FaultResetCommand(auto_enable=True),
             op_id=op_id,
-        )
+        ),
+        log_prefix="legacy command",
+        logger=_LOGGER,
     )
 
     return ActionResponse(
@@ -133,62 +99,50 @@ async def fault_reset(request: Request):
         command_id=command_id,
     )
 
-@router.get("/position", response_model=PositionResponse)
-@safe_getter(PositionResponse)
+@router.get("/position", response_model=PositionResponse, dependencies=[Depends(require_api_key)])
 async def get_lift_position(request: Request):
-    drive = _get_drive(request)
-    position = await drive.get_position()
+    try:
+        drive = DriveService(request.app.state).get_drive(require_connected=True)
+        position = await drive.get_position()
+    except ServiceError as exc:
+        raise_service_error_http(exc, request=request, operation="position")
     return PositionResponse(position=float(position))
 
-@router.get("/is_motion", response_model=MotionResponse)
-@safe_getter(MotionResponse)
+@router.get("/is_motion", response_model=MotionResponse, dependencies=[Depends(require_api_key)])
 async def get_lift_motion(request: Request):
-    drive = _get_drive(request)
-    is_moving = await drive.is_motion()
+    is_moving = await _use_cases(request).get_is_moving()
     return MotionResponse(is_moving=is_moving)
 
-@router.get("/status", response_model=StatusResponse)
-@safe_getter(StatusResponse)
+@router.get("/status", response_model=StatusResponse, dependencies=[Depends(require_api_key)])
 async def get_lift_status(request: Request):
-    drive = _get_drive(request)
     try:
+        # get_drive_status() reads is_moving and is_homed atomically (Fix 16: TOCTOU).
         drive_status = await _use_cases(request).get_drive_status()
-        status_bits = drive_status.status_bits or {}
-        is_moving = await drive.is_motion()
-        is_homed = await drive.is_homed()
-        has_error = bool(status_bits.get("fault", False))
-        operation_enabled = bool(drive_status.enabled)
-        is_connected = bool(getattr(drive, "is_connected", False))
-        position = 0.0 if drive_status.position is None else float(drive_status.position)
-
-        # Clear last error on successful round-trip
-        request.app.state.drive_last_error = None
-
-        return StatusResponse(
-            status_word=int(drive_status.statusword),
-            homed=bool(is_homed),
-            is_moving=bool(is_moving),
-            error=has_error,
-            connected=is_connected,
-            position=position,
-            enabled=operation_enabled,
-            last_error=None,
-        )
-    except Exception as exc:
-        # Never blow up the UI polling loop — report degraded status instead.
-        msg = str(exc)
-        request.app.state.drive_last_error = msg
-
-        is_connected = bool(getattr(drive, "is_connected", False))
-        return StatusResponse(
-            status_word=0,
-            homed=False,
-            is_moving=False,
-            error=True,
-            connected=is_connected,
-            position=0.0,
-            enabled=False,
-            last_error=msg,
-        )
+    except ServiceError as exc:
+        raise_service_error_http(exc, request=request, operation="status")
+    status_bits = drive_status.status_bits or {}
+    has_error = bool(status_bits.get("fault", False))
+    operation_enabled = bool(drive_status.enabled)
+    position = 0.0 if drive_status.position is None else float(drive_status.position)
+    last_error = getattr(request.app.state, "drive_last_error", None)
+    return StatusResponse(
+        status_word=int(drive_status.statusword),
+        homed=drive_status.is_homed,
+        is_moving=drive_status.is_moving,
+        error=has_error,
+        connected=drive_status.connected,
+        position=position,
+        enabled=operation_enabled,
+        last_error=str(last_error) if last_error is not None else None,
+    )
 
 
+# ---------------------------------------------------------------------------
+# Auto-derived set of legacy endpoint paths for use by middleware.
+# Built after all routes are registered so it stays in sync automatically.
+# ---------------------------------------------------------------------------
+LEGACY_ENDPOINTS: frozenset[str] = frozenset(
+    route.path  # type: ignore[union-attr]
+    for route in router.routes
+    if hasattr(route, "path")
+)

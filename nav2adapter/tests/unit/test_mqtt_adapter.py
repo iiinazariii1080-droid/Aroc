@@ -40,7 +40,7 @@ def _make_adapter():
 class TestTopicBuilding:
     def test_command_topic(self):
         a = _make_adapter()
-        assert a._get_command_topic("navigateTo") == "aroc/robot/robot1/commands/navigateTo"
+        assert a._get_command_topic("driveToPosition") == "aroc/robot/robot1/commands/driveToPosition"
 
     def test_status_topic(self):
         a = _make_adapter()
@@ -142,7 +142,7 @@ class TestPublishCommand:
     async def test_raises_when_disconnected(self):
         a = _make_adapter()
         with pytest.raises(MqttUnavailableError):
-            await a.publish_command("navigateTo", {"target_id": "A"})
+            await a.publish_command("driveToPosition", {"target_id": "A"})
 
     @pytest.mark.asyncio
     async def test_publish_connected(self):
@@ -150,7 +150,7 @@ class TestPublishCommand:
         a._connected = True
         a.client = MagicMock()
         a.client.publish = AsyncMock()
-        await a.publish_command("navigateTo", {"target_id": "A"})
+        await a.publish_command("driveToPosition", {"target_id": "A"})
         a.client.publish.assert_awaited_once()
 
 

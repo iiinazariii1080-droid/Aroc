@@ -255,19 +255,19 @@ class TestPollQueueManagement:
         mod._poll_cleanup_task = old
 
 
-# ── navigateTo command errors ────────────────────────────────────────
+# ── driveToPosition command errors ──────────────────────────────────
 
-class TestNavigateToExtended:
+class TestDriveToPositionExtended:
     def test_mqtt_unavailable_503(self, test_client):
         from services.mqtt_adapter import MqttUnavailableError
         mock_facade = AsyncMock()
-        mock_facade.send_navigate_to = AsyncMock(side_effect=MqttUnavailableError("no mqtt"))
+        mock_facade.send_drive_to_position = AsyncMock(side_effect=MqttUnavailableError("no mqtt"))
         with patch("routes.aehub.settings") as s:
             s.robot_id = "r"
             app.state.navigation_facade = mock_facade
             try:
                 resp = test_client.post(
-                    "/api/v1/robots/r/commands/navigateTo",
+                    "/api/v1/robots/r/commands/driveToPosition",
                     json={"target_id": "X"},
                 )
             finally:
@@ -277,13 +277,13 @@ class TestNavigateToExtended:
 
     def test_generic_error_503(self, test_client):
         mock_facade = AsyncMock()
-        mock_facade.send_navigate_to = AsyncMock(side_effect=RuntimeError("boom"))
+        mock_facade.send_drive_to_position = AsyncMock(side_effect=RuntimeError("boom"))
         with patch("routes.aehub.settings") as s:
             s.robot_id = "r"
             app.state.navigation_facade = mock_facade
             try:
                 resp = test_client.post(
-                    "/api/v1/robots/r/commands/navigateTo",
+                    "/api/v1/robots/r/commands/driveToPosition",
                     json={"target_id": "X"},
                 )
             finally:

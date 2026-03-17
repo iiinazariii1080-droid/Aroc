@@ -1,36 +1,33 @@
 # syntax=docker/dockerfile:1
-
-# Use Python 3.13 slim image per project runtime
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app \
     SERVICE_HOST=0.0.0.0 \
-    SERVICE_PORT=8101 \
-    PYTHONPATH=/app:/app/drivers/dryve-d1-driver/src
+    SERVICE_PORT=8101
 
 WORKDIR /app
 
-# Install runtime dependencies (none required beyond Python for this project)
-# Add build essentials only if you later add packages needing compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    build-essential \
-    curl \
- && rm -rf /var/lib/apt/lists/*
+    ca-certificates build-essential curl && \
+    rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies first (better layer caching)
-COPY requirements.txt ./
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+COPY igus_service/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application source
-COPY . .
+COPY igus_service/ .
+COPY shared_config/ ./shared_config/
+
+RUN useradd -m -u 10001 appuser && chown -R appuser:appuser /app
+USER appuser
 
 EXPOSE 8101
 
-# Run via uvicorn — proper ASGI server with signal handling
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8101/ready || exit 1
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8101", "--log-level", "info"]
 
 

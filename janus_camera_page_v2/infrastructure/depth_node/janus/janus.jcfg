@@ -1,0 +1,37 @@
+general: {
+  debug_level = 1
+  debug_timestamps = true
+  server_name = "AE-ROBOT-55"
+  session_timeout = 60
+  admin_secret = "__JANUS_ADMIN_SECRET__"
+}
+
+media: {
+  rtp_port_range = "5002-5120"
+  no_media_timer = 30
+  dtls_mtu = 1200
+  slowlink_threshold = 50
+}
+
+plugins: {
+  plugins_folder = "/opt/janus/lib/janus/plugins"
+}
+
+# BEGIN NAT AUTO
+nat: {
+  ice_tcp = false
+  full_trickle = true
+  ignore_mdns = true
+  keep_private_host = true
+  ice_ignore_list = [ "docker", "veth", "lo", "vmnet", "tailscale" ]
+
+  stun_server = "82.165.177.194"
+  stun_port   = 3478
+
+  turn_server = "82.165.177.194"
+  turn_port   = 3478
+  turn_type   = "tcp"
+  turn_user   = "webrtc"
+  turn_pwd    = "__TURN_PWD__"
+}
+# END NAT AUTO

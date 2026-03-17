@@ -10,6 +10,8 @@ from app.types import (
     ActionResponse,
     XarmJointsPositionResponse,
     XarmStatusResponse,
+    TcpPositionResponse,
+    SetTcpPositionParams,
 )
 from app.decorator import safe_getter
 from app.di import get_command_service
@@ -157,6 +159,52 @@ async def change_tool_position(params: XarmMoveWithToolParams, request: Request)
             detail=result.error_message or "move failed",
         )
     return ActionResponse(success=True, message=None)
+
+
+@router.get("/tcp_position", response_model=TcpPositionResponse)
+@safe_getter(TcpPositionResponse)
+async def get_tcp_position(request: Request):
+    """Return current TCP pose in xArm base frame (mm + degrees)."""
+    svc = get_command_service()
+    cmd = Command(
+        command_id=request.state.command_id,
+        type=CommandType.GET_TCP_POSITION,
+        params={},
+        policy=ExecutionPolicy.QUEUE,
+    )
+    result = await svc.enqueue(cmd)
+    if result.status != ResultStatus.SUCCEEDED or result.telemetry_snapshot is None:
+        raise HTTPException(status_code=503, detail=result.error_message or "get_position failed")
+    pos = result.telemetry_snapshot["position"]
+    return TcpPositionResponse(x=pos[0], y=pos[1], z=pos[2], roll=pos[3], pitch=pos[4], yaw=pos[5])
+
+
+@router.post("/move/set_tcp_position", response_model=ActionResponse)
+@safe_getter(ActionResponse)
+async def set_tcp_position(params: SetTcpPositionParams, request: Request):
+    """Absolute Cartesian move in xArm base frame (mm + degrees)."""
+    await _recover_if_requested(params.reset_faults, request)
+    svc = get_command_service()
+    cmd = Command(
+        command_id=request.state.command_id,
+        type=CommandType.SET_TCP_POSITION,
+        params={
+            "x": params.x,
+            "y": params.y,
+            "z": params.z,
+            "roll": params.roll,
+            "pitch": params.pitch,
+            "yaw": params.yaw,
+            "velocity_percent": params.velocity_percent,
+        },
+        policy=ExecutionPolicy.QUEUE,
+    )
+    result = await svc.enqueue(cmd)
+    if result.status == ResultStatus.REJECTED:
+        raise HTTPException(status_code=409, detail=result.error_message or "rejected")
+    if result.status != ResultStatus.SUCCEEDED:
+        raise HTTPException(status_code=500, detail=result.error_message or "move failed")
+    return ActionResponse(success=True)
 
 
 @router.post("/gripper/take", response_model=ActionResponse)

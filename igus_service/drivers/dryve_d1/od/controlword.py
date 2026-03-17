@@ -24,7 +24,7 @@ from enum import IntEnum
 class CWBit(IntEnum):
     SWITCH_ON = 0          # bit 0
     ENABLE_VOLTAGE = 1     # bit 1
-    QUICK_STOP = 2         # bit 2 (1 = quick stop enabled)
+    QUICK_STOP = 2         # bit 2 (1 = quick stop ENABLED, 0 = quick stop ACTIVE)
     ENABLE_OPERATION = 3   # bit 3
     NEW_SET_POINT = 4      # bit 4 (profile position: latch new set-point)
     CHANGE_SET_IMMEDIATELY = 5  # bit 5 (profile position: immediate)
@@ -79,34 +79,17 @@ def cw_enable_operation() -> int:
     return 0x000F
 
 
-def cw_quick_stop() -> int:
-    """Request quick stop (legacy-compatible 0x0002 for dryve D1).
+def cw_quick_stop(base: int = 0x000F) -> int:
+    """CiA402 quick stop: clear bit 2 (QUICK_STOP) while maintaining hold bits.
 
-    This value (0x0002) is NOT the canonical CiA402 pattern, but it matches
-    the observed behavior with dryve D1 hardware from v1 driver.
-    
-    Legacy compatibility: This preserves the exact controlword value used
-    in the old driver (CW_QUICK_STOP = 0x0002) to maintain compatibility
-    with existing hardware configurations.
-    
-    Note: If you need spec-pure CiA402 quick stop (clearing bit 2 while
-    maintaining hold bits), consider implementing a separate method to avoid
-    breaking existing working configurations.
-    """
-    return 0x0002
+    Per CiA402 standard, quick stop is triggered by clearing bit 2
+    while keeping bits 0, 1, 3 (hold bits) set.
 
-
-def cw_quick_stop_canonical(base: int = 0x000F) -> int:
-    """Canonical CiA402 quick stop: clear bit 2 (QUICK_STOP) while maintaining hold bits.
-    
-    According to CiA402 standard, quick stop is triggered by clearing bit 2
-    while keeping bits 0-3 (hold bits) set. This is the spec-pure implementation.
-    
     Args:
-        base: Base controlword value (default 0x000F = Operation Enabled with all hold bits)
-    
+        base: Base controlword value (default 0x000F = Operation Enabled)
+
     Returns:
-        Controlword with bit 2 cleared (QUICK_STOP disabled)
+        Controlword with bit 2 cleared (quick stop active).
     """
     return cw_clear_bits(base, CWBit.QUICK_STOP)
 

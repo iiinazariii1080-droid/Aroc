@@ -37,6 +37,7 @@ def load_env_file(
     *,
     candidates: Iterable[str] | None = None,
     allow_example_fallback: bool = True,
+    force: bool = False,
 ) -> None:
     """Load environment variables from a local env file.
 
@@ -46,11 +47,13 @@ def load_env_file(
     - If no env file is found AND no DRYVE_/IGUS_ vars exist, optionally fall back to .env.example
       (dev convenience; logged as WARNING).
 
-    This function is idempotent per-process.
+    This function is idempotent per-process.  Pass ``force=True`` to reload in
+    test scenarios that need to exercise different env-file configurations.
     """
     global _LOADED
-    if _LOADED:
+    if _LOADED and not force:
         return
+    _LOADED = False  # reset so we re-run cleanly on forced reload
 
     if candidates is None:
         candidates = []
@@ -109,3 +112,13 @@ def load_env_file(
         _LOGGER.info("Environment loaded from %s", loaded_from)
 
     _LOADED = True
+
+
+def reset_for_testing() -> None:
+    """Reset the loaded flag so the next load_env_file() call re-runs.
+
+    Call this in test teardown or fixture finalizers when tests need to
+    exercise different env-file configurations in isolation.
+    """
+    global _LOADED
+    _LOADED = False

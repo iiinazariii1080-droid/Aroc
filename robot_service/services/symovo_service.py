@@ -263,7 +263,7 @@ class SymovoAgvClient:
 
     @guarded_async_call(symovo_lock)
     async def fault_reset(self) -> Dict[str, Any]:
-        return await self._get("/fault_reset")
+        return await self._post("/fault_reset")
 
     @guarded_async_call(symovo_lock)
     async def go_to_pose(self, *, x_m: float, y_m: float, theta_deg: float = 0.0, map_id: Optional[int] = None, max_speed_m_s: Optional[float] = None, wait: bool = True) -> Dict[str, Any]:

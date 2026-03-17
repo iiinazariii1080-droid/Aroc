@@ -64,7 +64,7 @@ class FakeSession:
     def is_connected(self) -> bool:
         return True
 
-    def transceive(self, adu: bytes, *, deadline_s: float) -> bytes:
+    def transceive(self, adu: bytes, *, deadline_s: float | None = None) -> bytes:
         validate_gateway_request(adu)
         _, _, proto_ctrl, index, subindex, byte_count, data = _parse_request_meta(adu)
         if proto_ctrl == 0:

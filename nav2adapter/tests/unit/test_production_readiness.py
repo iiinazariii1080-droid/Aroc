@@ -305,7 +305,7 @@ class TestNavigateLockTimeout:
             # Make the timeout context manager raise TimeoutError immediately
             mock_timeout.return_value.__aenter__ = AsyncMock(side_effect=TimeoutError)
             mock_timeout.return_value.__aexit__ = AsyncMock(return_value=False)
-            result = await handler.handle_navigate_to(cmd)
+            result = await handler.handle_drive_to_position(cmd)
 
         assert result.status == NavigationStatusEnum.ERROR
         assert result.error_reason == "navigate_lock_timeout"

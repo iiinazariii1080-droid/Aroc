@@ -86,7 +86,8 @@ def init_trajectory_table():
                 "cupGridStepMm": 2.0,
                 "frameTtlMs": 5000
             },
-            "return": {"active": True}
+            "return": {"active": True},
+            "basket": {"active": False, "boxNumber": 1, "drop": False, "depthMm": 80},
         })
         c.execute("INSERT INTO trajectory (id, data) VALUES (1, ?)", (default_config,))
     conn.commit()

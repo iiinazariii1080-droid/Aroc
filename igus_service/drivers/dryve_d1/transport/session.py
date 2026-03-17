@@ -22,17 +22,23 @@ from .retry import RetryBudget, RetryPolicy
 
 
 class TransactionIdGenerator:
-    """Thread-safe Modbus transaction-id generator (0..65535)."""
+    """Thread-safe Modbus transaction-id generator.
 
-    def __init__(self, start: int = 1) -> None:
+    The dryve D1 only echoes the lower 8 bits of the transaction ID in
+    responses, so by default we wrap at 255 (``max_value=0xFF``).  This
+    keeps request and response TIDs identical and avoids spurious
+    ``ResponseMismatch`` errors once the counter would exceed 255.
+    """
+
+    def __init__(self, start: int = 1, *, max_value: int = 0xFF) -> None:
         self._lock = threading.Lock()
-        self._next = int(start) & 0xFFFF
+        self._max = int(max_value)
+        self._next = int(start) % (self._max + 1) or 1
 
     def next(self) -> int:
         with self._lock:
             tid = self._next
-            self._next = (self._next + 1) & 0xFFFF
-            # Avoid 0 if you want to keep it reserved for tests; optional.
+            self._next = (self._next + 1) % (self._max + 1)
             if self._next == 0:
                 self._next = 1
             return tid
@@ -40,7 +46,7 @@ class TransactionIdGenerator:
     def align(self, next_value: int) -> None:
         """Set next transaction id (thread-safe)."""
         with self._lock:
-            self._next = int(next_value) & 0xFFFF
+            self._next = int(next_value) % (self._max + 1)
             if self._next == 0:
                 self._next = 1
 
@@ -56,7 +62,15 @@ class KeepAliveConfig:
 
 
 class ModbusSession:
-    """High-level Modbus TCP session for raw ADU exchange."""
+    """High-level Modbus TCP session for raw ADU exchange.
+
+    .. warning:: Blocking I/O in asyncio context
+        ``transceive()`` and ``connect()`` are synchronous (blocking).
+        The driver's async layer wraps calls via ``asyncio.to_thread()``
+        to avoid blocking the event loop.  Keep timeout values low
+        (DRYVE_CONNECT_TIMEOUT_S <= 3 s, DRYVE_REQUEST_TIMEOUT_S <= 1.5 s)
+        to limit worst-case thread-pool starvation during reconnect sequences.
+    """
 
     def __init__(
         self,
@@ -67,7 +81,8 @@ class ModbusSession:
         io_timeout_s: float = 2.0,
         retry_policy: RetryPolicy | None = None,
         keepalive: KeepAliveConfig | None = None,
-        on_reconnect: Callable[[], None] | None = None,  # B4: Callback called on successful reconnect
+        on_reconnect: Callable[[], None] | None = None,
+        tid_gen: TransactionIdGenerator | None = None,
         logger=None,
     ) -> None:
         self._cfg = TcpConfig(
@@ -84,8 +99,11 @@ class ModbusSession:
         self._keepalive_thread: threading.Thread | None = None
         self._retry_policy = retry_policy or RetryPolicy()
         self._last_activity_s = monotonic_s()
-        self._tid = TransactionIdGenerator()
-        self._on_reconnect = on_reconnect  # B4: Reconnect safety callback
+        self._tid = tid_gen if tid_gen is not None else TransactionIdGenerator()
+        self._on_reconnect = on_reconnect  # called on RE-connect only (not initial)
+        self._ever_connected: bool = False
+        self._keepalive_skipped: int = 0
+        self._suppress_keepalive_until: float = 0.0
 
     # --------------------
     # Lifecycle
@@ -98,13 +116,15 @@ class ModbusSession:
         self._client.connect()
         self._last_activity_s = monotonic_s()
 
-        # B4: Call reconnect callback if this was a reconnect (was not connected, now connected)
-        if self._on_reconnect is not None:
+        # Only fire on_reconnect for RE-connections, not the initial connect.
+        if self._ever_connected and self._on_reconnect is not None:
             try:
                 self._on_reconnect()
             except Exception:
-                # Don't let reconnect callback block connection
-                pass
+                logging.getLogger(__name__).warning(
+                    "on_reconnect callback failed", exc_info=True,
+                )
+        self._ever_connected = True
 
         if self._keepalive_cfg.enabled and self._keepalive_thread is None:
             self._start_keepalive_thread()
@@ -124,6 +144,16 @@ class ModbusSession:
 
     def next_transaction_id(self) -> int:
         return self._tid.next()
+
+    def suppress_keepalive(self, duration_s: float = 0.5) -> None:
+        """Suppress keepalive I/O for *duration_s* seconds.
+
+        Used before critical controlword writes (e.g. disable_voltage) where
+        concurrent Modbus reads from the keepalive thread can prevent the
+        dryve D1 firmware from processing the state transition.
+        """
+        new_deadline = monotonic_s() + duration_s
+        self._suppress_keepalive_until = max(self._suppress_keepalive_until, new_deadline)
 
     # --------------------
     # Core I/O
@@ -166,6 +196,8 @@ class ModbusSession:
                 # close() is inside the lock to prevent racing with other threads
                 with self._lock:
                     self._client.close()
+                if self._stop_event.is_set():
+                    raise ConnectionError("Session closed during retry")
                 if not budget.can_retry():
                     raise
                 budget.sleep_before_next()
@@ -179,31 +211,62 @@ class ModbusSession:
         if self._keepalive_cfg.build_adu is None:
             raise ValueError("KeepAliveConfig.enabled requires build_adu callable")
 
+        # Stop old thread if still running to prevent race on shared socket
+        old = self._keepalive_thread
+        if old is not None and old.is_alive():
+            self._stop_event.set()
+            old.join(timeout=2.0)
+
         self._stop_event.clear()
         t = threading.Thread(target=self._keepalive_loop, name="dryve-modbus-keepalive", daemon=True)
         self._keepalive_thread = t
         t.start()
 
     def _keepalive_loop(self) -> None:
+        """Send periodic keepalive packets using single-attempt I/O.
+
+        Uses ``self._client.transceive()`` directly instead of
+        ``self.transceive()`` to avoid the ``RetryBudget`` retry/reconnect
+        loop.  This prevents the keepalive thread from holding ``self._lock``
+        for extended periods during connection loss, which would starve
+        ``asyncio.to_thread(session.transceive, ...)`` callers and exhaust
+        the default thread pool.
+        """
         interval = max(0.05, float(self._keepalive_cfg.interval_s))
         build = self._keepalive_cfg.build_adu
-        assert build is not None
+        if build is None:
+            raise ValueError("KeepAliveConfig.build_adu must not be None when keepalive is enabled")
+        log = logging.getLogger(__name__)
 
         while not self._stop_event.is_set():
-            # If there is recent activity, we still send keepalive on schedule.
-            # Some stacks expect periodic 'heartbeat' regardless of traffic burst patterns.
             try:
+                # Honor suppression window (e.g. during disable_voltage)
+                if monotonic_s() < self._suppress_keepalive_until:
+                    self._stop_event.wait(timeout=0.05)
+                    continue
                 adu = build()
-                # Use a small per-keepalive deadline; don't block indefinitely.
-                deadline = monotonic_s() + max(0.2, interval)
-                self.transceive(adu, deadline_s=deadline)
-            except Exception:
-                if self._keepalive_cfg.reconnect_on_error:
-                    with self._lock:
+                if not self._lock.acquire(timeout=0.5):
+                    self._keepalive_skipped += 1
+                    log.debug("Keepalive skipped (%d total): lock busy", self._keepalive_skipped)
+                    continue
+                try:
+                    if self._client.is_connected:
                         try:
-                            self._client.close()
+                            self._client.transceive(adu)
+                            self._last_activity_s = monotonic_s()
                         except Exception:
-                            pass
-                # Keepalive must not crash the process; continue loop.
+                            log.warning(
+                                "Keepalive I/O failed; closing socket for reconnect"
+                            )
+                            try:
+                                self._client.close()
+                            except Exception:
+                                pass
+                finally:
+                    self._lock.release()
+            except Exception as _ka_exc:
+                log.warning("Keepalive cycle error: %s", _ka_exc, exc_info=True)
             finally:
-                sleep_s(interval)
+                # Use Event.wait instead of blocking sleep so that close()
+                # can wake us instantly by setting _stop_event.
+                self._stop_event.wait(timeout=interval)

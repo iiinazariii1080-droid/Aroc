@@ -580,6 +580,44 @@ class RobotActor:
                     error_code=code if code != 0 else None,
                 )
 
+            if command.type == CommandType.GET_TCP_POSITION:
+                code, pos = arm.get_position()
+                if code != 0 or not pos or len(pos) < 6:
+                    return CommandResult(
+                        command_id=command.command_id,
+                        status=ResultStatus.FAILED,
+                        error_code=code,
+                        error_message=f"get_position code={code}",
+                    )
+                return CommandResult(
+                    command_id=command.command_id,
+                    status=ResultStatus.SUCCEEDED,
+                    telemetry_snapshot={"position": list(pos)},
+                )
+
+            if command.type == CommandType.SET_TCP_POSITION:
+                p = command.params
+                from app.config import TCP_SPEED_MM_S, TCP_ACC_MM_S2
+                speed_pct = float(p.get("velocity_percent", 20.0))
+                speed = max(1.0, min(TCP_SPEED_MM_S, (speed_pct / 100.0) * TCP_SPEED_MM_S))
+                acc = max(1.0, min(TCP_ACC_MM_S2, (speed_pct / 100.0) * TCP_ACC_MM_S2))
+                # Ensure arm is in ready state (may be in STOP after joint move)
+                arm.set_mode(0)
+                arm.set_state(0)
+                code = arm.set_position(
+                    x=float(p["x"]), y=float(p["y"]), z=float(p["z"]),
+                    roll=float(p["roll"]), pitch=float(p["pitch"]), yaw=float(p["yaw"]),
+                    speed=speed, mvacc=acc, wait=True,
+                )
+                if code != 0:
+                    return CommandResult(
+                        command_id=command.command_id,
+                        status=ResultStatus.FAILED,
+                        error_code=code,
+                        error_message=f"set_position code={code}",
+                    )
+                return CommandResult(command_id=command.command_id, status=ResultStatus.SUCCEEDED)
+
             if command.type == CommandType.GRIPPER_STATUS:
                 if not self._gripper:
                     return CommandResult(

@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from tests.conftest import FakeDrive, FakeEventBus, AsyncNoopLock, set_app_state
+from tests.fakes import FakeDrive, FakeEventBus, AsyncNoopLock, set_app_state
 
 
 @pytest.fixture
@@ -46,13 +46,25 @@ class TestLegacyRoutes:
         r = client.get("/status")
         assert r.status_code == 200
         data = r.json()
-        assert "status_word" in data or "homed" in data
+        assert isinstance(data.get("status_word"), int) or isinstance(data.get("homed"), bool)
 
     def test_drive_not_initialized(self, client):
         """If drive is None, returns error status."""
         main.app.state.drive = None
         r = client.get("/position")
-        assert r.status_code in (500, 503)
+        assert r.status_code == 503
+
+    def test_get_position_out_of_range_succeeds(self, client):
+        """PositionResponse must not validate hardware position against soft limits.
+
+        If the drive returns a position outside [0, 120000] (e.g. due to a
+        hardware configuration mismatch), the endpoint must return 200 with the
+        raw value — not 500 from a Pydantic bounds check on the response model.
+        """
+        main.app.state.drive.get_position = AsyncMock(return_value=200_000)
+        r = client.get("/position")
+        assert r.status_code == 200
+        assert r.json()["position"] == 200_000
 
 
 # ── API v1 routes (/drive/status, /drive/jog_stop, etc.) ──────────────────
@@ -63,7 +75,7 @@ class TestApiV1DriveStatus:
         assert r.status_code == 200
         data = r.json()
         assert data["ok"] is True
-        assert "data" in data
+        assert isinstance(data["data"], dict)
 
     def test_drive_telemetry(self, client):
         r = client.get("/drive/telemetry")
@@ -95,20 +107,20 @@ class TestSystemRoutes:
         r = client.get("/health")
         assert r.status_code == 200
         data = r.json()
-        assert "status" in data
+        assert data["status"] in ("ok", "healthy", "degraded", "unhealthy")
 
     def test_info_endpoint(self, client):
         r = client.get("/info")
         assert r.status_code == 200
         data = r.json()
-        assert "version" in data or "server_version" in data
+        assert isinstance(data.get("version"), str) or isinstance(data.get("server_version"), str)
 
     def test_ready_endpoint(self, client):
         r = client.get("/ready")
         # Should return 200 or 503 depending on drive state
-        assert r.status_code in (200, 503)
+        assert r.status_code == 200
 
     def test_root_returns_page(self, client):
         r = client.get("/")
         # Should return HTML or redirect
-        assert r.status_code in (200, 307, 404)
+        assert r.status_code == 200

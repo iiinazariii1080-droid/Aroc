@@ -60,7 +60,7 @@ async def test_simulator_jog_back_and_forth() -> None:
         deadline = time.monotonic() + 2.0
         while True:
             try:
-                if not await drive.is_motion():
+                if not await drive.is_moving():
                     break
             except Exception:
                 break

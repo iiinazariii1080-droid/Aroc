@@ -5,7 +5,7 @@ tests fail, it means a previously fixed bug has been reintroduced.
 
 Bugs covered:
 1. ODIndex MIN/MAX_POSITION_LIMIT registers swapped (ROOT CAUSE of "position always 0")
-2. is_motion() always returned True after jog deadline expired
+2. is_moving() always returned True after jog deadline expired
 3. jog_start() rejected jog at exact boundary position (pos=0, dir=negative)
 4. gateway_telegram byte count validation too strict for simulators
 5. homing wait_done() didn't accept target_reached (bit 10) as completion
@@ -53,13 +53,13 @@ class TestODIndexPositionLimits:
 
 
 # ---------------------------------------------------------------------------
-# Bug 2: is_motion() always returned True after jog deadline expired
+# Bug 2: is_moving() always returned True after jog deadline expired
 # The jog check only looked at jog_state.active without checking deadline,
 # causing it to return True forever after a jog stopped.
 # ---------------------------------------------------------------------------
 
 class TestIsMotionJogDeadline:
-    """Verify is_motion() returns False when jog deadline has expired."""
+    """Verify is_moving() returns False when jog deadline has expired."""
 
     @pytest.fixture
     def mock_drive(self):
@@ -87,25 +87,25 @@ class TestIsMotionJogDeadline:
         return drive
 
     @pytest.mark.asyncio
-    async def test_is_motion_false_after_jog_deadline(self, mock_drive):
-        """When jog deadline has expired, is_motion must fall through to velocity check."""
+    async def test_is_moving_false_after_jog_deadline(self, mock_drive):
+        """When jog deadline has expired, is_moving must fall through to velocity check."""
         # PP mode, target reached, velocity=0 → not moving
         mock_drive.read_u16 = AsyncMock(return_value=0x0427)  # target_reached=True
         mock_drive.read_i8 = AsyncMock(return_value=1)  # PP mode
         mock_drive.read_i32 = AsyncMock(return_value=0)  # velocity=0
 
-        result = await mock_drive.is_motion()
+        result = await mock_drive.is_moving()
         assert result is False, (
-            "is_motion() should return False when jog deadline expired and "
+            "is_moving() should return False when jog deadline expired and "
             "target_reached=True with velocity=0"
         )
 
     @pytest.mark.asyncio
-    async def test_is_motion_true_during_jog_deadline(self, mock_drive):
-        """When jog deadline has NOT expired, is_motion must return True."""
+    async def test_is_moving_true_during_jog_deadline(self, mock_drive):
+        """When jog deadline has NOT expired, is_moving must return True."""
         mock_drive._jog.state.deadline_s = time.monotonic() + 10.0  # Far in the future
 
-        result = await mock_drive.is_motion()
+        result = await mock_drive.is_moving()
         assert result is True
 
 
@@ -213,19 +213,18 @@ class TestGatewayByteCountTolerance:
         assert resp.byte_count == 2  # Response has 2 bytes
         assert len(resp.data) == 2
 
-    def test_read_response_with_fewer_bytes_rejected(self):
-        """Response with fewer bytes than requested should raise."""
+    def test_read_response_with_fewer_bytes_zero_padded(self):
+        """Response with fewer bytes than requested should be zero-padded (dryve D1 compat)."""
         from drivers.dryve_d1.protocol.gateway_telegram import (
             build_read_adu,
             parse_adu,
         )
-        from drivers.dryve_d1.protocol.exceptions import ResponseMismatch
 
         # Build a read request for 4 bytes (INT32)
         request = build_read_adu(transaction_id=1, unit_id=1, index=0x6064, subindex=0, byte_count=4)
 
         # Build a response with only 2 bytes
-        data = b"\x00\x00"
+        data = b"\x42\x01"
         bc = len(data)
         pdu = bytes([
             0x2B, 0x0D, 0x00, 0x00, 0x00,
@@ -237,8 +236,10 @@ class TestGatewayByteCountTolerance:
         mbap = (1).to_bytes(2, "big") + (0).to_bytes(2, "big") + length.to_bytes(2, "big") + bytes([1])
         resp_adu = mbap + pdu
 
-        with pytest.raises(ResponseMismatch):
-            parse_adu(resp_adu, request=request)
+        resp = parse_adu(resp_adu, request=request)
+        # Should zero-pad to 4 bytes (little-endian)
+        assert resp.byte_count == 4
+        assert resp.data == b"\x42\x01\x00\x00"
 
 
 # ---------------------------------------------------------------------------
@@ -407,8 +408,8 @@ class TestCloseDoesNotRaise:
         drive._jog.state = jog_state
         drive._jog.close = AsyncMock()
 
-        # is_motion returns True, stop raises
-        drive.is_motion = AsyncMock(return_value=True)
+        # is_moving returns True, stop raises
+        drive.is_moving = AsyncMock(return_value=True)
         drive.stop = AsyncMock(side_effect=RuntimeError("Stop failed"))
 
         # close() should NOT raise, despite stop() failure
@@ -444,11 +445,11 @@ class TestPositionLimitConsistency:
 # ---------------------------------------------------------------------------
 
 class TestValidateConnectionDetectsSwappedLimits:
-    """Verify _validate_connection() logs CRITICAL when min >= max."""
+    """Verify _validate_connection() warns when min >= max."""
 
     @pytest.mark.asyncio
-    async def test_validate_connection_logs_critical_on_swapped_limits(self, caplog):
-        """If position limits read back as min >= max, a CRITICAL log should appear."""
+    async def test_validate_connection_warns_on_swapped_limits(self, caplog):
+        """If position limits read back as min >= max, a warning should be logged."""
         from drivers.dryve_d1.api.drive import DryveD1, DryveD1Config
         from drivers.dryve_d1.config.models import DriveConfig, ConnectionConfig
         import logging
@@ -471,15 +472,9 @@ class TestValidateConnectionDetectsSwappedLimits:
         # Mock is_homed
         drive.is_homed = AsyncMock(return_value=False)
 
-        with caplog.at_level(logging.CRITICAL):
-            await drive._validate_connection()
-
-        # Should have logged CRITICAL about swapped limits
-        assert any(
-            "POSITION LIMIT SANITY CHECK FAILED" in record.message
-            for record in caplog.records
-            if record.levelno >= logging.CRITICAL
-        ), "_validate_connection() should log CRITICAL when min_position >= max_position"
+        with caplog.at_level(logging.WARNING):
+            await drive._validate_connection()  # should NOT raise
+        assert any("min=120000 >= max=0" in r.message for r in caplog.records)
 
 
 class TestAbortEventStopsWaitLoop:
@@ -563,6 +558,7 @@ class TestAbortEventStopsWaitLoop:
         drive._session.is_connected = True
         drive._sdo = MagicMock()
         drive._sm = MagicMock()
+        drive._sm.run_to_operation_enabled = AsyncMock()
         drive._pp = MagicMock()
         drive._telemetry_poller = None
 
@@ -571,6 +567,9 @@ class TestAbortEventStopsWaitLoop:
             "operation_enabled": True, "fault": False, "remote": True,
         })
         drive.is_homed = AsyncMock(return_value=True)
+        # Mock read_i8 for mode detection, read_u16 for statusword
+        drive.read_i8 = AsyncMock(return_value=1)  # PP mode
+        drive.read_u16 = AsyncMock(return_value=0x0227)  # operation enabled
         # Mock _pp.move_to_position to complete instantly
         drive._pp.move_to_position = AsyncMock()
 
@@ -725,3 +724,105 @@ class TestStaleTargetReachedPrevention:
 
         with pytest.raises(MotionAborted):
             await pp.wait_target_reached(timeout_s=30.0, _ack_seen=False)
+
+
+# ---------------------------------------------------------------------------
+# Bug 9: TransactionIdGenerator wrapping at 65535 caused TID mismatch
+# The dryve D1 echoes only the low 8 bits of the Modbus TID.  Once the
+# counter exceeded 255 (from keepalive + telemetry I/O), every response
+# failed validation: resp TID 0x44 ≠ req TID 0x144.
+# Fix: wrap at 0xFF (max_value=255) so TIDs stay in 1–255.
+# ---------------------------------------------------------------------------
+
+class TestTransactionIdGeneratorWrapping:
+    """Verify TID generator wraps at 255 and never returns 0."""
+
+    def test_default_max_is_255(self):
+        from drivers.dryve_d1.transport.session import TransactionIdGenerator
+        gen = TransactionIdGenerator()
+        # Exhaust the full 1–255 range
+        tids = [gen.next() for _ in range(255)]
+        assert tids[0] == 1
+        assert tids[-1] == 255
+        # Next call wraps back to 1
+        assert gen.next() == 1
+
+    def test_never_returns_zero(self):
+        from drivers.dryve_d1.transport.session import TransactionIdGenerator
+        gen = TransactionIdGenerator()
+        for _ in range(1000):
+            assert gen.next() != 0
+
+    def test_align_wraps(self):
+        from drivers.dryve_d1.transport.session import TransactionIdGenerator
+        gen = TransactionIdGenerator()
+        gen.align(256)  # > max_value → should wrap
+        tid = gen.next()
+        assert 1 <= tid <= 255
+
+    def test_align_skips_zero(self):
+        from drivers.dryve_d1.transport.session import TransactionIdGenerator
+        gen = TransactionIdGenerator()
+        gen.align(0)
+        assert gen.next() == 1
+
+    def test_custom_max_value(self):
+        from drivers.dryve_d1.transport.session import TransactionIdGenerator
+        gen = TransactionIdGenerator(max_value=0xFFFF)
+        tids = [gen.next() for _ in range(65535)]
+        assert tids[0] == 1
+        assert tids[-1] == 65535
+        assert gen.next() == 1
+
+
+# ---------------------------------------------------------------------------
+# Bug 10: Byte count mismatch rejected valid dryve D1 responses
+# The dryve D1 gateway returns 2 bytes for some 32-bit OD objects (e.g.
+# position limits 0x607B/0x607D).  parse_adu() now zero-pads instead of
+# raising ResponseMismatch.
+# ---------------------------------------------------------------------------
+
+class TestByteCountZeroPadding:
+    """Verify parse_adu zero-pads short read responses."""
+
+    def test_2_byte_response_for_4_byte_request_is_padded(self):
+        from drivers.dryve_d1.protocol.gateway_telegram import build_read_adu, parse_adu
+
+        req = build_read_adu(transaction_id=1, unit_id=1, index=0x607B, subindex=0, byte_count=4)
+
+        data = b"\xE8\x03"  # 1000 as uint16 LE
+        bc = len(data)
+        pdu = bytes([
+            0x2B, 0x0D, 0x00, 0x00, 0x00,
+            0x60, 0x7B, 0x00,
+            0x00, 0x00, 0x00,
+            bc & 0xFF,
+        ]) + data
+        length = len(pdu) + 1
+        mbap = (1).to_bytes(2, "big") + (0).to_bytes(2, "big") + length.to_bytes(2, "big") + bytes([1])
+        resp_adu = mbap + pdu
+
+        resp = parse_adu(resp_adu, request=req)
+        assert resp.byte_count == 4
+        assert resp.data == b"\xE8\x03\x00\x00"  # zero-padded to 4 bytes
+
+    def test_exact_byte_count_not_padded(self):
+        from drivers.dryve_d1.protocol.gateway_telegram import build_read_adu, parse_adu
+
+        req = build_read_adu(transaction_id=1, unit_id=1, index=0x6041, subindex=0, byte_count=2)
+
+        data = b"\x27\x02"
+        bc = len(data)
+        pdu = bytes([
+            0x2B, 0x0D, 0x00, 0x00, 0x00,
+            0x60, 0x41, 0x00,
+            0x00, 0x00, 0x00,
+            bc & 0xFF,
+        ]) + data
+        length = len(pdu) + 1
+        mbap = (1).to_bytes(2, "big") + (0).to_bytes(2, "big") + length.to_bytes(2, "big") + bytes([1])
+        resp_adu = mbap + pdu
+
+        resp = parse_adu(resp_adu, request=req)
+        assert resp.byte_count == 2
+        assert resp.data == b"\x27\x02"  # no padding needed

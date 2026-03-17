@@ -88,7 +88,7 @@ async def test_cleanup_called_when_start_transport_fails(event_bus_instance):
         for k, v in _state_store_mocks().items():
             setattr(ss, k, v)
 
-        status = await handler.handle_navigate_to(_CMD)
+        status = await handler.handle_drive_to_position(_CMD)
 
     assert status.status == NavigationStatusEnum.ERROR
     assert "transport_creation_failed" in (status.error_reason or "")
@@ -110,7 +110,7 @@ async def test_cleanup_not_called_when_create_fails(event_bus_instance):
         for k, v in _state_store_mocks().items():
             setattr(ss, k, v)
 
-        status = await handler.handle_navigate_to(_CMD)
+        status = await handler.handle_drive_to_position(_CMD)
 
     assert status.status == NavigationStatusEnum.ERROR
     orch.delete_transport.assert_not_awaited()
@@ -133,7 +133,7 @@ async def test_cleanup_failure_does_not_mask_original_error(event_bus_instance):
         for k, v in _state_store_mocks().items():
             setattr(ss, k, v)
 
-        status = await handler.handle_navigate_to(_CMD)
+        status = await handler.handle_drive_to_position(_CMD)
 
     assert status.status == NavigationStatusEnum.ERROR
     # P2-19: error_reason is sanitized (no raw exception strings)
@@ -164,7 +164,7 @@ async def test_cleanup_called_for_station_based_transport(event_bus_instance):
             timestamp="2026-02-18T00:00:00Z",
             target_id="ChargerStation",
         )
-        status = await handler.handle_navigate_to(cmd)
+        status = await handler.handle_drive_to_position(cmd)
 
     assert status.status == NavigationStatusEnum.ERROR
     orch.delete_transport.assert_awaited_once_with("t-77")

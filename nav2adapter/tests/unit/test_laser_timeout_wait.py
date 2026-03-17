@@ -120,7 +120,7 @@ class TestLaserTimeoutWaitSuccess:
         with _patch_state_store(), \
              _patch_settings(), \
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.NAVIGATING
         assert status.goal_id == "cmd-001"
@@ -140,7 +140,7 @@ class TestLaserTimeoutWaitSuccess:
         with _patch_state_store(), \
              _patch_settings(), \
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.NAVIGATING
 
@@ -162,7 +162,7 @@ class TestLaserTimeoutWaitExpires:
         with _patch_state_store(), \
              _patch_settings(laser_timeout_wait_s=1.0, laser_timeout_poll_interval_s=0.2), \
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.ERROR
         assert "laser_timeout" in status.error_reason
@@ -178,7 +178,7 @@ class TestLaserTimeoutWaitExpires:
         with _patch_state_store(), \
              _patch_settings(laser_timeout_wait_s=1.0, laser_timeout_poll_interval_s=0.2), \
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.ERROR
         assert "waiting_for_scanner" in status.error_reason
@@ -199,7 +199,7 @@ class TestNonScannerErrorNoWait:
         with _patch_state_store(), \
              _patch_settings(), \
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.ERROR
         assert "emergency_stop" in status.error_reason
@@ -246,12 +246,12 @@ class TestCommandReplacement:
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
 
             async def send_cmd1():
-                results["cmd1"] = await handler.handle_navigate_to(_cmd(command_id="cmd-001"))
+                results["cmd1"] = await handler.handle_drive_to_position(_cmd(command_id="cmd-001"))
 
             async def send_cmd2():
                 # Give cmd-001 time to enter the wait loop
                 await asyncio.sleep(0.5)
-                results["cmd2"] = await handler.handle_navigate_to(_cmd(command_id="cmd-002"))
+                results["cmd2"] = await handler.handle_drive_to_position(_cmd(command_id="cmd-002"))
 
             await asyncio.gather(send_cmd1(), send_cmd2())
 
@@ -281,7 +281,7 @@ class TestDifferentErrorDuringWait:
         with _patch_state_store(), \
              _patch_settings(), \
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.ERROR
         assert "emergency_stop" in status.error_reason

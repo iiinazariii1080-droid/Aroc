@@ -453,7 +453,7 @@ class MqttCommandBridge(CommandHandlerMixin, TaskManagerMixin):
                     data_dict["_validated_timestamp"] = timestamp
 
             # Safety gate: reject navigation commands when robot is in safety lockout
-            if command_key in ("navigateto", "cancel") and self._is_safety_locked():
+            if command_key in ("navigateto", "gotocharging", "cancel") and self._is_safety_locked():
                 reason = (self._safety_state or {}).get("reason", "unknown")
                 msg = f"Command rejected: robot is in safety lockout ({reason}). Release E-Stop and recover."
                 logger.warning("[bridge] %s (command=%s, id=%s)", msg, command_name, command_id)
@@ -463,10 +463,17 @@ class MqttCommandBridge(CommandHandlerMixin, TaskManagerMixin):
 
             if command_key == "navigateto":
                 self._handle_navigate_command(command_id, data_dict)
+            elif command_key == "gotocharging":
+                self._handle_go_to_charging_command(command_id, data_dict)
             elif command_key == "cancel":
                 self._handle_cancel_command(command_id, data_dict)
             elif command_key == "estop":
                 self._handle_estop_command(command_id, data_dict)
+            elif command_key == "drivetoposition":
+                # Device-level AGV command handled directly by nav2adapter via MQTT subscription
+                logger.debug("driveToPosition handled by nav2adapter directly, skipping bridge routing")
+                self._finish_command(command_id)
+                return
             else:
                 self._publish_command_error(
                     command_name,
@@ -935,7 +942,7 @@ class MqttCommandBridge(CommandHandlerMixin, TaskManagerMixin):
             body=body,
             error={"type": ErrorType.COMMAND_ERROR.value, "message": message},
         )
-        if command.lower() in {"navigateto", "cancel", "estop"}:
+        if command.lower() in {"navigateto", "gotocharging", "cancel", "estop"}:
             context = {
                 "command_name": command.lower(),
                 "command_id": command_id,

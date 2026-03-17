@@ -51,7 +51,7 @@ async def test_simulator_move_to_position_10000() -> None:
         deadline = time.monotonic() + 2.0
         while True:
             try:
-                if not await drive.is_motion():
+                if not await drive.is_moving():
                     break
             except Exception:
                 break

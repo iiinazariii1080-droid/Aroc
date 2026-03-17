@@ -1,7 +1,7 @@
 import asyncio
 import pytest
 
-from drivers.dryve_d1.cia402.state_machine import CiA402StateMachine, StateMachineConfig
+from drivers.dryve_d1.cia402.state_machine import CiA402StateMachine, StateMachineConfig, StateMachineTimeout
 from drivers.dryve_d1.od.statusword import CiA402State
 
 
@@ -66,3 +66,46 @@ async def test_fault_reset_pulses_and_clears():
     await sm.fault_reset()
     assert 0x0080 in od.controlwords
     assert 0x0006 in od.controlwords  # shutdown after pulse
+
+
+class StuckOD:
+    """OD that always returns the same statusword — never changes state."""
+
+    def __init__(self, statusword: int) -> None:
+        self._sw = statusword
+        self.controlwords: list[int] = []
+
+    async def read_u16(self, index: int, subindex: int = 0) -> int:
+        if index == 0x6041:
+            return self._sw
+        return 0
+
+    async def write_u16(self, index: int, value: int, subindex: int = 0) -> None:
+        if index == 0x6040:
+            self.controlwords.append(value & 0xFFFF)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_states_timeout():
+    """_wait_for_states must raise StateMachineTimeout when statusword never changes."""
+    # Statusword = SWITCH_ON_DISABLED with REMOTE, never changes
+    od = StuckOD(statusword=0x0240)  # b6 + b9 (REMOTE)
+    sm = CiA402StateMachine(od, config=StateMachineConfig(
+        poll_interval_s=0.0,
+        step_timeout_s=0.05,
+    ))
+    with pytest.raises(StateMachineTimeout, match="Timeout"):
+        await sm._wait_for_states({CiA402State.OPERATION_ENABLED})
+
+
+@pytest.mark.asyncio
+async def test_run_to_operation_enabled_timeout_on_stuck_ready():
+    """run_to_operation_enabled times out when drive stays in READY_TO_SWITCH_ON."""
+    # b0 + b5 + b9 (REMOTE) = READY_TO_SWITCH_ON, never transitions further
+    od = StuckOD(statusword=0x0221)
+    sm = CiA402StateMachine(od, config=StateMachineConfig(
+        poll_interval_s=0.0,
+        step_timeout_s=0.05,
+    ))
+    with pytest.raises(StateMachineTimeout):
+        await sm.run_to_operation_enabled()

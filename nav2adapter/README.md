@@ -50,7 +50,7 @@ curl -o scan.png http://localhost:8010/api/v1/symovo/lidar/scan.png
 ### MQTT
 
 #### Inbound (commands)
-- `aroc/robot/{robot_id}/commands/navigateTo`
+- `aroc/robot/{robot_id}/commands/driveToPosition`
 - `aroc/robot/{robot_id}/commands/cancel`
 
 #### Outbound (status)

@@ -9,27 +9,26 @@ from typing import Any
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse
 
-from app import config as app_config
+from app.config import get_legacy_api_phase, get_settings
 from app.domain.health import (
     HealthWeights,
     compute_drive_health,
     decide_readiness,
-    resolve_weights,
 )
-from app.http_errors import is_drive_connected
+from app.application.drive_service import is_drive_connected
+from app.version import DRIVER_VERSION as driver_version
 from app.version import SERVER_VERSION
-
-try:
-    from drivers.dryve_d1 import __version__ as driver_version
-except ImportError:
-    driver_version = "unknown"
 
 router = APIRouter()
 
-_static_dir = os.path.join(os.path.dirname(__file__), "static")
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
 
 
 def _compute_drive_health(app_state: Any):
+    from app.config import Settings
+    settings_obj: Settings | None = getattr(app_state, "settings", None)
+    s = settings_obj if settings_obj is not None else get_settings()
     drive = getattr(app_state, "drive", None)
     connected = bool(drive is not None and is_drive_connected(drive))
     fault_active = bool(getattr(app_state, "drive_fault_active", False))
@@ -37,44 +36,32 @@ def _compute_drive_health(app_state: Any):
         getattr(app_state, "drive_telemetry_callback_errors_total", 0)
     )
     startup_error_present = bool(getattr(app_state, "drive_last_error", None))
-    settings = getattr(app_state, "settings", {}) or {}
-    telemetry_poll_s = float(settings.get("DRYVE_TELEMETRY_POLL_S", 0.5))
-    defaults = HealthWeights(
-        disconnected=int(
-            getattr(app_config, "DRYVE_HEALTH_WEIGHT_DISCONNECTED", 50)
-        ),
-        startup_error=int(
-            getattr(app_config, "DRYVE_HEALTH_WEIGHT_STARTUP_ERROR", 30)
-        ),
-        telemetry_stale=int(
-            getattr(app_config, "DRYVE_HEALTH_WEIGHT_TELEMETRY_STALE", 20)
-        ),
-        fault_active=int(
-            getattr(app_config, "DRYVE_HEALTH_WEIGHT_FAULT_ACTIVE", 30)
-        ),
-        callback_error_max=int(
-            getattr(app_config, "DRYVE_HEALTH_WEIGHT_CALLBACK_ERROR_MAX", 20)
-        ),
+    weights = HealthWeights(
+        disconnected=s.dryve_health_weight_disconnected,
+        startup_error=s.dryve_health_weight_startup_error,
+        telemetry_stale=s.dryve_health_weight_telemetry_stale,
+        fault_active=s.dryve_health_weight_fault_active,
+        callback_error_max=s.dryve_health_weight_callback_error_max,
     )
-    weights = resolve_weights(settings, defaults)
     return compute_drive_health(
         connected=connected,
         fault_active=fault_active,
         callback_errors_total=callback_errors_total,
         startup_error_present=startup_error_present,
-        telemetry_poll_s=telemetry_poll_s,
+        telemetry_poll_s=s.dryve_telemetry_poll_s,
         last_telemetry_monotonic=getattr(
             app_state, "drive_last_telemetry_monotonic", None
         ),
         weights=weights,
         now_monotonic=time.monotonic(),
+        readiness_threshold=s.dryve_health_readiness_threshold,
     )
 
 
 @router.get("/")
 async def root() -> Any:
     """Redirect to control panel."""
-    control_panel_path = os.path.join(_static_dir, "control_panel.html")
+    control_panel_path = os.path.join(STATIC_DIR, "control_panel.html")
     if os.path.exists(control_panel_path):
         return FileResponse(control_panel_path)
     return {
@@ -82,6 +69,7 @@ async def root() -> Any:
     }
 
 
+@router.get("/healthz")
 @router.get("/health")
 async def health() -> dict[str, str]:
     """Liveness check — process is alive."""
@@ -94,12 +82,14 @@ async def ready(request: Request, response: Response) -> dict[str, Any]:
     last_error = getattr(request.app.state, "drive_last_error", None)
     hlth = _compute_drive_health(request.app.state)
     decision = decide_readiness(hlth)
-    settings = getattr(request.app.state, "settings", {}) or {}
+    from app.config import Settings
+    settings_obj = getattr(request.app.state, "settings", None)
+    s = settings_obj if isinstance(settings_obj, Settings) else get_settings()
     response.status_code = decision.http_status
 
     return {
         "status": decision.status,
-        "driver_connected": hlth.connected == 1,
+        "driver_connected": hlth.connected,
         "code": decision.code,
         "health": {
             "degraded": bool(hlth.degraded),
@@ -111,10 +101,10 @@ async def ready(request: Request, response: Response) -> dict[str, Any]:
             "telemetry_callback_errors_total": hlth.callback_errors_total,
         },
         "drive": {
-            "host": settings.get("DRYVE_HOST"),
-            "port": settings.get("DRYVE_PORT"),
-            "unit_id": settings.get("DRYVE_UNIT_ID"),
-            "driver_version": settings.get("DRIVER_VERSION"),
+            "host": s.dryve_host,
+            "port": s.dryve_port,
+            "unit_id": s.dryve_unit_id,
+            "driver_version": driver_version,
         },
         "last_error": last_error,
     }
@@ -127,11 +117,17 @@ async def info() -> dict[str, str]:
         "server_version": SERVER_VERSION,
         "driver_version": driver_version,
         "protocol": "CiA402",
-        "build": "production",
+        "build": get_settings().build_profile,
     }
 
 
-def _build_drive_metrics_body(hlth: Any, *, latest_trace: Any = None) -> str:
+def _build_drive_metrics_body(
+    hlth: Any,
+    *,
+    latest_trace: Any = None,
+    legacy_phase: str | None = None,
+    event_bus: Any = None,
+) -> str:
     """Build Prometheus-formatted drive health metrics."""
     lines: list[str] = []
 
@@ -155,6 +151,11 @@ def _build_drive_metrics_body(hlth: Any, *, latest_trace: Any = None) -> str:
     _gauge("igus_drive_health_score", "Aggregated drive health score from 0 (worst) to 100 (best)", int(hlth.health_score))
     _counter("igus_drive_telemetry_callback_errors_total", "Total exceptions in telemetry callback processing", int(hlth.callback_errors_total))
 
+    # EventBus subscriber metrics
+    if event_bus is not None:
+        _gauge("igus_sse_subscribers_active", "Number of active SSE subscriber queues", getattr(event_bus, "subscriber_count", 0))
+        _counter("igus_sse_subscribers_dropped_total", "Total SSE subscribers dropped due to full queues", int(getattr(event_bus, "subscribers_dropped_total", 0)))
+
     latest_trace_present = int(latest_trace is not None)
     latest_trace_age_s = -1.0
     if isinstance(latest_trace, dict):
@@ -165,13 +166,11 @@ def _build_drive_metrics_body(hlth: Any, *, latest_trace: Any = None) -> str:
     _gauge("igus_drive_latest_command_trace_present", "Latest command trace snapshot presence (1=present, 0=absent)", latest_trace_present)
     _gauge("igus_drive_latest_command_trace_age_seconds", "Seconds since latest command trace snapshot (-1 means no trace yet)", latest_trace_age_s, ".3f")
 
-    legacy_phase = str(getattr(app_config, "LEGACY_API_PHASE", "deprecated") or "deprecated").lower()
-    if legacy_phase not in {"deprecated", "sunset", "removed"}:
-        legacy_phase = "deprecated"
+    _phase = legacy_phase or get_legacy_api_phase()
     lines.append("# HELP igus_legacy_api_phase Legacy API lifecycle phase gauge by phase label (one active phase has value 1)")
     lines.append("# TYPE igus_legacy_api_phase gauge")
     for phase_name in ("deprecated", "sunset", "removed"):
-        phase_value = 1 if legacy_phase == phase_name else 0
+        phase_value = 1 if _phase == phase_name else 0
         lines.append(f'igus_legacy_api_phase{{phase="{phase_name}"}} {phase_value}')
 
     return "\n".join(lines) + "\n"
@@ -184,5 +183,7 @@ async def metrics_endpoint(request: Request) -> Response:
     body = app_metrics.render_prometheus() if app_metrics else ""
     hlth = _compute_drive_health(request.app.state)
     latest_trace = getattr(request.app.state, "latest_command_trace", None)
-    body += _build_drive_metrics_body(hlth, latest_trace=latest_trace)
+    legacy_phase = getattr(request.app.state, "legacy_api_phase", None)
+    event_bus = getattr(request.app.state, "event_bus", None)
+    body += _build_drive_metrics_body(hlth, latest_trace=latest_trace, legacy_phase=legacy_phase, event_bus=event_bus)
     return Response(content=body, media_type="text/plain; version=0.0.4")

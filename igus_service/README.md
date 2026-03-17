@@ -26,23 +26,22 @@ CI quality gate:
 - Runs on push/pull request.
 - Installs `requirements-dev.txt` and executes:
 	- `python -m ruff check drivers/dryve_d1`
-	- `python -m mypy --config-file mypy-driver.ini drivers/dryve_d1`
+	- `python -m mypy drivers/dryve_d1`
 	- `python -m pytest -q -p pytest_asyncio.plugin tests -m "not simulator"`
 	- `python -m ruff check main.py app tests`
-	- `python -m mypy`
+	- `python -m mypy main.py app`
 
 Local static checks:
 ```bash
 python -m ruff check main.py app tests
-python -m mypy
+python -m mypy main.py app
 python -m ruff check drivers/dryve_d1
-python -m mypy --config-file mypy-driver.ini drivers/dryve_d1
+python -m mypy drivers/dryve_d1
 ```
 
 Contribution and PR governance:
 - `CONTRIBUTING.md`
 - `.github/pull_request_template.md`
-- `REFACTOR_SUMMARY_2026_02.md` (dedup/dead-code cleanup summary)
 
 ### 1) Build
 ```bash

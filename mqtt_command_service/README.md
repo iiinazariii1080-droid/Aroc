@@ -60,7 +60,7 @@ The service consists of three main components:
 
 ### 1. MQTT Bridge (`bridge.py`)
 - Routing MQTT commands → HTTP requests
-- Handling navigation commands (navigateTo, cancel, estop)
+- Handling navigation commands (navigateTo, cancel, estop, driveToPosition)
 - Monitoring long-running tasks
 - Automatic reconnection (up to 3 attempts)
 - Publishing statuses (system, connection, navigation)
@@ -236,16 +236,19 @@ Sending commands to robot services via MQTT:
 - `headers` (optional): Custom HTTP headers
 - `timeout` (optional): Request timeout in seconds
 
-#### 2. Navigation Commands
+#### 2. Navigation Commands (two levels)
 
-High-level navigation commands:
+**Robot-level (full orchestration — AGV + lift + arm):**
 
 **Topic:** `aroc/robot/{ROBOT_ID}/commands/navigateTo`
+- Routes to `robot_service:/tasks/navigate`
+- Resolves `target_id` from robot_service waypoints DB
+- `target_id` values: `GET /api/v1/robot/waypoints/list` (e.g. "Elmex", "Aloe Vera")
 
 ```json
 {
   "command_id": "nav-001",
-  "target_id": "position_A",
+  "target_id": "Elmex",
   "priority": "normal",
   "timestamp": "2025-01-27T12:00:00Z",
   "metadata": {
@@ -253,6 +256,21 @@ High-level navigation commands:
     "reason": "Pick up product"
   },
   "headers": {}
+}
+```
+
+**Device-level (AGV base only):**
+
+**Topic:** `aroc/robot/{ROBOT_ID}/commands/driveToPosition`
+- Handled directly by nav2adapter (not routed via bridge)
+- Resolves `target_id` from nav2adapter positions DB
+- `target_id` values: `GET /api/v1/symovo/robot_positions/list` (e.g. "POSITION_1")
+
+```json
+{
+  "command_id": "drive-001",
+  "target_id": "POSITION_1",
+  "timestamp": "2025-01-27T12:00:00Z"
 }
 ```
 

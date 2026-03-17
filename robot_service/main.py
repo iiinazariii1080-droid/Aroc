@@ -4,7 +4,8 @@ import logging
 from fastapi import FastAPI, HTTPException, Request
 import time
 from contextlib import asynccontextmanager
-from fastapi.responses import JSONResponse 
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
@@ -43,6 +44,11 @@ logging.getLogger("uvicorn.access").addFilter(_skip_joystick_frame_access)
 
 app = FastAPI(title="Robot Microservice", version="1.0.0", lifespan=lifespan, debug=False)
 app.include_router(robot_router)
+
+@app.get("/products_admin", include_in_schema=False)
+@app.get("/products_admin.html", include_in_schema=False)
+async def serve_products_admin():
+    return FileResponse("/app/static/products_admin.html")
 
 LAST_CALL_TS = 0
 MIN_INTERVAL = 1 / 60  # 20Hz = 0.05 s

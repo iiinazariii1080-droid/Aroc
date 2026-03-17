@@ -6,7 +6,7 @@ from services.command_handler import CommandHandler
 
 
 @pytest.mark.asyncio
-async def test_navigate_to_db_name_creates_transport(event_bus_instance):
+async def test_drive_to_position_db_name_creates_transport(event_bus_instance):
     # Mock symovo readiness status
     symovo_client = MagicMock()
     symovo_client.status = AsyncMock(return_value={"state_flags": {"drive_ready": True, "safety_cleared": True}})
@@ -50,7 +50,7 @@ async def test_navigate_to_db_name_creates_transport(event_bus_instance):
             target_id="FirstTestPose",
         )
 
-        status = await handler.handle_navigate_to(cmd)
+        status = await handler.handle_drive_to_position(cmd)
         assert status.status.value == "navigating"
 
         orchestrator.create_transport_to_pose.assert_called_once()

@@ -144,6 +144,60 @@ class RobotTransportPositionResult(BaseApiModel):
     message: OptionalStr = Field(None, description="Additional information or error message")
 
 # ============================================================================
+# ROBOT POSITIONS
+# ============================================================================
+
+class RobotPositionLocation(BaseApiModel):
+    x_m: float = Field(..., description="X coordinate (meters)", example=1.28)
+    y_m: float = Field(..., description="Y coordinate (meters)", example=2.31)
+    theta_deg: float = Field(0.0, description="Heading (degrees)", example=-2.0)
+    map_id: int = Field(0, description="Map ID", example=0)
+
+class RobotPositionOffsets(BaseApiModel):
+    x_offset_mm: float = Field(0.0, description="Tool X offset (mm)", example=0.0)
+    y_offset_mm: float = Field(0.0, description="Tool Y offset (mm — left/right)", example=50.0)
+    z_offset_mm: float = Field(0.0, description="Tool Z offset (mm)", example=0.0)
+
+class RobotPositionParams(BaseApiModel):
+    """Movement parameters stored with each saved position."""
+    location: RobotPositionLocation = Field(..., description="AGV target coordinates")
+    lift_position_cm: float = Field(0.0, description="Lift height in cm", example=20.0)
+    manipulator_offsets: RobotPositionOffsets = Field(
+        default_factory=RobotPositionOffsets,
+        description="Tool offset from JOB_POSE (left/right = y_offset_mm)"
+    )
+    velocity_percent: float = Field(20.0, description="Movement speed (%)", example=20.0)
+    reset_faults: bool = Field(False, description="Reset device errors before moving")
+
+class RobotPositionItem(BaseApiModel):
+    """Single saved robot position."""
+    id: str = Field(..., description="Position ID (8-char hex)", example="b16f0fed")
+    name: Optional[str] = Field(None, description="Human-readable name", example="Полка А, ряд 3")
+    params: Optional[dict] = Field(None, description="Movement parameters")
+
+class RobotPositionRecordRequest(BaseApiModel):
+    """Request body for recording current position."""
+    name: Optional[str] = Field(None, description="Position name", example="Полка А, ряд 3")
+    velocity_percent: float = Field(20.0, description="Speed to use when running this position (%)", example=20.0)
+
+class RobotPositionSaveRequest(BaseApiModel):
+    """Request body for manually saving a position."""
+    name: Optional[str] = Field(None, description="Position name", example="Полка А, ряд 3")
+    params: RobotPositionParams = Field(..., description="Position parameters")
+
+class RobotPositionSavedResponse(BaseApiModel):
+    status: str = Field("ok", description="'ok' on success")
+    message: str = Field(..., description="Human-readable result")
+    id: str = Field(..., description="Saved position ID", example="b16f0fed")
+
+class RobotPositionRecordResponse(RobotPositionSavedResponse):
+    snapshot: Optional[dict] = Field(None, description="Raw device readings at time of recording")
+
+class RobotPositionDeleteResponse(BaseApiModel):
+    status: str = Field("ok", description="'ok' on success")
+    message: str = Field(..., description="Human-readable result")
+
+# ============================================================================
 # SUBSYSTEM STATUSES
 # ============================================================================
 

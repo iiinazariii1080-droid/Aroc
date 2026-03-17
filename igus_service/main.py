@@ -18,13 +18,8 @@ from app.middleware import request_id_middleware
 from app.request_context import RequestIdFilter
 from app.routes import router as igus_router
 from app.state import shutdown, startup
-from app.system_routes import router as system_router
+from app.system_routes import STATIC_DIR, router as system_router
 from app.version import SERVER_VERSION
-
-try:
-    from drivers.dryve_d1 import __version__ as driver_version
-except ImportError:
-    driver_version = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -84,14 +79,15 @@ app.include_router(system_router)
 app.include_router(igus_router)
 app.include_router(api_v1_router)
 
-# Serve static files for control panel
-static_dir = os.path.join(os.path.dirname(__file__), "app", "static")
-if os.path.exists(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+# Serve static files for control panel.
+# Static HTML/JS/CSS are NOT behind auth. The control panel UI itself
+# is non-sensitive; all motion commands it issues go through the protected API
+# endpoints which require X-API-Key when IGUS_API_KEY is set.
+if os.path.exists(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-
     host = os.getenv("SERVICE_HOST", "127.0.0.1")
     port = int(os.getenv("SERVICE_PORT", "8101"))
     uvicorn.run("main:app", host=host, port=port, reload=False, log_level=log_level.lower())

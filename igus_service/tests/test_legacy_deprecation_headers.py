@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
+
 from fastapi.testclient import TestClient
 
 import main
-from app import config as app_config
-from tests.conftest import set_app_state
+from app import config
+from app.config import get_settings
+from tests.fakes import set_app_state
 
 
 def test_legacy_status_has_deprecation_headers(noop_lifecycle) -> None:
@@ -34,15 +37,15 @@ def test_v1_status_has_no_deprecation_headers(noop_lifecycle) -> None:
 def test_legacy_removed_phase_returns_410(noop_lifecycle) -> None:
     set_app_state(main.app)
 
-    prev_phase = app_config.LEGACY_API_PHASE
-    app_config.LEGACY_API_PHASE = "removed"
+    prev_settings = config._settings
+    config._settings = dataclasses.replace(get_settings(), legacy_api_phase="removed")
     try:
         with TestClient(main.app) as client:
             response = client.get("/status")
             v1_response = client.get("/drive/status")
             metrics_response = client.get("/metrics")
     finally:
-        app_config.LEGACY_API_PHASE = prev_phase
+        config._settings = prev_settings
 
     assert response.status_code == 410
     assert response.json()["code"] == "LEGACY_API_REMOVED"
@@ -55,14 +58,14 @@ def test_legacy_removed_phase_returns_410(noop_lifecycle) -> None:
 def test_invalid_legacy_phase_falls_back_to_deprecated(noop_lifecycle) -> None:
     set_app_state(main.app)
 
-    prev_phase = app_config.LEGACY_API_PHASE
-    app_config.LEGACY_API_PHASE = "invalid-phase"
+    prev_settings = config._settings
+    config._settings = dataclasses.replace(get_settings(), legacy_api_phase="invalid-phase")
     try:
         with TestClient(main.app) as client:
             response = client.get("/status")
             metrics_response = client.get("/metrics")
     finally:
-        app_config.LEGACY_API_PHASE = prev_phase
+        config._settings = prev_settings
 
     assert response.status_code == 200
     assert response.headers.get("X-API-Phase") == "deprecated"

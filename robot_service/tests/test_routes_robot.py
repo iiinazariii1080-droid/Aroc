@@ -296,3 +296,51 @@ def test_symovo_teleop_config_no_url(client):
     with patch("routes.robot.SYMOVO_TELEOP_MOVE_URL", ""):
         resp = client.get("/symovo_teleop_config")
         assert resp.status_code == 503
+
+
+# ── /tasks/navigate ────────────────────────────────────────────
+# Note: @tasked_getter wraps the handler as a background task,
+# so the endpoint always returns 200 with a task_id.  Errors
+# (unknown target, invalid params) appear in task status, not HTTP status.
+
+def test_tasks_navigate_returns_task_id(client):
+    """Endpoint accepts NavigateRequest and returns 200 with task_id."""
+    position = {
+        "id": "pos1",
+        "name": "station_A",
+        "params": {
+            "location": {"x_m": 1.0, "y_m": 2.0, "theta_deg": 90, "map_id": 0},
+            "lift_position_cm": 10.0,
+            "velocity_percent": 30.0,
+        },
+    }
+    with patch("routes.robot.get_robot_position_by_name", return_value=position), \
+         patch("routes.robot.robot.move_robot_to_product", new_callable=AsyncMock, return_value=True):
+        resp = client.post(
+            "/tasks/navigate",
+            json={"command_id": "nav-1", "target_id": "station_A"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert "task_id" in data
+
+
+def test_tasks_navigate_unknown_target_returns_task(client):
+    """Unknown target_id still returns 200 with task_id (error in task status)."""
+    with patch("routes.robot.get_robot_position_by_name", return_value=None):
+        resp = client.post(
+            "/tasks/navigate",
+            json={"command_id": "nav-2", "target_id": "nonexistent"},
+        )
+        assert resp.status_code == 200
+        assert "task_id" in resp.json()
+
+
+def test_tasks_navigate_validation_error(client):
+    """Missing required field command_id returns 422 (pydantic validation)."""
+    resp = client.post(
+        "/tasks/navigate",
+        json={"target_id": "station_A"},
+    )
+    assert resp.status_code == 422

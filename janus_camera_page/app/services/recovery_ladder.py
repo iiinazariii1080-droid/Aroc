@@ -296,7 +296,7 @@ class RecoveryLadder:
             )
             return {"action": "safe_mode", "reason": "ladder_exhausted"}
 
-        now = time.time()
+        now = time.monotonic()
 
         # Dedup: skip if another watchdog already escalated within the window
         if now - self._last_escalation_ts < _DEDUP_WINDOW_SEC:
@@ -324,8 +324,11 @@ class RecoveryLadder:
         except Exception:
             pass
 
-        success = self._execute(level, detection_signal, domain)
+        # Persist BEFORE executing — if the process crashes during _execute()
+        # (e.g. during systemctl restart or reboot), the attempt is still recorded.
+        # Without this, the ladder reloads stale state and retries the same action.
         _save_ladder_state(self._current_level, self._levels, self._total_recoveries)
+        success = self._execute(level, detection_signal, domain)
 
         return {
             "action": level.action.value,
@@ -446,8 +449,12 @@ class RecoveryLadder:
                 outcome = f"restarted {settings.service_name}"
 
             elif action == RecoveryAction.RESTART_JANUS:
+                # Ordered restart: stop ffmpeg first to avoid pushing RTP into
+                # a restarting Janus (causes v4l2 buffer corruption).
+                _run_cmd(["sudo", "systemctl", "stop", settings.service_name], timeout=15)
                 _run_cmd(["sudo", "systemctl", "restart", "janus.service"], timeout=60)
-                outcome = "restarted janus.service"
+                # ffmpeg auto-restarts via Restart=always after Janus is up
+                outcome = "restarted janus.service (ordered: pipeline stopped first)"
 
             elif action == RecoveryAction.USB_RESET:
                 _run_cmd(["sudo", "systemctl", "start", "realsense-failsafe.service"], timeout=90)

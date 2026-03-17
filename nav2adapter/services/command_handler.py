@@ -1,5 +1,5 @@
 """
-Command handler for navigateTo and cancel commands.
+Command handler for driveToPosition and cancel commands.
 """
 import asyncio
 import math
@@ -44,9 +44,9 @@ class CommandHandler:
         # Event used to cancel a pending laser-timeout wait when a newer command arrives.
         self._laser_cancel_event: Optional[asyncio.Event] = None
     
-    async def handle_navigate_to(self, command: NavigationCommand) -> NavigationStatus:
+    async def handle_drive_to_position(self, command: NavigationCommand) -> NavigationStatus:
         """
-        Handle navigateTo command with idempotency.
+        Handle driveToPosition command with idempotency.
         
         If a previous command is waiting for laser_timeout / waiting_for_scanner
         to clear, it is immediately cancelled and replaced by this new command
@@ -75,7 +75,7 @@ class CommandHandler:
         try:
             async with asyncio.timeout(120):
                 async with self._navigate_lock:
-                    return await self._handle_navigate_to_inner(command, cancel_event)
+                    return await self._handle_drive_to_position_inner(command, cancel_event)
         except TimeoutError:
             _LOGGER.error("Navigate lock acquisition timed out (120s) for command %s", command.command_id)
             return NavigationStatus(
@@ -86,11 +86,11 @@ class CommandHandler:
             )
 
 
-    async def _handle_navigate_to_inner(
+    async def _handle_drive_to_position_inner(
         self, command: NavigationCommand, cancel_event: Optional[asyncio.Event] = None,
     ) -> NavigationStatus:
-        """Inner implementation of navigate_to, called under _navigate_lock."""
-        _LOGGER.info("Handling navigateTo command: %s, target: %s", command.command_id, command.target_id)
+        """Inner implementation of drive_to_position, called under _navigate_lock."""
+        _LOGGER.info("Handling driveToPosition command: %s, target: %s", command.command_id, command.target_id)
 
         # ACK received after basic parsing/validation
         await self.event_bus.publish(AckEvent(type=AckType.RECEIVED.value, command_id=command.command_id))

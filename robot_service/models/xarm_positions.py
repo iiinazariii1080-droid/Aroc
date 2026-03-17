@@ -41,6 +41,18 @@ def get_XarmMoveWithJointsDictParams_with_box_num(box_number):
     )
     return params
 
+def get_XarmMoveWithJointsDictParams_direct_to_box(box_number):
+    """Move to box approach position STEP_2 (no TRANSPORT_STEP_1 / BOX_STEP_1 waypoints).
+    Used when the arm is already in the work zone, e.g. right after autotake."""
+    if box_number < 1 or box_number > 2:
+        raise ValueError("Box not found")
+    step2 = next((p for p in poses if p["name"] == "BOX_" + str(box_number) + "_STEP_2"), None)
+    return XarmMoveWithJointsDictParams(
+        points=[Joints(**{k: float(v) for k, v in step2['joints'].items()})],
+        velocity_percent=50.0,
+        reset_faults=True,
+    )
+
 def get_XarmMoveWithJointsDictParams_for_transport_position():
     position1 = next((p for p in poses if p["name"] == "TRANSPORT_STEP_1"), None)
     position2 = next((p for p in poses if p["name"] == "TRANSPORT_STEP_2"), None)
@@ -68,8 +80,32 @@ def get_XarmMoveWithJointsDictParams_for_move_to_center():
         reset_faults=True
     )
     return params
-    
+
+def get_XarmMoveWithJointsDictParams_for_job_pose():
+    position = next((p for p in poses if p["name"] == "JOB_POSE"), None)
+    return XarmMoveWithJointsDictParams(
+        points=[Joints(**{k: float(v) for k, v in position['joints'].items()})],
+        velocity_percent=50.0,
+        reset_faults=False,
+    )
+
+def get_XarmMoveWithJointsDictParams_for_transport_step_1():
+    position = next((p for p in poses if p["name"] == "TRANSPORT_STEP_1"), None)
+    return XarmMoveWithJointsDictParams(
+        points=[Joints(**{k: float(v) for k, v in position['joints'].items()})],
+        velocity_percent=50.0,
+        reset_faults=False,
+    )
+
 poses = [
+    {"name": "JOB_POSE", "joints": {
+        "j1": 144.089202,
+        "j2": 32.360656,
+        "j3": -34.598343,
+        "j4": 293.46692,
+        "j5": 121.059794,
+        "j6": -181.968187
+    }},
     {'name':"TARGET_DAVE_TAKE", 'joints': {
         "j1": 90,
         "j2": 11,
@@ -114,30 +150,39 @@ poses = [
     }},
 
     {'name':"BOX_1_STEP_2", 'joints': {
-        "j1": 124,
-        "j2": 50,
-        "j3": -31,
-        "j4": 64,
-        "j5": -34,
-        "j6": 35
+        "j1": 110.478352,
+        "j2": 14.862468,
+        "j3": -20.082343,
+        "j4": 267.740084,
+        "j5": 33.028152,
+        "j6": -189.177486
     }},
     
     {'name':"BOX_1_STEP_3", 'joints': {
-        "j1": 99,
-        "j2": 82,
-        "j3": -55,
-        "j4": 38,
-        "j5": -45,
-        "j6": -56
+        "j1": 93.722144,
+        "j2": 64.48342,
+        "j3": -57.468985,
+        "j4": 234.615789,
+        "j5": 37.237043,
+        "j6": -169.355152
     }},
 
     {'name':"BOX_2_STEP_2", 'joints': {
-        "j1": -46,
-        "j2": 39,
-        "j3": -39,
-        "j4": 101,
-        "j5": 30,
-        "j6": -175
+        "j1": -58.077867,
+        "j2": -4.257248,
+        "j3": -12.010742,
+        "j4": 68.300523,
+        "j5": 32.632009,
+        "j6": -151.718479
+    }},
+
+    {'name':"BOX_2_STEP_3", 'joints': {
+        "j1": -31.946064,
+        "j2": 56.232255,
+        "j3": -48.853762,
+        "j4": 130.656952,
+        "j5": 34.547522,
+        "j6": -194.048086
     }},
     {'name':"FORWARD_WELCOME_START", 'joints': {
         "j1": 28,
@@ -291,6 +336,14 @@ poses = [
         "j4": 179,
         "j5": 84,
         "j6": -181
+    }},
+    {'name':"DRIVING", 'joints': {
+        "j1": 268.2,
+        "j2": 2.6,
+        "j3": -77.7,
+        "j4": -34.1,
+        "j5": 141.4,
+        "j6": 108.2
     }},
     {'name':"TRANSPORT_STEP_1", 'joints': {
         "j1": 32,

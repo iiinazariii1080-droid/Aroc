@@ -113,10 +113,12 @@ class _TaskManager:
         return self._task_id if self.is_busy() else None
 
     async def start(self, coro_factory) -> str:
-        # Ensure only one task at a time, guard against races
         async with self._lock:
             if self.is_busy():
-                raise DeviceBusyError("Device is busy")
+                # Cancel previous task and wait for it to fully clean up
+                # (releases robot_lock in finally blocks before new task starts)
+                self._task.cancel()
+                await asyncio.wait({self._task}, timeout=5.0)
 
             self._result = None
             self._error = None

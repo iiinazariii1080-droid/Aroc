@@ -25,21 +25,23 @@ MODBUS_GATEWAY_ERROR = ErrorCode("MODBUS_GATEWAY_ERROR", "Modbus gateway error")
 MODBUS_ILLEGAL_FUNCTION = ErrorCode("MODBUS_ILLEGAL_FUNCTION", "Illegal function for remote Modbus gateway")
 DRIVE_IN_FAULT = ErrorCode("DRIVE_IN_FAULT", "Drive is in FAULT state — call fault_reset first")
 SAFETY_LOCKOUT = ErrorCode("SAFETY_LOCKOUT", "Safety lockout: DI7 (Enable) is LOW — check E-Stop and safety relay")
-DRIVE_NOT_READY = ErrorCode("DRIVE_NOT_READY", "Drive is not ready for motion commands")
-FAULT_RESET_FAILED = ErrorCode("FAULT_RESET_FAILED", "Fault reset did not clear the fault")
+DRIVE_DEGRADED = ErrorCode("DRIVE_DEGRADED", "Drive health score is below the readiness threshold")
+MOTOR_BUSY = ErrorCode("MOTOR_BUSY", "Motor is busy with another operation — try again after the current command completes")
+FAULT_CHECK_FAILED = ErrorCode("FAULT_CHECK_FAILED", "Could not read drive status before motion — command blocked (fail-closed)")
 
 
 __all__ = [
     "DRIVE_IN_FAULT",
     "DRIVE_NOT_INITIALIZED",
-    "DRIVE_NOT_READY",
+    "DRIVE_DEGRADED",
     "DRIVE_OFFLINE",
     "EVENT_BUS_NOT_INITIALIZED",
-    "FAULT_RESET_FAILED",
+    "FAULT_CHECK_FAILED",
     "INTERNAL_ERROR",
     "LEGACY_API_REMOVED",
     "MODBUS_GATEWAY_ERROR",
     "MODBUS_ILLEGAL_FUNCTION",
+    "MOTOR_BUSY",
     "MOTOR_LOCK_NOT_INITIALIZED",
     "PROTOCOL_ERROR",
     "REQUEST_ERROR",

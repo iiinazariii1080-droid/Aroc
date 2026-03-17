@@ -21,6 +21,7 @@ from fastapi import FastAPI
 from app import state
 from app.events import EventType
 
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 class FakeDryveD1:
@@ -32,8 +33,10 @@ class FakeDryveD1:
         self._callback: Any = None
         self.closed = False
 
-    async def connect(self) -> None:
+    async def connect(self, *, telemetry_callback: Any = None) -> None:
         self.connected = True
+        if telemetry_callback is not None:
+            self._callback = telemetry_callback
 
     def set_telemetry_callback(self, cb: Any) -> None:
         self._callback = cb
@@ -47,18 +50,17 @@ def _fresh_app() -> FastAPI:
     return FastAPI()
 
 
-# ── _cfg ────────────────────────────────────────────────────────
-
-def test_cfg_returns_attribute(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app import config as app_config
-    monkeypatch.setattr(app_config, "DRYVE_HOST", "10.0.0.1")
-    assert state._cfg("DRYVE_HOST", "fallback") == "10.0.0.1"
-
-
-def test_cfg_returns_default_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app import config as app_config
-    monkeypatch.delattr(app_config, "NO_SUCH_ATTR", raising=False)
-    assert state._cfg("NO_SUCH_ATTR", 42) == 42
+def _make_snapshot(**overrides) -> MagicMock:
+    """Return a MagicMock snapshot with sensible defaults."""
+    snap = MagicMock()
+    snap.cia402_state = overrides.get("cia402_state", "SWITCHED_ON")
+    snap.decoded_status = overrides.get("decoded_status", {"fault": False})
+    snap.statusword = overrides.get("statusword", 0x0237)
+    snap.ts_monotonic_s = overrides.get("ts_monotonic_s", time.monotonic())
+    snap.position = overrides.get("position", 100)
+    snap.velocity = overrides.get("velocity", 0)
+    snap.mode_display = overrides.get("mode_display", 1)
+    return snap
 
 
 # ── startup (success path) ──────────────────────────────────────
@@ -83,11 +85,12 @@ async def test_startup_initializes_state() -> None:
     assert app.state.drive_fault_active is False
     assert app.state.drive_telemetry_callback_errors_total == 0
 
-    # Settings dict contains expected keys
+    # Settings is a full Settings object
+    from app.config import Settings
     settings = app.state.settings
-    assert "DRYVE_HOST" in settings
-    assert "DRIVER_VERSION" in settings
-    assert "DRYVE_PORT" in settings
+    assert isinstance(settings, Settings)
+    assert settings.dryve_host
+    assert settings.dryve_port > 0
 
 
 # ── startup (connection failure) ─────────────────────────────────
@@ -122,12 +125,20 @@ async def test_shutdown_cleans_up_state() -> None:
     await state.shutdown(app)
 
     assert fake_drive.closed is True
-    # All known state attrs should be gone
+    # All attrs that startup() writes must be gone after shutdown.
+    # This list mirrors _REQUIRED_STATE_ATTRS plus extra attrs from state.py.
     for attr in (
-        "drive", "event_bus", "motor_lock", "settings",
-        "drive_last_error", "drive_fault_active",
+        "drive",
+        "event_bus",
+        "motor_lock",
+        "settings",
+        "drive_last_error",
+        "drive_fault_active",
+        "drive_last_telemetry_monotonic",
+        "drive_telemetry_callback_errors_total",
+        "latest_command_trace",
     ):
-        assert not hasattr(app.state, attr), f"{attr} still present after shutdown"
+        assert not hasattr(app.state, attr), f"{attr!r} still present after shutdown"
 
 
 async def test_shutdown_survives_close_error() -> None:
@@ -167,36 +178,31 @@ async def test_on_snapshot_publishes_state_change() -> None:
     assert callback is not None, "set_telemetry_callback was never called"
 
     event_bus = app.state.event_bus
+    sub_queue = event_bus.subscribe()
 
-    # Simulate first snapshot (prev_state is None → no event)
-    snap1 = MagicMock()
-    snap1.cia402_state = "SWITCHED_ON"
-    snap1.decoded_status = {"fault": False}
-    snap1.statusword = 0x0237
-    snap1.ts_monotonic_s = time.monotonic()
-    snap1.position = 100
-    snap1.velocity = 0
-    snap1.mode_display = 1
+    # First snapshot: establishes prev_state. STATE_CHANGE is only fired
+    # on transitions (prev != current), so no event expected yet.
+    snap1 = _make_snapshot(cia402_state="SWITCHED_ON", statusword=0x0237)
     callback(snap1)
-
-    # Let the fire-and-forget tasks run
     await asyncio.sleep(0.05)
 
-    # Second snapshot with different state → STATE_CHANGE event
-    snap2 = MagicMock()
-    snap2.cia402_state = "OPERATION_ENABLED"
-    snap2.decoded_status = {"fault": False}
-    snap2.statusword = 0x0637
-    snap2.ts_monotonic_s = time.monotonic()
-    snap2.position = 100
-    snap2.velocity = 0
-    snap2.mode_display = 1
+    # Drain any STATUS/COMMAND events from the first snapshot
+    while not sub_queue.empty():
+        sub_queue.get_nowait()
+
+    # Second snapshot with a different CiA402 state → STATE_CHANGE event
+    snap2 = _make_snapshot(cia402_state="OPERATION_ENABLED", statusword=0x0637)
     callback(snap2)
-
     await asyncio.sleep(0.05)
 
-    recent = await event_bus.get_recent_events(limit=20)
-    state_changes = [e for e in recent if e.type == EventType.STATE_CHANGE]
+    # Collect published events from the subscriber queue
+    events = []
+    while not sub_queue.empty():
+        events.append(sub_queue.get_nowait())
+
+    event_bus.unsubscribe(sub_queue)
+
+    state_changes = [e for e in events if e.type == EventType.STATE_CHANGE]
     assert len(state_changes) >= 1
     assert state_changes[-1].payload["from_state"] == "SWITCHED_ON"
     assert state_changes[-1].payload["to_state"] == "OPERATION_ENABLED"
@@ -211,34 +217,30 @@ async def test_on_snapshot_publishes_fault_event() -> None:
         await state.startup(app)
 
     callback = fake_drive._callback
+    event_bus = app.state.event_bus
+    sub_queue = event_bus.subscribe()
 
-    # First snapshot: no fault
-    snap1 = MagicMock()
-    snap1.cia402_state = "OPERATION_ENABLED"
-    snap1.decoded_status = {"fault": False}
-    snap1.statusword = 0x0637
-    snap1.ts_monotonic_s = time.monotonic()
-    snap1.position = 100
-    snap1.velocity = 0
-    snap1.mode_display = 1
+    # First snapshot: no fault — sets prev_state["fault"] = False
+    snap1 = _make_snapshot(cia402_state="OPERATION_ENABLED", decoded_status={"fault": False}, statusword=0x0637)
     callback(snap1)
     await asyncio.sleep(0.05)
 
-    # Second snapshot: fault appears
-    snap2 = MagicMock()
-    snap2.cia402_state = "FAULT"
-    snap2.decoded_status = {"fault": True}
-    snap2.statusword = 0x0008
-    snap2.ts_monotonic_s = time.monotonic()
-    snap2.position = 100
-    snap2.velocity = 0
-    snap2.mode_display = 1
+    # Drain initial STATUS events
+    while not sub_queue.empty():
+        sub_queue.get_nowait()
+
+    # Second snapshot: fault appears → FAULT edge event
+    snap2 = _make_snapshot(cia402_state="FAULT", decoded_status={"fault": True}, statusword=0x0008)
     callback(snap2)
     await asyncio.sleep(0.05)
 
-    event_bus = app.state.event_bus
-    recent = await event_bus.get_recent_events(limit=20)
-    fault_events = [e for e in recent if e.type == EventType.FAULT]
+    events = []
+    while not sub_queue.empty():
+        events.append(sub_queue.get_nowait())
+
+    event_bus.unsubscribe(sub_queue)
+
+    fault_events = [e for e in events if e.type == EventType.FAULT]
     assert len(fault_events) >= 1
     assert fault_events[-1].payload["active"] is True
 
@@ -257,4 +259,75 @@ async def test_on_snapshot_callback_error_counted() -> None:
     bad_snap = object()
     callback(bad_snap)
 
+    # The increment is deferred via call_soon_threadsafe — give the event loop
+    # a cycle to process it.
+    await asyncio.sleep(0.01)
+
     assert app.state.drive_telemetry_callback_errors_total == 1
+
+
+async def test_on_snapshot_continues_after_error() -> None:
+    """After a callback error, subsequent valid snapshots must still be processed.
+
+    Verifies the poller loop is not broken by a single bad snapshot.
+    """
+    app = _fresh_app()
+    fake_drive = FakeDryveD1()
+
+    with patch("app.state.DryveD1", return_value=fake_drive):
+        await state.startup(app)
+
+    callback = fake_drive._callback
+
+    # 1. Send a bad snapshot → error counter incremented
+    callback(object())
+    await asyncio.sleep(0.01)
+    assert app.state.drive_telemetry_callback_errors_total == 1
+
+    # 2. Send a valid snapshot → telemetry state should update normally
+    good_snap = _make_snapshot(cia402_state="OPERATION_ENABLED")
+    # drive_last_telemetry_monotonic is None until the first successful snapshot
+    assert app.state.drive_last_telemetry_monotonic is None
+    callback(good_snap)
+    await asyncio.sleep(0.05)
+
+    # Telemetry timestamp must now be set (proves _process_snapshot_in_loop ran)
+    assert app.state.drive_last_telemetry_monotonic is not None
+    # The good snapshot was processed successfully — no additional errors.
+    # Note: counter may be 0 if the 60s decay window triggered during
+    # _process_snapshot_in_loop (expected when _error_counter_reset_s starts at 0).
+    assert app.state.drive_telemetry_callback_errors_total <= 1
+
+
+async def test_on_snapshot_error_counter_decays() -> None:
+    """The callback error counter resets to 0 after the 60-second decay window.
+
+    The decay is triggered by _process_snapshot_in_loop when now_monotonic
+    exceeds the last reset time by _ERROR_COUNTER_WINDOW_S (60s).
+    """
+    app = _fresh_app()
+    fake_drive = FakeDryveD1()
+
+    with patch("app.state.DryveD1", return_value=fake_drive):
+        await state.startup(app)
+
+    callback = fake_drive._callback
+
+    # 1. Trigger a callback error → counter = 1
+    callback(object())
+    await asyncio.sleep(0.01)
+    assert app.state.drive_telemetry_callback_errors_total == 1
+
+    # 2. Send a normal snapshot with time.monotonic() advanced by 61 seconds.
+    #    This causes _process_snapshot_in_loop to see the 60s window has elapsed
+    #    and reset the counter to 0.
+    base_time = time.monotonic()
+    with patch("app.state.time") as mock_time:
+        mock_time.monotonic.return_value = base_time + 61.0
+        good_snap = _make_snapshot(cia402_state="OPERATION_ENABLED")
+        callback(good_snap)
+
+    await asyncio.sleep(0.05)
+
+    # Counter should have been reset by the decay logic
+    assert app.state.drive_telemetry_callback_errors_total == 0

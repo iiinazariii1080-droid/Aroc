@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m ruff check main.py app)",
+      "Bash(python -m ruff check --fix app/application/use_cases.py app/events.py)",
+      "Bash(python -m ruff check app/application/use_cases.py app/events.py app/state.py app/routes.py app/api_models.py app/error_codes.py app/models.py app/decorator.py)",
+      "Bash(python -m mypy app/application/use_cases.py app/events.py app/state.py app/routes.py app/api_models.py app/error_codes.py app/models.py app/decorator.py --ignore-missing-imports)",
+      "Bash(python -m ruff check main.py app --select E,F,W)",
+      "Bash(python -m ruff check app/api_models.py --select W293 --fix)",
+      "Bash(python -m ruff check app/application/use_cases.py app/events.py app/state.py app/routes.py app/api_models.py app/error_codes.py app/models.py app/decorator.py --select E,F,W)",
+      "Bash(python -m pytest -q -p pytest_asyncio.plugin tests -m \"not simulator\")",
+      "Bash(python -m pytest -q tests -m \"not simulator\")",
+      "Bash(python -m pytest -q tests/drivers -m \"not simulator\")",
+      "Bash(python -m pytest -q --ignore=tests/conftest.py tests/drivers/ -m \"not simulator\" --no-header)",
+      "Bash(python -m pytest --collect-only /c/Users/User/Downloads/Aroc-main/igus_service/tests)",
+      "Bash(find /c/Users/User/Downloads/Aroc-main/igus_service -name .env* -o -name *.env)",
+      "Bash(grep -r \"def test_\" /c/Users/User/Downloads/Aroc-main/igus_service/tests/*.py)",
+      "Bash(python -m ruff check app/api_models.py app/api_routes.py app/protocols.py app/state.py app/application/use_cases.py requirements.txt tests/test_drive_api_v1_routes.py)",
+      "Bash(python -m ruff check --fix app/application/use_cases.py tests/test_drive_api_v1_routes.py)",
+      "Bash(python -m ruff check app/api_models.py app/api_routes.py app/protocols.py app/state.py app/application/use_cases.py tests/test_drive_api_v1_routes.py)",
+      "Bash(python -m mypy app/api_routes.py app/api_models.py app/protocols.py app/service_error_http.py app/application/use_cases.py --ignore-missing-imports)",
+      "Bash(python -m ruff check app/api_models.py app/api_routes.py app/protocols.py app/state.py app/application/use_cases.py app/service_error_http.py tests/test_drive_api_v1_routes.py)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(pip install:*)",
+      "Bash(python -m pytest tests/ -v --tb=short --import-mode=importlib)"
+    ]
+  }
+}

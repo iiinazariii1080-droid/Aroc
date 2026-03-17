@@ -61,7 +61,11 @@ def janus_message(session_id: int, handle_id: int, body: Dict[str, Any]) -> Dict
     payload = response.json()
     if payload.get("janus") != "success":
         raise JanusError(f"message failed: {payload}")
-    return payload.get("plugindata", {}) or payload.get("jsep", {})
+    if "plugindata" in payload:
+        return payload["plugindata"]
+    if "jsep" in payload:
+        return payload["jsep"]
+    return {}
 
 
 def janus_detach(session_id: int, handle_id: int) -> bool:
@@ -148,9 +152,8 @@ def janus_summary(mount_id: int | None = None) -> Dict[str, Any]:
         if not isinstance(data, dict):
             logging.warning("Janus streaming_info 'data' missing or invalid: %s", type(data))
             return _empty
-        # Janus nests plugindata → data → info → info
-        info_outer = data.get("info", {})
-        mount = info_outer.get("info", {}) if isinstance(info_outer, dict) else {}
+        # Janus response: plugindata → data → info (the mount info dict)
+        mount = data.get("info", {})
         if not isinstance(mount, dict):
             mount = {}
         media_list = mount.get("media")

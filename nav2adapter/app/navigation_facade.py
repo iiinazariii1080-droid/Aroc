@@ -94,7 +94,7 @@ class NavigationFacade:
         _LOGGER.warning("MQTT still not connected after %.0fs wait", wait_s)
         return False
 
-    async def send_navigate_to(
+    async def send_drive_to_position(
         self,
         *,
         target_id: str,
@@ -109,8 +109,8 @@ class NavigationFacade:
         # If MQTT is temporarily disconnected, wait for background reconnect.
         if self._mqtt is not None and await self._wait_for_mqtt():
             try:
-                await self._mqtt.publish_command("navigateTo", payload)
-                topic = f"aroc/robot/{settings.robot_id}/commands/navigateTo"
+                await self._mqtt.publish_command("driveToPosition", payload)
+                topic = f"aroc/robot/{settings.robot_id}/commands/driveToPosition"
                 return CommandSendResult(topic=topic, payload=payload, delivery="mqtt")
             except (MqttUnavailableError, MqttCodeError, OSError) as e:
                 raise MqttUnavailableError(str(e))
@@ -120,7 +120,7 @@ class NavigationFacade:
         # Optional local mode (tests / dev without MQTT broker).
         if self._allow_direct and self._command_handler is not None:
             cmd = NavigationCommand(**payload)
-            await self._command_handler.handle_navigate_to(cmd)
+            await self._command_handler.handle_drive_to_position(cmd)
             return CommandSendResult(topic="local", payload=payload, delivery="local")
 
         raise MqttUnavailableError("MQTT adapter not connected")

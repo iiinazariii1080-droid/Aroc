@@ -1,6 +1,8 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 from db.trajectory import get_trajectory, save_trajectory
-from db.robot_positions import get_robot_positions_list, get_robot_position, save_robot_position, delete_robot_position
+from db.robot_positions import get_robot_positions_list, get_robot_position, get_robot_position_by_name, save_robot_position, delete_robot_position
+from app.xarm_status import get_velocity_percent, set_velocity_percent
 from models.api_types import (
     DefaultMoveRequest,
     RobotMoveRequest,
@@ -24,6 +26,11 @@ from models.api_types import (
     SYMOVO_TELEOP_LINEAR_MAX,
     SYMOVO_TELEOP_ANGULAR_MIN,
     SYMOVO_TELEOP_ANGULAR_MAX,
+    RobotPositionItem,
+    RobotPositionRecordRequest,
+    RobotPositionSavedResponse,
+    RobotPositionRecordResponse,
+    RobotPositionDeleteResponse,
 )
 from models.base_types import TaskStatus
 from models.types import ActionResponse,JoystickCommand,JoystickFrame
@@ -122,6 +129,7 @@ DEFAULT_POSITION_PARAMS = {
     "location": {"x_m": 0.0, "y_m": 0.0, "theta_deg": 0.0, "map_id": 0},
     "lift_position_cm": 0.0,
     "manipulator_offsets": {"x_offset_mm": 0.0, "y_offset_mm": 0.0, "z_offset_mm": 0.0},
+    "xarm_joints": None,
     "velocity_percent": 0.0,
     "reset_faults": False,
 }
@@ -138,6 +146,8 @@ def _deep_merge(defaults: dict, updates: dict) -> dict:
 def _to_obj(params_dict: dict) -> SimpleNamespace:
     loc = params_dict.get("location") or {}
     mo = params_dict.get("manipulator_offsets") or {}
+    xj = params_dict.get("xarm_joints") or {}
+    joints = xj.get("joints") or {} if xj else {}
     return SimpleNamespace(
         location=SimpleNamespace(
             x_m=float(loc.get("x_m", 0.0) or 0.0),
@@ -151,6 +161,17 @@ def _to_obj(params_dict: dict) -> SimpleNamespace:
             y_offset_mm=float(mo.get("y_offset_mm", 0.0) or 0.0),
             z_offset_mm=float(mo.get("z_offset_mm", 0.0) or 0.0),
         ) if (mo is not None) else None,
+        xarm_joints=SimpleNamespace(
+            name=xj.get("name", ""),
+            joints=SimpleNamespace(
+                j1=float(joints.get("j1", 0.0)),
+                j2=float(joints.get("j2", 0.0)),
+                j3=float(joints.get("j3", 0.0)),
+                j4=float(joints.get("j4", 0.0)),
+                j5=float(joints.get("j5", 0.0)),
+                j6=float(joints.get("j6", 0.0)),
+            ),
+        ) if joints else None,
         velocity_percent=float(params_dict.get("velocity_percent", 0.0) or 0.0),
         reset_faults=bool(params_dict.get("reset_faults", False)),
         product_id=params_dict.get("product_id"),
@@ -631,118 +652,208 @@ def api_save_trajectory(config: dict):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@router.get("/robot_positions/list")
+@router.get(
+    "/waypoints/list",
+    response_model=list[RobotPositionItem],
+    summary="List saved waypoints",
+    description="Returns all saved waypoints ordered by creation time (newest first).",
+)
 def api_get_robot_positions_list():
     result = get_robot_positions_list()
     return result
 
 
-@router.post("/robot_positions/save", status_code=status.HTTP_201_CREATED)
-def api_save_robot_position(new_position: dict):
+async def _capture_and_save(name: str, velocity_percent: float) -> RobotPositionRecordResponse:
+    """Reads current state from all devices and saves as a named position."""
+    snapshot = await robot.record_current_position()
+
+    lift_data    = snapshot.get("lift") or {}
+    joints_data  = snapshot.get("xarm_joints") or {}
+    vehicle_data = snapshot.get("vehicle_pose") or {}
+
+    lift_raw = float(lift_data.get("position", lift_data.get("position_cm", 0.0)) or 0.0)
+    lift_cm  = lift_raw / 1000.0   # encoder units → cm
+
+    location = {
+        "x_m":       float(vehicle_data.get("x_m", 0.0) or 0.0),
+        "y_m":       float(vehicle_data.get("y_m", 0.0) or 0.0),
+        "theta_deg": float(vehicle_data.get("theta_deg", 0.0) or 0.0),
+        "map_id":    int(vehicle_data.get("map_id", 0) or 0),
+    }
+
+    params = _deep_merge(DEFAULT_POSITION_PARAMS, {
+        "location":        location,
+        "lift_position_cm": lift_cm,
+        "velocity_percent": velocity_percent,
+        "xarm_joints":     joints_data,
+    })
+
+    position_id = uuid.uuid4().hex[:8]
+    save_robot_position({"id": position_id, "name": name, "params": params})
+
+    return RobotPositionRecordResponse(
+        status="ok",
+        message="Position saved.",
+        id=position_id,
+        snapshot=snapshot,
+    )
+
+
+@router.post(
+    "/waypoints/save",
+    status_code=status.HTTP_201_CREATED,
+    response_model=RobotPositionRecordResponse,
+    summary="Save current waypoint",
+    description=(
+        "Reads AGV coordinates, lift height and arm joints from devices, "
+        "saves as a named waypoint. Only `name` is required from the user."
+    ),
+)
+async def api_save_robot_position(body: RobotPositionRecordRequest = Body(default=RobotPositionRecordRequest())):
     try:
-        # Accept both wrapper {name?, params:{...}} and raw partial/default payload
-        body = new_position or {}
-        name = body.get("name") if isinstance(body, dict) else None
-
-        # Extract params dict (wrapper or raw), then merge with defaults
-        if isinstance(body, dict) and isinstance(body.get("params"), dict):
-            incoming = body["params"]
-        elif isinstance(body, dict):
-            incoming = {k: v for k, v in body.items() if k not in ("id", "name")}
-        else:
-            raise ValueError("Invalid request payload")
-
-        merged = _deep_merge(DEFAULT_POSITION_PARAMS, incoming)
-
-        # Generate server-side id always
-        position_id = uuid.uuid4().hex[:8]
-
-        save_robot_position({
-            "id": position_id,
-            "name": name,
-            "params": merged,
-        })
-        return {"status": "ok", "message": "Robot position saved.", "id": position_id}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@router.post("/robot_positions/record", status_code=status.HTTP_201_CREATED,
-             summary="Record current position of lift, xarm and vehicle",
-             description="Reads current lift height, xarm joints and symovo pose, then saves as a robot position.")
-async def api_record_robot_position(body: dict = Body(default={})):
-    try:
-        name = body.get("name") if isinstance(body, dict) else None
-
-        snapshot = await robot.record_current_position()
-
-        # Build params from live readings
-        lift_data = snapshot.get("lift") or {}
-        joints_data = snapshot.get("xarm_joints") or {}
-        vehicle_data = snapshot.get("vehicle_pose") or {}
-
-        lift_cm = lift_data.get("position", lift_data.get("position_cm", 0.0))
-        if isinstance(lift_cm, (int, float)):
-            lift_cm = float(lift_cm)
-        else:
-            lift_cm = 0.0
-
-        location = {
-            "x_m": float(vehicle_data.get("x_m", 0.0) or 0.0),
-            "y_m": float(vehicle_data.get("y_m", 0.0) or 0.0),
-            "theta_deg": float(vehicle_data.get("theta_deg", 0.0) or 0.0),
-            "map_id": int(vehicle_data.get("map_id", 0) or 0),
-        }
-
-        params = _deep_merge(DEFAULT_POSITION_PARAMS, {
-            "location": location,
-            "lift_position_cm": lift_cm,
-            "xarm_joints": joints_data,
-        })
-
-        position_id = uuid.uuid4().hex[:8]
-
-        save_robot_position({
-            "id": position_id,
-            "name": name,
-            "params": params,
-        })
-
-        return {
-            "status": "ok",
-            "message": "Current position recorded.",
-            "id": position_id,
-            "snapshot": snapshot,
-        }
+        return await _capture_and_save(body.name or "", body.velocity_percent)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/robot_positions/run", status_code=status.HTTP_201_CREATED, response_model=RobotActionResponse)
-@tasked_getter(RobotActionResponse)  
+@router.post(
+    "/waypoints/record",
+    status_code=status.HTTP_201_CREATED,
+    response_model=RobotPositionRecordResponse,
+    summary="Record current waypoint",
+    description=(
+        "Reads AGV coordinates, lift height and arm joints from devices, "
+        "saves as a named waypoint. Only `name` is required from the user."
+    ),
+)
+async def api_record_robot_position(body: RobotPositionRecordRequest = Body(default=RobotPositionRecordRequest())):
+    try:
+        return await _capture_and_save(body.name or "", body.velocity_percent)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/waypoints/run",
+    status_code=status.HTTP_201_CREATED,
+    response_model=RobotActionResponse,
+    summary="Send robot to waypoint",
+    description=(
+        "Runs `move_robot_to_product` for the saved waypoint. "
+        "Returns a task_id — poll `/tasks/status/{task_id}` to track progress. "
+        "Cancel with `POST /tasks/cancel/{task_id}`."
+    ),
+)
+@tasked_getter(RobotActionResponse)
 async def run_robot_position(position_id: str):
     try:
         robot_position = get_robot_position(position_id)
         if robot_position is None:
-            raise HTTPException(status_code=404, detail="Robot position not found.")    
+            raise HTTPException(status_code=404, detail="Robot position not found.")
         params = robot_position.get("params")
         if not isinstance(params, dict):
             raise HTTPException(status_code=400, detail="Robot position params not found or invalid.")
-        # Merge with defaults and convert to attribute object expected by robot.move_robot_to_product
         merged = _deep_merge(DEFAULT_POSITION_PARAMS, params)
         params_obj = _to_obj(merged)
         ok = await robot.move_robot_to_product(params_obj)
-        return ActionResponse(success=bool(ok), message=None if ok else "Failed to run robot position.")    #TODO: add response model
+        return ActionResponse(success=bool(ok), message=None if ok else "Failed to run robot position.")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@router.post("/robot_positions/delete", status_code=status.HTTP_201_CREATED)
+
+class _WaypointUpdateBody(BaseModel):
+    name: Optional[str] = None
+    velocity_percent: Optional[float] = None
+
+@router.put("/waypoints/update", summary="Update waypoint name / velocity")
+def api_update_robot_position(position_id: str, body: _WaypointUpdateBody):
+    pos = get_robot_position(position_id)
+    if pos is None:
+        raise HTTPException(status_code=404, detail="Waypoint not found")
+    params = dict(pos.get("params") or {})
+    if body.velocity_percent is not None:
+        params["velocity_percent"] = body.velocity_percent
+    new_name = body.name if body.name is not None else (pos.get("name") or "")
+    save_robot_position({"id": position_id, "name": new_name, "params": params})
+    return {"status": "ok", "id": position_id}
+
+
+class _SettingsBody(BaseModel):
+    velocity_percent: float
+
+@router.get("/settings", summary="Get global robot settings")
+def api_get_settings():
+    return {"velocity_percent": get_velocity_percent()}
+
+@router.put("/settings", summary="Update global robot settings")
+def api_put_settings(body: _SettingsBody):
+    set_velocity_percent(body.velocity_percent)
+    return {"velocity_percent": get_velocity_percent()}
+
+
+@router.post(
+    "/waypoints/delete",
+    status_code=status.HTTP_201_CREATED,
+    response_model=RobotPositionDeleteResponse,
+    summary="Delete waypoint",
+)
 def api_delete_robot_position(position_id: str):
     try:
         delete_robot_position(position_id)
-        return {"status": "ok", "message": "Robot position deleted."}
+        return RobotPositionDeleteResponse(status="ok", message="Robot position deleted.")
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+class NavigateRequest(BaseModel):
+    command_id: str
+    target_id: str
+    priority: str = "normal"
+    metadata: Optional[dict] = None
+    timestamp: Optional[str] = None
+
+
+@router.post(
+    "/tasks/navigate",
+    response_model=RobotActionResponse,
+    summary="Navigate robot to target (orchestrated)",
+    description=(
+        "Robot-level navigation: resolves target_id from saved waypoints, "
+        "then orchestrates AGV + lift + arm movement via move_robot_to_product. "
+        "Returns a task_id for polling via /tasks/status/{task_id}."
+    ),
+)
+@tasked_getter(RobotActionResponse)
+async def tasks_navigate(req: NavigateRequest):
+    position = get_robot_position_by_name(req.target_id)
+    if position is None:
+        raise HTTPException(status_code=404, detail=f"Unknown target_id: {req.target_id}")
+    params = position.get("params")
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=400, detail="Invalid position params")
+    merged = _deep_merge(DEFAULT_POSITION_PARAMS, params)
+    params_obj = _to_obj(merged)
+    ok = await robot.move_robot_to_product(params_obj)
+    return ActionResponse(success=bool(ok), message=None if ok else "Navigation failed")
+
+
+class GoToChargingRequest(BaseModel):
+    station_id: int
+
+
+@router.post(
+    "/tasks/go_to_charging_station",
+    response_model=RobotActionResponse,
+    summary="Go to charging station (orchestrated)",
+    description=(
+        "Cancels any running task, prepares robot (arm→JOB_POSE, lift down), "
+        "clears transports, activates charger. Symovo handles docking automatically."
+    ),
+)
+@tasked_getter(RobotActionResponse)
+async def tasks_go_to_charging_station(req: GoToChargingRequest):
+    ok = await robot.go_to_charging_station(req.station_id)
+    return ActionResponse(success=bool(ok), message=None if ok else "Charging failed")
+
 
 @router.post(
     "/move/autotake",
@@ -870,3 +981,23 @@ async def safety_recover():
     all_ok = all(s["status"] == "ok" for s in steps)
     _safety_log.info("Safety recovery %s: %s", "succeeded" if all_ok else "partial", steps)
     return {"success": all_ok, "steps": steps}
+
+
+# ----------------------------
+# Job-zone test endpoint
+# ----------------------------
+
+@router.post(
+    "/move/test_job_zone",
+    response_model=RobotActionResponse,
+    summary="Test: traverse 8 job-zone corners",
+    description=(
+        "Moves the manipulator to JOB_POSE, reads current TCP orientation, "
+        "then visits all 8 corners of the job-zone safe-box to verify "
+        "Cartesian reachability. Returns per-corner results."
+    ),
+)
+@tasked_getter(RobotActionResponse)
+async def test_job_zone():
+    result = await robot.test_job_zone_corners()
+    return ActionResponse(success=result["all_ok"], message=str(result["corners"]))

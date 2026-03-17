@@ -11,16 +11,12 @@ Any hardware wiring / DI configuration is outside the scope of software checks.
 from __future__ import annotations
 
 from ..od.statusword import SWBit
-
-_U16_MASK = 0xFFFF
+from .bits import _U16_MASK
+from .bits import bit_is_set as _bit
 
 
 class PreconditionFailed(RuntimeError):
     """Raised when a required drive precondition is not met."""
-
-
-def _bit(word: int, bit: int) -> bool:
-    return bool(((int(word) & _U16_MASK) >> int(bit)) & 1)
 
 
 def require_remote_enabled(statusword: int) -> None:

@@ -709,6 +709,12 @@ async def single_pose_typo_alias():
     return RedirectResponse(url="/single_pose_scene.html", status_code=307)
 
 
+@app.get("/products_admin")
+@app.get("/products_admin.html")
+async def serve_products_admin():
+    return FileResponse("static/pages/products_admin.html")
+
+
 @app.get("/{full_path:path}")
 async def spa_fallback(full_path: str):
     if full_path.startswith("api/") or full_path.startswith("static/") or ".." in full_path:

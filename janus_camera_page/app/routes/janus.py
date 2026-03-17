@@ -58,7 +58,7 @@ class JanusHealthResponse(BaseModel):
 def janus_healthz() -> JanusHealthResponse:
     settings = get_settings()
     data = janus.streaming_info(settings.janus_mount_id)
-    mount = (data or {}).get("data", {}).get("info", {}).get("info", {})
+    mount = (data or {}).get("data", {}).get("info", {})
     return JanusHealthResponse(ok=mount.get("enabled") is not None, mount_id=settings.janus_mount_id)
 
 
@@ -460,9 +460,12 @@ async def janus_ws_proxy(client_ws: WebSocket) -> None:
         "compression": None,
         "ssl": _ssl_ctx_for(upstream_url),
     }
-    if subprotocol:
-        kwargs["subprotocols"] = [subprotocol]
+    # Do NOT pass subprotocols= to ws_connect — Janus doesn't echo
+    # Sec-WebSocket-Protocol in its 101 response, and websockets ≥15 treats
+    # that as a NegotiationError.  The client-facing accept() already sent the
+    # subprotocol header to the browser; the upstream leg doesn't need it.
 
+    logging.info("WS proxy upstream: %s sub=%s", upstream_url, subprotocol)
     try:
         async with ws_connect(upstream_url, **kwargs) as upstream_ws:
             await asyncio.gather(
@@ -470,7 +473,7 @@ async def janus_ws_proxy(client_ws: WebSocket) -> None:
                 _pump_upstream_to_client(client_ws, upstream_ws),
             )
     except Exception as exc:
-        logging.error("WS proxy error: %s", exc)
+        logging.error("WS proxy error [url=%s]: %s", upstream_url, exc, exc_info=True)
         await client_ws.close()
 
 @router.get("/janus_healthz", include_in_schema=False)

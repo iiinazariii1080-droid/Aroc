@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
-from typing import Protocol
 
+from ..cia402.bits import bit_is_set as _bit
 from ..od.controlword import (
     CWBit,
     cw_clear_bits,
@@ -13,18 +14,11 @@ from ..od.controlword import (
 )
 from ..od.indices import ODIndex
 from ..od.statusword import SWBit, decode_statusword
+from ..protocol.accessor import AsyncODAccessor
 from ..protocol.exceptions import MotionAborted
 from ..transport.clock import monotonic_s
 
-
-class AsyncODAccessor(Protocol):
-    async def read_u16(self, index: int, subindex: int = 0) -> int: ...
-    async def read_i8(self, index: int, subindex: int = 0) -> int: ...
-    async def read_i32(self, index: int, subindex: int = 0) -> int: ...
-    async def write_u16(self, index: int, value: int, subindex: int = 0) -> None: ...
-    async def write_u8(self, index: int, value: int, subindex: int = 0) -> None: ...
-    async def write_u32(self, index: int, value: int, subindex: int = 0) -> None: ...
-    async def write_i32(self, index: int, value: int, subindex: int = 0) -> None: ...
+_LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class ProfilePositionConfig:
@@ -36,16 +30,18 @@ class ProfilePositionConfig:
 
     poll_interval_s: float = 0.05
     move_timeout_s: float = 30.0
-    system_cycle_delay_s: float = 0.01  # B2: Explicit system cycle delay (default 10ms, typical drive cycle: 1-5ms)
+    system_cycle_delay_s: float = 0.01  # Explicit system cycle delay (default 10ms, typical drive cycle: 1-5ms)
 
     verify_mode: bool = False
     mode_set_timeout_s: float = 1.0
     mode_settle_s: float = 0.3  # Delay after writing mode register when verify_mode=False
 
+    def __post_init__(self) -> None:
+        if self.system_cycle_delay_s < 0.001:
+            raise ValueError(f"system_cycle_delay_s must be >= 0.001, got {self.system_cycle_delay_s}")
+
 MODE_PROFILE_POSITION = 1
 
-def _bit(word: int, bit: int) -> bool:
-    return bool((int(word) >> int(bit)) & 1)
 
 class ProfilePosition:
     """Profile Position mode helper (6060=1)."""
@@ -99,9 +95,9 @@ class ProfilePosition:
             timeout_s: override default move timeout
         
         Raises:
-            ValueError: If relative=False and target_position < 0 (absolute position cannot be negative per M4 requirement)
+            ValueError: If relative=False and target_position < 0 (absolute position cannot be negative)
         """
-        # M4: Validate absolute position cannot be negative
+        # Validate absolute position cannot be negative
         if not relative and target_position < 0:
             raise ValueError(
                 f"Absolute position cannot be negative (relative=False, target_position={target_position}). "
@@ -111,9 +107,10 @@ class ProfilePosition:
         await self.ensure_mode()
         await self.configure()
         
+        _LOGGER.info("PP: move_to target=%d relative=%s immediate=%s", target_position, relative, immediate)
         await self._od.write_i32(int(ODIndex.TARGET_POSITION), int(target_position), 0)
         
-        # B2: Barrier cycle: per manual, wait one system cycle after configuration before start
+        # Barrier cycle: per manual, wait one system cycle after configuration before start
         # Per manual requirement: after parameterizing mode objects, wait one system cycle
         # before sending Start Command via Controlword bit 4.
         # We ensure this by: (1) reading statusword as a round-trip barrier to ensure
@@ -145,7 +142,7 @@ class ProfilePosition:
         await asyncio.sleep(self._cfg.system_cycle_delay_s)
         await self._od.write_u16(int(ODIndex.CONTROLWORD), int(clear_word) & 0xFFFF, 0)
 
-        # M3: PP handshake - after Start, wait for command acknowledgment
+        # PP handshake - after Start, wait for command acknowledgment
         # Per manual: after Start (bit4), drive resets bit10 and sets bit12,
         # then bit12 clears itself. We wait for bit10==0 OR bit12==1 to confirm command acceptance.
         ack_seen = await self._wait_start_acknowledgment()
@@ -166,17 +163,25 @@ class ProfilePosition:
         timeout_s: float | None = None,
     ) -> None:
         """Move to target position with specified velocity, acceleration, and deceleration.
-        
-        This is a convenience method that configures motion parameters and then moves.
-        Note: ensure_mode() is called inside move_to(), so we only call configure() here
-        to set velocity/accel/decel before the move.
+
+        Temporarily overrides the config-level defaults so that ``move_to()``
+        (which calls ``configure()`` internally) writes the caller-supplied
+        values in a single pass — avoiding a redundant double-write to the
+        OD registers.
         """
-        await self.configure(
-            profile_velocity=profile_velocity,
-            acceleration=profile_accel,
-            deceleration=profile_decel,
-        )
-        await self.move_to(target_position=target_position, timeout_s=timeout_s)
+        # Stash and override config defaults so move_to → configure() uses
+        # the caller-supplied values directly.
+        saved = (self._cfg.profile_velocity, self._cfg.acceleration, self._cfg.deceleration)
+        # frozen dataclass — replace via object.__setattr__
+        object.__setattr__(self._cfg, "profile_velocity", profile_velocity)
+        object.__setattr__(self._cfg, "acceleration", profile_accel)
+        object.__setattr__(self._cfg, "deceleration", profile_decel)
+        try:
+            await self.move_to(target_position=target_position, timeout_s=timeout_s)
+        finally:
+            object.__setattr__(self._cfg, "profile_velocity", saved[0])
+            object.__setattr__(self._cfg, "acceleration", saved[1])
+            object.__setattr__(self._cfg, "deceleration", saved[2])
 
     async def halt(self, *, enabled: bool = True) -> None:
         """Halt movement in Profile Position mode using Controlword HALT bit (bit 8).
@@ -188,6 +193,7 @@ class ProfilePosition:
         Args:
             enabled: If True, set HALT bit to stop movement. If False, clear HALT bit.
         """
+        _LOGGER.debug("PP: halt enabled=%s", enabled)
         # Per manual: after Operation Enabled, bits 0..3 must always be sent
         # Start with base containing hold bits (0x000F)
         base = cw_enable_operation()  # 0x000F = bits 0,1,2,3 set
@@ -239,7 +245,13 @@ class ProfilePosition:
                     int(ODIndex.TARGET_POSITION), 0)
                 actual_pos = await self._od.read_i32(
                     int(ODIndex.POSITION_ACTUAL_VALUE), 0)
-                if target_reached and abs(actual_pos - target_pos) <= 1:
+                _LOGGER.info(
+                    "PP: _wait_start_ack timeout — target_reached=%s, "
+                    "target_pos=%d, actual_pos=%d, delta=%d",
+                    target_reached, target_pos, actual_pos,
+                    abs(actual_pos - target_pos),
+                )
+                if target_reached and abs(actual_pos - target_pos) <= 250:
                     return True  # move completed during the ack window
                 return False
             await asyncio.sleep(self._cfg.poll_interval_s)
@@ -289,6 +301,7 @@ class ProfilePosition:
             loop_time = monotonic_s()
             sw = await self._od.read_u16(int(ODIndex.STATUSWORD), 0)
             if _bit(sw, int(SWBit.TARGET_REACHED)):
+                _LOGGER.info("PP: target reached")
                 return
             
             # Check for fault condition

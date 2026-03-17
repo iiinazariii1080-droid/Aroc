@@ -341,7 +341,7 @@ class MqttAdapter:
 
     async def start_command_consumer(
         self,
-        on_navigate_to: Callable[[dict], Awaitable[Any]],
+        on_drive_to_position: Callable[[dict], Awaitable[Any]],
         on_cancel: Callable[[dict], Awaitable[Any]],
     ) -> None:
         """
@@ -354,7 +354,7 @@ class MqttAdapter:
             _LOGGER.info("Command consumer already running")
             return
 
-        nav_topic = self._get_command_topic("navigateTo")
+        nav_topic = self._get_command_topic("driveToPosition")
         cancel_topic = self._get_command_topic("cancel")
 
         async def message_handler():
@@ -423,8 +423,8 @@ class MqttAdapter:
                             _LOGGER.debug("[MQTT IN] %s -> %s", topic_str, str(payload)[:1000])
 
                             try:
-                                if topic_str.endswith("/navigateTo"):
-                                    await on_navigate_to(payload)
+                                if topic_str.endswith("/driveToPosition"):
+                                    await on_drive_to_position(payload)
                                 elif topic_str.endswith("/cancel"):
                                     await on_cancel(payload)
                                 else:
@@ -594,7 +594,7 @@ class MqttAdapter:
             return
 
     async def publish_command(self, command: str, payload_obj: dict) -> None:
-        """Publish an inbound-style command (navigateTo/cancel) to the broker."""
+        """Publish an inbound-style command (driveToPosition/cancel) to the broker."""
         if not self._connected or not self.client:
             reliability_metrics.inc("mqtt.publish.command.skipped_disconnected")
             raise MqttUnavailableError("MQTT client not connected")

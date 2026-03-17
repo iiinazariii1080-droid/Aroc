@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     symovo_auto_set_drive_mode_wait_s: float = Field(default=1.0)
     # If true, backend will clear ALL transports on the controller at startup (destructive).
     symovo_clear_transports_on_startup: bool = Field(default=False)
-    # If true, backend will clear ALL transports on the controller right before starting *each* new navigateTo
+    # If true, backend will clear ALL transports on the controller right before starting *each* new driveToPosition
     # (destructive). This keeps Symovo "history" clean and avoids stale transports affecting UI/recovery.
     symovo_clear_transports_before_navigate: bool = Field(default=False)
 
@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     symovo_arrival_dwell_s: float = Field(default=2.5)
 
     # Charger workflow
-    # If navigateTo target_id matches charger_target_name, backend will activate (enable) a charging station
+    # If driveToPosition target_id matches charger_target_name, backend will activate (enable) a charging station
     # with name charger_station_name AFTER navigation arrives (to trigger Symovo internal docking script).
     charger_activation_enabled: bool = Field(default=True)
     charger_target_name: str = Field(default="CHARGER")

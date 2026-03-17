@@ -7,12 +7,16 @@ def _add_repo_paths() -> None:
     # 1) src-layout: repo_root/src/dryve_d1
     # 2) flat-layout: repo_root/dryve_d1
     here = Path(__file__).resolve()
-    repo_root = here.parents[1]  # tests/ -> repo root
+    tests_dir = here.parent          # drivers/tests/
+    repo_root = here.parents[1]      # drivers/
     src = repo_root / "src"
     if src.exists() and str(src) not in sys.path:
         sys.path.insert(0, str(src))
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
+    # Allow ``from test_utils.xxx`` imports in integration/property tests.
+    if str(tests_dir) not in sys.path:
+        sys.path.insert(0, str(tests_dir))
 
 _add_repo_paths()
 
@@ -24,8 +28,15 @@ import pytest
 import pytest_asyncio
 from drivers.dryve_d1.api.drive import DryveD1, DryveD1Config
 from drivers.dryve_d1.config.models import DriveConfig, ConnectionConfig
+from test_utils.config import TestConfig, get_test_config
 
 logger = logging.getLogger(__name__)
+
+
+@pytest.fixture(scope="session")
+def test_config() -> TestConfig:
+    """Test configuration with timeouts, tolerances, and polling intervals."""
+    return get_test_config()
 
 
 @pytest.fixture(scope="session")

@@ -1,28 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
-from typing import Protocol
 
+from ..cia402.bits import bit_is_set as _bit
 from ..od.controlword import cw_enable_operation, cw_pulse_new_set_point
 from ..od.indices import ODIndex
+from ..protocol.accessor import AsyncODAccessor
 from ..protocol.exceptions import MotionAborted
 from ..transport.clock import monotonic_s
 
-
-class AsyncODAccessor(Protocol):
-    async def read_u16(self, index: int, subindex: int = 0) -> int: ...
-    async def read_i8(self, index: int, subindex: int = 0) -> int: ...
-    async def write_u16(self, index: int, value: int, subindex: int = 0) -> None: ...
-    async def write_u8(self, index: int, value: int, subindex: int = 0) -> None: ...
-    async def write_u32(self, index: int, value: int, subindex: int = 0) -> None: ...
-
+_LOGGER = logging.getLogger(__name__)
 
 MODE_HOMING = 6
-
-
-def _bit(word: int, bit: int) -> bool:
-    return bool((int(word) >> int(bit)) & 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,10 +34,14 @@ class HomingConfig:
 
     poll_interval_s: float = 0.05
     timeout_s: float = 60.0
-    system_cycle_delay_s: float = 0.01  # B2: Explicit system cycle delay (default 10ms, typical drive cycle: 1-5ms)
+    system_cycle_delay_s: float = 0.01  # Explicit system cycle delay (default 10ms, typical drive cycle: 1-5ms)
 
     verify_mode: bool = False
     mode_set_timeout_s: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.system_cycle_delay_s < 0.001:
+            raise ValueError(f"system_cycle_delay_s must be >= 0.001, got {self.system_cycle_delay_s}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +100,7 @@ class Homing:
         
         We ensure this by reading statusword after configuration and before start.
         """
-        # B2: Barrier cycle: per manual, wait one system cycle after configuration before start
+        # Barrier cycle: per manual, wait one system cycle after configuration before start
         # Per manual requirement: after parameterizing mode objects, wait one system cycle
         # before sending Start Command via Controlword bit 4.
         # We ensure this by: (1) reading statusword as a round-trip barrier to ensure
@@ -121,6 +116,7 @@ class Homing:
         set_word, clear_word = cw_pulse_new_set_point(base)
         await self._od.write_u16(int(ODIndex.CONTROLWORD), int(set_word) & 0xFFFF, 0)
         await self._od.write_u16(int(ODIndex.CONTROLWORD), int(clear_word) & 0xFFFF, 0)
+        _LOGGER.info("Homing: start command issued")
 
     async def run(self, *, timeout_s: float | None = None) -> HomingResult:
         """Configure and perform homing, then wait for completion.
@@ -131,10 +127,13 @@ class Homing:
         - Statusword bit 10: Target reached (often also set at end)
         We use bit 12 as 'attained' and bit 13 as 'error' hint.
         """
+        _LOGGER.info("Homing: run started, timeout_s=%s", timeout_s)
         await self.ensure_mode()
         await self.configure()
         await self.start()
-        return await self.wait_done(timeout_s=timeout_s)
+        result = await self.wait_done(timeout_s=timeout_s)
+        _LOGGER.info("Homing: completed attained=%s error=%s", result.attained, result.error)
+        return result
 
     async def wait_done(self, *, timeout_s: float | None = None) -> HomingResult:
         timeout = self._cfg.timeout_s if timeout_s is None else float(timeout_s)

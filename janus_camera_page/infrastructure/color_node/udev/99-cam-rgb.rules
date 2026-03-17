@@ -1,0 +1,12 @@
+# RealSense D435i RGB: vendor=8086, product=0b3a, интерфейс RGB=03, именно capture-нода
+# При появлении устройства:
+#   1. Создаёт symlink /dev/cam-rgb
+#   2. Сбрасывает failed state сервиса (если был StartLimitBurst)
+#   3. Запускает rtp-rgb@cam-rgb.service через SYSTEMD_WANTS
+SUBSYSTEM=="video4linux", KERNEL=="video*", \
+  ENV{ID_VENDOR_ID}=="8086", ENV{ID_MODEL_ID}=="0b3a", ENV{ID_USB_INTERFACE_NUM}=="03", \
+  ENV{ID_V4L_CAPABILITIES}==":capture:", \
+  SYMLINK+="cam-rgb", \
+  ENV{SYSTEMD_ALIAS}="/dev/cam-rgb", \
+  RUN+="/bin/systemctl reset-failed rtp-rgb@cam-rgb.service", \
+  TAG+="systemd", ENV{SYSTEMD_WANTS}="rtp-rgb@cam-rgb.service"

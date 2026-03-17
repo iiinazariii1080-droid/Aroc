@@ -192,14 +192,14 @@ class TestX5_GracePeriod:
 
     def test_in_grace_period_true(self):
         from app.services import watchdogs
-        with patch.object(watchdogs, "_STARTUP_TS", time.time()):
+        with patch.object(watchdogs, "_STARTUP_TS", time.monotonic()):
             # Just started → should be in grace period
             assert watchdogs._in_grace_period() is True
 
     def test_grace_period_expired(self):
         from app.services import watchdogs
         # Started a long time ago
-        with patch.object(watchdogs, "_STARTUP_TS", time.time() - 9999):
+        with patch.object(watchdogs, "_STARTUP_TS", time.monotonic() - 9999):
             assert watchdogs._in_grace_period() is False
 
 
@@ -208,15 +208,16 @@ class TestX5_GracePeriod:
 # ===================================================================
 
 class TestX6_WatchdogDedup:
-    """Snapshot watchdog skips if Janus watchdog recently escalated."""
+    """Dual watchdog dedup: _try_escalate atomically claims the dedup window."""
 
-    def test_janus_escalation_dedup(self):
+    def test_recent_escalation_dedup(self):
         from app.services import watchdogs
-        # Mark Janus as having escalated just now
-        watchdogs._mark_janus_escalated()
-        assert watchdogs._janus_recently_escalated() is True
+        # Simulate a recent escalation by setting the timestamp
+        with watchdogs._escalation_lock:
+            watchdogs._last_escalation_ts = time.monotonic()
+        assert watchdogs._recently_escalated() is True
 
     def test_old_escalation_not_dedupped(self):
         from app.services import watchdogs
-        with patch.object(watchdogs, "_last_janus_escalation_ts", 0.0):
-            assert watchdogs._janus_recently_escalated() is False
+        with patch.object(watchdogs, "_last_escalation_ts", 0.0):
+            assert watchdogs._recently_escalated() is False

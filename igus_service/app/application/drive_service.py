@@ -1,25 +1,40 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Any
 
 from app import error_codes
-from app.http_errors import error_detail, is_drive_connected
+from app.application.results import FaultDetailsResult
+from app.http_errors import error_detail
+
+_LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.events import EventBus
     from app.protocols import AppStateProtocol, DriveProtocol
 
 
-@dataclass(frozen=True)
 class ServiceError(Exception):
-    status_code: int
-    code: str
-    message: str
+    """Application-layer error with HTTP status code and error code.
+
+    Not a frozen dataclass — Exception subclasses must allow __traceback__
+    assignment (Python 3.13+ contextlib sets it during exception handling).
+    """
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
 
     def to_error_detail(self) -> dict[str, Any]:
         return error_detail(self.code, self.message)
+
+
+def is_drive_connected(drive: Any) -> bool:
+    """Check whether the drive reports itself as connected."""
+    return bool(getattr(drive, "is_connected", False))
 
 
 class DriveService:
@@ -56,23 +71,33 @@ class DriveService:
             )
         return motor_lock
 
-    def get_motor_lock_optional(self) -> asyncio.Lock | None:
-        return getattr(self._state, "motor_lock", None)
-
     async def require_not_in_fault(self) -> None:
-        """Check that the drive is not in FAULT state.
+        """Check that the drive is not in FAULT state — fail-closed.
 
-        Reads the live statusword (bypasses telemetry cache) and raises
-        ``ServiceError(503, SAFETY_LOCKOUT)`` if fault + DI7 low (safety relay open),
-        or ``ServiceError(409, DRIVE_IN_FAULT)`` for a regular fault.
-        Call this **before** acquiring ``motor_lock`` to fail fast.
+        Reads the live statusword (bypasses telemetry cache) and raises:
+        - ``ServiceError(503, SAFETY_LOCKOUT)``  if fault + DI7 low (safety relay open)
+        - ``ServiceError(409, DRIVE_IN_FAULT)``  for a regular active fault
+        - ``ServiceError(503, FAULT_CHECK_FAILED)`` if the status cannot be read at all
+
+        The last case is intentionally fail-closed: when the drive state is unknown
+        (Modbus error, timeout, disconnected), blocking the motion command is the
+        safe choice.  Passing through silently could allow movement in FAULT state.
+
+        Call this **before** acquiring ``motor_lock`` to fail fast without queuing.
         """
         drive = self.get_drive(require_connected=True)
         try:
             status = await drive.get_status_live()
-        except Exception:
-            # If we can't read status, let the downstream command handle it
-            return
+        except Exception as exc:
+            _LOGGER.warning(
+                "require_not_in_fault: could not read live status (%s: %s) — blocking motion (fail-closed)",
+                type(exc).__name__, exc,
+            )
+            raise ServiceError(
+                503,
+                error_codes.FAULT_CHECK_FAILED.code,
+                f"{error_codes.FAULT_CHECK_FAILED.message}: {exc!s}",
+            ) from exc
         if status.get("fault", False):
             if not status.get("remote", True):
                 raise ServiceError(
@@ -86,22 +111,27 @@ class DriveService:
                 error_codes.DRIVE_IN_FAULT.message,
             )
 
-    async def read_fault_info(self) -> dict[str, Any]:
+    async def read_fault_info(self) -> FaultDetailsResult | None:
         """Read detailed fault diagnostics via FaultManager.
 
-        Returns a dict with ``statusword``, ``error_code``, ``error_register``,
-        ``history`` (all hex-formatted strings) or empty values if the drive is
-        not in fault or diagnostics are unavailable.
+        Returns a ``FaultDetailsResult`` on success, or ``None`` if the read fails
+        (drive unreachable, Modbus error, etc.).  Callers should treat ``None`` as
+        "diagnostics unavailable" rather than "no fault".
         """
         drive = self.get_drive(require_connected=True)
         try:
-            from drivers.dryve_d1.cia402.fault import FaultManager
-
-            fm = FaultManager(drive)  # type: ignore[arg-type]  # runtime drive satisfies AsyncODAccessor
-            info = await fm.read_fault_info(include_history=True)
-            return info.as_dict()
+            raw = await drive.read_fault_info()
+            ec = raw.get("error_code")
+            er = raw.get("error_register")
+            hist = raw.get("history")
+            return FaultDetailsResult(
+                error_code=str(ec) if ec is not None else None,
+                error_register=str(er) if er is not None else None,
+                history=[str(h) for h in hist] if hist is not None else None,
+            )
         except Exception:
-            return {"statusword": None, "error_code": None, "error_register": None, "history": None}
+            _LOGGER.warning("Failed to read fault diagnostics from drive", exc_info=True)
+            return None
 
     @staticmethod
     def translate_driver_exception(op: str, exc: Exception) -> tuple[int, dict[str, Any]]:
@@ -115,10 +145,14 @@ class DriveService:
                 ModbusGatewayException,
                 ProtocolError,
             )
+        except ImportError:
+            # Driver package not installed — skip Modbus-specific classification.
+            pass
+        else:
             if isinstance(exc, ModbusGatewayException):
                 enum = exc.as_enum()
                 status_code = 503
-                error_code = f"MODBUS_{enum.name}" if enum is not None else error_codes.MODBUS_GATEWAY_ERROR.code
+                # Use registered error codes only — no dynamic MODBUS_{name} generation.
                 if enum == ModbusExceptionCode.ILLEGAL_FUNCTION:
                     error_code = error_codes.MODBUS_ILLEGAL_FUNCTION.code
                     msg = (
@@ -126,11 +160,13 @@ class DriveService:
                         f"(dryve D1 Modbus TCP Gateway). Check host/port and ensure the gateway is enabled; "
                         f"for the simulator in this project use port 501."
                     )
+                else:
+                    error_code = error_codes.MODBUS_GATEWAY_ERROR.code
+                    enum_label = enum.name if enum is not None else "UNKNOWN"
+                    msg = f"{op} failed: Modbus exception {enum_label} — {exc!s}"
             elif isinstance(exc, ProtocolError):
                 status_code = 503
                 error_code = error_codes.PROTOCOL_ERROR.code
-        except Exception:
-            pass
 
         if isinstance(exc, asyncio.TimeoutError | TimeoutError):
             status_code = 504

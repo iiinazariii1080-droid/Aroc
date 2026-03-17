@@ -22,8 +22,9 @@ $IPT -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 # ── ICMP (ping, MTU discovery) ──
 $IPT -A INPUT -p icmp -j ACCEPT
 
-# ── SSH (22) ──
-$IPT -A INPUT -p tcp --dport 22 -j ACCEPT
+# ── SSH (22) — LAN + Tailscale only (never expose to WAN) ──
+$IPT -A INPUT -p tcp --dport 22 -s 192.168.1.0/24 -j ACCEPT
+$IPT -A INPUT -i tailscale0 -p tcp --dport 22 -j ACCEPT
 
 # ── Camera page FastAPI (8900) — LAN + loopback; external via Cloudflare tunnel ──
 $IPT -A INPUT -p tcp --dport 8900 -s 127.0.0.0/8    -j ACCEPT

@@ -293,6 +293,19 @@ class XarmManipulatorClient:
     async def status(self) -> Dict[str, Any]:
         return await self._get("/status")
 
+    @safe_call
+    async def tcp_position(self) -> Dict[str, Any]:
+        return await self._get("/tcp_position")
+
+    @guarded_async_call(xarm_lock)
+    async def set_tcp_position(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._run_with_resilience(
+            op_name="set_tcp_position",
+            request_fn=lambda: self._post("/move/set_tcp_position", json=params, timeout=self._infinite_timeout),
+            policy=self._motion_policy,
+            recoverable_predicate=self._is_motion_recoverable,
+        )
+
     # ── Grasp analysis endpoints ───────────────────────────────────────────
 
     @safe_call

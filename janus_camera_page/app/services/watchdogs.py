@@ -20,6 +20,7 @@ import logging
 import os
 import threading
 import time
+from typing import Optional
 
 from app.core.settings import get_settings
 from app.services import janus
@@ -43,21 +44,25 @@ logger = logging.getLogger("watchdog")
 # How many consecutive healthy checks before we reset the ladder
 _NOMINAL_WINDOW_CHECKS = int(os.getenv("WATCHDOG_NOMINAL_CHECKS", "10"))
 
-# Process-level start timestamp for grace period calculation
-_STARTUP_TS = time.time()
+# Process-level start timestamp for grace period calculation (monotonic —
+# immune to NTP adjustments that can break the grace window on edge nodes).
+_STARTUP_TS = time.monotonic()
 
 # Monotonic timestamp of last Janus watchdog escalation — used for atomic
 # dedup between the sync Janus thread and the async snapshot coroutine.
 # Both read/write this via _lock to avoid the previous threading.Event race.
 _escalation_lock = threading.Lock()
-_last_janus_escalation_ts: float = 0.0
-# Dedup window: snapshot watchdog skips if Janus escalated within this many seconds.
+_last_escalation_ts: float = 0.0
+# Dedup window: any watchdog skips if another already escalated within this window.
 _ESCALATION_DEDUP_SEC = 5.0
+
+# Snapshot watchdog task handle — prevents GC from collecting the fire-and-forget task.
+_snapshot_task: Optional[asyncio.Task] = None
 
 
 def _in_grace_period() -> bool:
     """True while within the post-startup grace window."""
-    return (time.time() - _STARTUP_TS) < get_settings().watchdog_grace_sec
+    return (time.monotonic() - _STARTUP_TS) < get_settings().watchdog_grace_sec
 
 
 def start_janus_watchdog() -> None:
@@ -108,8 +113,7 @@ def _watchdog_loop() -> None:
                 if _in_grace_period():
                     logger.info("watchdog: %s (grace period, skipping escalation)", signal)
                 else:
-                    _mark_janus_escalated()
-                    ladder.escalate(signal, Domain.PIPELINE)
+                    _try_escalate(ladder, signal, Domain.PIPELINE)
 
         except Exception:
             healthy_streak = 0
@@ -122,33 +126,44 @@ def _watchdog_loop() -> None:
                     # Retry succeeded — transient error, don't escalate
                     logger.info("watchdog retry succeeded, skipping escalation")
                 except Exception:
-                    _mark_janus_escalated()
                     try:
-                        ladder.escalate("watchdog_exception", Domain.JANUS)
+                        _try_escalate(ladder, "watchdog_exception", Domain.JANUS)
                     except Exception:
                         logger.exception("ladder escalation failed")
 
         time.sleep(settings.watchdog_interval_sec)
 
 
-def _mark_janus_escalated() -> None:
-    """Record that Janus watchdog escalated in this cycle."""
-    global _last_janus_escalation_ts
+def _try_escalate(ladder, signal: str, domain: Domain) -> bool:
+    """Atomically claim the dedup window and escalate.
+
+    Returns True if this watchdog won the window and escalated,
+    False if another watchdog already escalated within the dedup window.
+    This eliminates the check-then-act race between dual watchdogs.
+    """
+    global _last_escalation_ts
     with _escalation_lock:
-        _last_janus_escalation_ts = time.monotonic()
+        now = time.monotonic()
+        if (now - _last_escalation_ts) < _ESCALATION_DEDUP_SEC:
+            return False
+        _last_escalation_ts = now
+    # Escalate outside lock — ladder has its own internal lock.
+    ladder.escalate(signal, domain)
+    return True
 
 
-def _janus_recently_escalated() -> bool:
-    """True if Janus watchdog escalated within the dedup window."""
+def _recently_escalated() -> bool:
+    """True if any watchdog escalated within the dedup window."""
     with _escalation_lock:
-        return (time.monotonic() - _last_janus_escalation_ts) < _ESCALATION_DEDUP_SEC
+        return (time.monotonic() - _last_escalation_ts) < _ESCALATION_DEDUP_SEC
 
 
 async def start_snapshot_watchdog() -> None:
+    global _snapshot_task
     settings = get_settings()
     if not settings.snapshot_watchdog_enabled:
         return
-    asyncio.create_task(_snapshot_watchdog_loop())
+    _snapshot_task = asyncio.create_task(_snapshot_watchdog_loop())
 
 
 async def _snapshot_watchdog_loop() -> None:
@@ -161,19 +176,13 @@ async def _snapshot_watchdog_loop() -> None:
             stat = os.stat(settings.snapshot_path)
             age_ms = int((time.time() - stat.st_mtime) * 1000)
             if age_ms > settings.watchdog_stale_ms:
-                # Only escalate if janus watchdog did NOT already escalate recently
                 if _in_grace_period():
                     pass  # grace period — skip
-                elif _janus_recently_escalated():
-                    logger.debug("snapshot stale (%dms) but janus watchdog already escalated", age_ms)
-                else:
-                    ladder.escalate(
-                        f"snapshot_stale_ms={age_ms}",
-                        Domain.SENSOR,
-                    )
+                elif not _try_escalate(ladder, f"snapshot_stale_ms={age_ms}", Domain.SENSOR):
+                    logger.debug("snapshot stale (%dms) but dedup window active", age_ms)
         except FileNotFoundError:
-            if not _in_grace_period() and not _janus_recently_escalated():
-                ladder.escalate("snapshot_missing", Domain.SENSOR)
+            if not _in_grace_period():
+                _try_escalate(ladder, "snapshot_missing", Domain.SENSOR)
         except Exception as exc:
             logger.error("snapshot watchdog error: %s", exc)
         await asyncio.sleep(interval)

@@ -106,6 +106,24 @@ XarmMoveWithPoseParams = MoveWithPoseParams
 XarmMoveWithToolParams = MoveWithToolParams
 XarmJointsDict = Joints
 
+class TcpPositionResponse(BaseModel):
+    x: float
+    y: float
+    z: float
+    roll: float
+    pitch: float
+    yaw: float
+
+class SetTcpPositionParams(BaseModel):
+    x: float
+    y: float
+    z: float
+    roll: float
+    pitch: float
+    yaw: float
+    velocity_percent: float = 20.0
+    reset_faults: bool = False
+
 class DepthQueryRequest(BaseModel):
     x: int
     y: int

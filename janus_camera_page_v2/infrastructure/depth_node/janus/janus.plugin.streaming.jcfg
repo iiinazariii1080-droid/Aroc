@@ -1,0 +1,57 @@
+general :
+{
+  enabled = "true";
+  json = "true";
+  load_all = "true";
+  configs_folder = "/opt/janus/etc/janus/streams.d";
+  allow_persistent = "true";
+  admin_key = "__STREAM_ADMIN_KEY__";
+};
+
+rgb-1305: {
+  type = "rtp";
+  id = 1305;
+  description = "rgb-ccw";
+  audio = false;
+  video = true;
+
+  videoiface = "127.0.0.1";
+  videoport  = 5003;
+  videopt    = 96;
+  videocodec = "h264";
+  videofmtp  = "packetization-mode=1;profile-level-id=42e01f";
+
+  videobufferkf = true;
+};
+
+depth-1306: {
+  type = "rtp";
+  id = 1306;
+  description = "depth";
+  audio = false;
+  video = true;
+
+  videoiface = "127.0.0.1";
+  videoport  = 5004;
+  videopt    = 96;
+  videocodec = "h264";
+  videofmtp  = "packetization-mode=1;profile-level-id=42e01f";
+
+  videobufferkf = true;
+};
+
+ir-1307: {
+  type = "rtp";
+  id = 1307;
+  description = "IR";
+  audio = false;
+  video = true;
+
+  videoiface = "127.0.0.1";
+  videoport  = 5005;
+  videopt    = 96;
+  videocodec = "h264";
+  videofmtp  = "packetization-mode=1;profile-level-id=42e01f";
+
+  videobufferkf = true;
+};

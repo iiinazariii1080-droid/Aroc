@@ -14,7 +14,7 @@ from app.services import watchdogs
 def _skip_grace_period():
     """Ensure no test is affected by the startup grace period."""
     watchdogs._STARTUP_TS = 0  # far in the past
-    watchdogs._last_janus_escalation_ts = 0.0
+    watchdogs._last_escalation_ts = 0.0
     yield
     watchdogs._STARTUP_TS = time.time()
 

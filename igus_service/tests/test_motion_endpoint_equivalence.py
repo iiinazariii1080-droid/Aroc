@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 import main
 from app.events import EventType
-from tests.conftest import AsyncNoopLock, FakeDrive, FakeEventBus, set_app_state
+from tests.fakes import AsyncNoopLock, FakeDrive, FakeEventBus, set_app_state
 
 
 def _set_state(app) -> FakeDrive:
@@ -63,10 +63,7 @@ def test_reference_and_fault_reset_legacy_and_v1_equivalent(noop_lifecycle) -> N
         legacy_fault = client.post("/fault_reset")
         v1_fault = client.post(
             "/drive/fault_reset",
-            json={
-                "after_reset": {"auto_enable": True},
-                "timeout_ms": 15000,
-            },
+            json={"auto_enable": True},
         )
 
     assert legacy_ref.status_code == 200
@@ -229,6 +226,36 @@ def test_latest_trace_endpoint_reports_empty_and_then_updates(noop_lifecycle) ->
         legacy_trace = legacy_trace_resp.json()["data"]["trace"]
         assert legacy_trace["command_id"] == legacy_cmd_id
         assert legacy_trace["operation"] == "move_to_position"
+
+
+def test_failed_command_updates_trace_with_error(noop_lifecycle) -> None:
+    """D7 regression: a failed command must publish to latest_command_trace.
+
+    Before D7 fix, publish_command_trace_event was only called on success.
+    Verify that after a 409 DRIVE_IN_FAULT, the trace is updated rather than
+    remaining stale from any prior success.
+    """
+    drive = FakeDrive(fault_mode=True)  # get_status_live returns fault=True
+    set_app_state(main.app, drive=drive, motor_lock=AsyncNoopLock())
+    main.app.state.latest_command_trace = None
+
+    with TestClient(main.app) as client:
+        resp = client.post(
+            "/drive/move_to_position",
+            json={
+                "target_position": 1000,
+                "relative": False,
+                "profile": {"velocity": 100, "acceleration": 50, "deceleration": 50},
+                "timeout_ms": 5000,
+            },
+        )
+
+    assert resp.status_code == 409, "Expected DRIVE_IN_FAULT"
+    trace = main.app.state.latest_command_trace
+    assert trace is not None, "latest_command_trace must be updated even on failure (D7)"
+    assert trace["operation"] == "move_to_position"
+    assert isinstance(trace["command_id"], str)
+    assert len(trace["command_id"]) > 0
 
 
 def test_metrics_report_latest_trace_presence_and_age(noop_lifecycle) -> None:

@@ -1,0 +1,23 @@
+[Unit]
+Description=Janus TextRoom -> Robot joystick relay (FastAPI)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=boris
+WorkingDirectory=/home/boris/robot/janus_camera_page
+Environment="PYTHONUNBUFFERED=1"
+Environment="ROBOT_URL=http://127.0.0.1:8110/joystick/frame"
+Environment="LOG_LEVEL=INFO"
+Environment="QUEUE_MAX=50"
+Environment="STATS_EVERY_S=2.0"
+
+ExecStart=/usr/bin/python3 -m uvicorn textroom_relay:app --host 0.0.0.0 --port 9000 --workers 1 --no-access-log --proxy-headers
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

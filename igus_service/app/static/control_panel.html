@@ -716,8 +716,12 @@
         async function reference() {
             try {
                 log('Starting reference (homing)...', 'info');
-                const result = await apiCall('/reference', 'POST');
-                log(`Reference: ${result.success ? 'Success' : 'Failed'}`, result.success ? 'success' : 'error');
+                // Uses v1 endpoint — response is ApiEnvelope[ReferenceResult]
+                const result = await apiCall('/drive/reference', 'POST', {timeout_ms: 60000});
+                const homed = result.ok && result.data && result.data.homed;
+                const aborted = result.data && result.data.aborted;
+                const label = aborted ? 'Aborted' : (homed ? 'Success' : 'Failed');
+                log(`Reference: ${label}`, homed ? 'success' : 'error');
                 await refreshStatus();
             } catch (error) {
                 log(`Reference failed: ${error.message}`, 'error');
@@ -727,8 +731,10 @@
         async function faultReset() {
             try {
                 log('Resetting fault...', 'info');
-                const result = await apiCall('/fault_reset', 'POST');
-                log(`Fault reset: ${result.success ? 'Success' : 'Failed'}`, result.success ? 'success' : 'error');
+                // Uses v1 endpoint — response is ApiEnvelope[FaultResetResult]
+                const result = await apiCall('/drive/fault_reset', 'POST', {auto_enable: true});
+                const cleared = result.ok && result.data && result.data.fault_cleared;
+                log(`Fault reset: ${cleared ? 'Cleared' : 'Not cleared'}`, cleared ? 'success' : 'error');
                 await refreshStatus();
             } catch (error) {
                 log(`Fault reset failed: ${error.message}`, 'error');

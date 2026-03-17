@@ -1,0 +1,633 @@
+import argparse
+import json
+import os
+import signal
+import stat
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+
+import pyrealsense2 as rs
+import numpy as np
+
+# ----- Helper rotations -----
+
+def rotate_img(arr: np.ndarray, mode: str) -> np.ndarray:
+    if mode == "cw":
+        return np.rot90(arr, 3)
+    if mode == "ccw":
+        return np.rot90(arr, 1)
+    if mode == "flip":
+        return np.flipud(arr)
+    return arr
+
+
+@dataclass
+class ModeInfo:
+    stream: str
+    stream_type: rs.stream
+    stream_index: int
+    width: int
+    height: int
+    fps: int
+    format: rs.format
+
+    def human(self) -> str:
+        return f"{self.width}x{self.height} @{self.fps}fps format={self.format.name} stream_index={self.stream_index}"
+
+
+# --- HTTP (optional) ---
+try:
+    from fastapi import FastAPI, APIRouter, Depends
+    from fastapi.responses import Response, JSONResponse
+    from pydantic import BaseModel
+    import uvicorn
+    FASTAPI_AVAILABLE = True
+except Exception:
+    FASTAPI_AVAILABLE = False
+
+
+class CameraService:
+    """
+    Stores an *already rotated* depth frame (float32, metres) and provides depth by normalised coordinates [0..1].
+    Also stores the latest colour frame (RGB24, uint8) for colour-overlay.
+    """
+    def __init__(self, rotate="none", flip_x=False, flip_y=False, depth_flip180=False):
+        self.rotate = rotate
+        self.flip_x = flip_x
+        self.flip_y = flip_y
+        self.depth_flip180 = depth_flip180
+        self._lock = threading.Lock()
+        self._depth_m = None
+        self._shape = None
+        self._updated_at = 0.0
+        # Real RGB colour frame from RealSense color sensor
+        self._color_rgb: Optional[np.ndarray] = None
+        self._color_shape: Optional[tuple] = None
+        self._color_updated_at: float = 0.0
+
+    def update_depth_from_z16(self, z16: np.ndarray, scale_m_per_unit: float):
+        depth_m = z16.astype(np.float32) * scale_m_per_unit
+        depth_m = rotate_img(depth_m, self.rotate)
+        if self.depth_flip180:
+            depth_m = np.rot90(depth_m, 2)  # 180° = hflip + vflip
+        with self._lock:
+            self._depth_m = depth_m
+            self._shape = depth_m.shape[:2]
+            self._updated_at = time.time()
+
+    def update_color_rgb(self, rgb: np.ndarray):
+        """Store the latest colour frame (uint8 HxWx3, already rotated)."""
+        with self._lock:
+            self._color_rgb = rgb
+            self._color_shape = rgb.shape[:2]
+            self._color_updated_at = time.time()
+
+    def get_color_frame(self) -> Optional[np.ndarray]:
+        """Return the latest colour frame or None."""
+        with self._lock:
+            return self._color_rgb.copy() if self._color_rgb is not None else None
+
+    def get_color_timestamp(self) -> float:
+        with self._lock:
+            return self._color_updated_at
+
+    def get_depth_map(self) -> Optional[dict]:
+        """Return the full depth frame (float32, metres) with metadata, or None."""
+        with self._lock:
+            if self._depth_m is None:
+                return None
+            arr = self._depth_m.copy()
+            ts = self._updated_at
+        h, w = arr.shape[:2]
+        return {"array": arr, "width": w, "height": h, "timestamp": ts}
+
+    def get_depth(self, x_norm: float, y_norm: float):
+        # Contract: _depth_m is *replaced* atomically (never mutated in-place).
+        # Capturing a reference under the lock is therefore safe — the old
+        # numpy array remains valid even if update_depth_from_z16() swaps in
+        # a new one concurrently.  Do NOT add in-place mutations to _depth_m.
+        with self._lock:
+            arr = self._depth_m
+            shape = self._shape
+        if arr is None or shape is None:
+            raise RuntimeError("No depth frame yet")
+
+        H, W = shape
+        xn = min(max(x_norm, 0.0), 1.0)
+        yn = min(max(y_norm, 0.0), 1.0)
+        if self.flip_x:
+            xn = 1.0 - xn
+        if self.flip_y:
+            yn = 1.0 - yn
+        j = int(round(xn * (W - 1)))   # column
+        i = int(round(yn * (H - 1)))   # row
+
+        depth_val = float(arr[i, j])
+        return depth_val, i, j, W, H, self._updated_at
+
+
+def make_fastapi(service: CameraService):
+    app = FastAPI(title="DepthService")
+    router = APIRouter()
+
+    class DepthResponse(BaseModel):
+        type: str = "depth"
+        x: float
+        y: float
+        depth: float
+
+    def get_camera_service():
+        return service
+
+    @router.get("/depth", response_model=DepthResponse)
+    async def get_depth(
+        x: float,
+        y: float,
+        service: CameraService = Depends(get_camera_service),
+    ):
+        import math
+        if math.isnan(x) or math.isnan(y) or math.isinf(x) or math.isinf(y):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=422, detail="x and y must be finite numbers")
+        x = max(0.0, min(100.0, x))
+        y = max(0.0, min(100.0, y))
+        # Client sends 0..100 -> normalise to 0..1
+        x_norm = x / 100.0
+        y_norm = y / 100.0
+
+        # IMPORTANT: the depth array is already rotated the same way as the video,
+        # so we do NOT rotate anything else, just sample.
+        depth_m, i, j, W, H, ts = service.get_depth(x_norm, y_norm)
+        return DepthResponse(type="depth", x=x, y=y, depth=depth_m)
+
+    @router.get("/color_frame")
+    async def get_color_frame(
+        format: str = "json",
+        service: CameraService = Depends(get_camera_service),
+    ):
+        """Return latest D435 color frame as base64 RGB24 JSON."""
+        import base64 as b64mod
+        frame = service.get_color_frame()
+        if frame is None:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=503, content={"detail": "no color frame yet"})
+        h, w = frame.shape[:2]
+        raw_bytes = frame.tobytes()
+        if format == "raw":
+            return Response(content=raw_bytes, media_type="application/octet-stream",
+                            headers={"X-Width": str(w), "X-Height": str(h), "X-Dtype": "uint8-rgb24"})
+        encoded = b64mod.b64encode(raw_bytes).decode("ascii")
+        return {"width": w, "height": h, "dtype": "uint8-rgb24",
+                "timestamp": service.get_color_timestamp(), "data": encoded}
+
+    @router.get("/depth_map")
+    async def get_depth_map(
+        format: str = "json",
+        service: CameraService = Depends(get_camera_service),
+    ):
+        """Return the full depth frame (float32, metres) as base64 JSON or raw bytes."""
+        import base64 as b64mod
+        dm = service.get_depth_map()
+        if dm is None:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=503, content={"detail": "no depth frame yet"})
+        arr = dm["array"]
+        w, h = dm["width"], dm["height"]
+        raw_bytes = arr.tobytes()
+        if format == "raw":
+            return Response(
+                content=raw_bytes,
+                media_type="application/octet-stream",
+                headers={
+                    "X-Width": str(w),
+                    "X-Height": str(h),
+                    "X-Dtype": "float32",
+                    "X-Timestamp": str(dm["timestamp"]),
+                },
+            )
+        encoded = b64mod.b64encode(raw_bytes).decode("ascii")
+        return {
+            "width": w,
+            "height": h,
+            "dtype": "float32",
+            "timestamp": dm["timestamp"],
+            "data": encoded,
+        }
+
+    app.include_router(router)
+    return app
+
+
+# ----- RealSense modes -----
+
+def probe_modes() -> Dict[str, List[ModeInfo]]:
+    ctx = rs.context()
+    devices = ctx.query_devices()
+    if len(devices) == 0:
+        print("No RealSense devices found", file=sys.stderr)
+        sys.exit(1)
+
+    dev = devices[0]
+    modes: Dict[str, List[ModeInfo]] = {"color": [], "depth": [], "ir": []}
+
+    for sensor in dev.query_sensors():
+        profiles = sensor.get_stream_profiles()
+        for p in profiles:
+            try:
+                vp = p.as_video_stream_profile()
+            except Exception:
+                continue
+
+            st = vp.stream_type()
+            fmt = vp.format()
+            w = vp.width()
+            h = vp.height()
+            fps = vp.fps()
+            idx = vp.stream_index()
+
+            if st == rs.stream.color:
+                modes["color"].append(ModeInfo("color", st, idx, w, h, fps, fmt))
+            elif st == rs.stream.depth:
+                modes["depth"].append(ModeInfo("depth", st, idx, w, h, fps, fmt))
+            elif st == rs.stream.infrared:
+                modes["ir"].append(ModeInfo("ir", st, idx, w, h, fps, fmt))
+
+    for key in modes:
+        modes[key].sort(key=lambda m: (m.stream_index, m.width, m.height, m.fps))
+    return modes
+
+
+def print_modes(modes: Dict[str, List[ModeInfo]]) -> None:
+    if modes["color"]:
+        print("COLOR modes:")
+        for i, m in enumerate(modes["color"]):
+            print(f"  [{i}] {m.human()}")
+        print()
+    else:
+        print("COLOR modes: none\n")
+
+    if modes["depth"]:
+        print("DEPTH modes:")
+        for i, m in enumerate(modes["depth"]):
+            print(f"  [{i}] {m.human()}")
+        print()
+    else:
+        print("DEPTH modes: none\n")
+
+    if modes["ir"]:
+        print("IR modes:")
+        for i, m in enumerate(modes["ir"]):
+            print(f"  [{i}] {m.human()}")
+        print()
+    else:
+        print("IR modes: none\n")
+
+
+def select_mode(modes: List[ModeInfo], index: Optional[int]) -> Optional[ModeInfo]:
+    if index is None or index < 0:
+        return None
+    if index >= len(modes):
+        print(f"Requested index {index}, but only {len(modes)} modes available", file=sys.stderr)
+        sys.exit(2)
+    return modes[index]
+
+
+def ensure_fifo(path: str) -> None:
+    d = os.path.dirname(path)
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
+
+    if os.path.exists(path):
+        st = os.stat(path)
+        if not stat.S_ISFIFO(st.st_mode):
+            raise RuntimeError(f"{path} exists but is not a FIFO")
+    else:
+        os.mkfifo(path, 0o666)
+        print(f"[fifo] created {path}", flush=True)
+
+
+def open_fifo_writer_blocking(path: str):
+    print(f"[fifo] waiting for reader on {path} ...", flush=True)
+    fd = os.open(path, os.O_WRONLY)
+    print(f"[fifo] writer opened {path}", flush=True)
+    return os.fdopen(fd, "wb", buffering=0)
+
+
+def run_pipeline(
+    color_idx: int,
+    depth_idx: int,
+    ir_idx: int,
+    color_fifo: Optional[str],
+    depth_fifo: Optional[str],
+    ir_fifo: Optional[str],
+    rotate: str,
+    depth_flip180: bool = False,
+) -> None:
+    modes = probe_modes()
+
+    color_mode = select_mode(modes["color"], color_idx) if color_idx >= 0 else None
+    depth_mode = select_mode(modes["depth"], depth_idx) if depth_idx >= 0 else None
+    ir_mode    = select_mode(modes["ir"],    ir_idx)    if ir_idx    >= 0 else None
+
+    service = CameraService(rotate=rotate, flip_x=False, flip_y=False, depth_flip180=depth_flip180)
+
+    if not color_mode and not depth_mode and not ir_mode:
+        print("No streams selected", file=sys.stderr)
+        sys.exit(1)
+
+    print("Selected modes:")
+    if color_mode:
+        print("  COLOR:", color_mode.human())
+    if depth_mode:
+        print("  DEPTH:", depth_mode.human())
+    if ir_mode:
+        print("  IR   :", ir_mode.human())
+    print()
+
+    color_writer = depth_writer = ir_writer = None
+
+    if color_mode and color_fifo:
+        ensure_fifo(color_fifo)
+        color_writer = open_fifo_writer_blocking(color_fifo)
+    if depth_mode and depth_fifo:
+        ensure_fifo(depth_fifo)
+        depth_writer = open_fifo_writer_blocking(depth_fifo)
+    if ir_mode and ir_fifo:
+        ensure_fifo(ir_fifo)
+        ir_writer = open_fifo_writer_blocking(ir_fifo)
+
+    pipeline = rs.pipeline()
+    config = rs.config()
+
+    def enable(m: ModeInfo):
+        config.enable_stream(m.stream_type, m.stream_index, m.width, m.height, m.format, m.fps)
+
+    if color_mode:
+        enable(color_mode)
+    if depth_mode:
+        enable(depth_mode)
+    if ir_mode:
+        enable(ir_mode)
+
+    # Try to start pipeline; on VIDIOC_S_FMT errno=5 do firmware-level hardware_reset and retry
+    MAX_HW_RESET_RETRIES = 2
+    profile = None
+    for attempt in range(1 + MAX_HW_RESET_RETRIES):
+        try:
+            profile = pipeline.start(config)
+            break
+        except RuntimeError as exc:
+            if "VIDIOC_S_FMT" in str(exc) and attempt < MAX_HW_RESET_RETRIES:
+                print(f"[hw-reset] pipeline.start() failed ({exc}), sending hardware_reset (attempt {attempt + 1}/{MAX_HW_RESET_RETRIES})", flush=True)
+                try:
+                    ctx = rs.context()
+                    devs = ctx.query_devices()
+                    if len(devs):
+                        devs[0].hardware_reset()
+                        print("[hw-reset] hardware_reset() sent, waiting 6s for device re-enum ...", flush=True)
+                        time.sleep(6)
+                    else:
+                        print("[hw-reset] no device found for hardware_reset", flush=True)
+                        time.sleep(3)
+                except Exception as he:
+                    print(f"[hw-reset] hardware_reset() itself failed: {he}", flush=True)
+                    time.sleep(3)
+                # recreate pipeline after hw reset
+                pipeline = rs.pipeline()
+                config = rs.config()
+                if color_mode:
+                    enable(color_mode)
+                if depth_mode:
+                    enable(depth_mode)
+                if ir_mode:
+                    enable(ir_mode)
+            else:
+                raise
+
+    depth_scale = None
+    if depth_mode:
+        depth_sensor = profile.get_device().first_depth_sensor()
+        depth_scale = float(depth_sensor.get_depth_scale())
+
+    colorizer = rs.colorizer()
+
+    if FASTAPI_AVAILABLE:
+        app = make_fastapi(service)
+
+        def _run_http():
+            uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+
+        http_thread = threading.Thread(target=_run_http, daemon=True)
+        http_thread.start()
+    else:
+        print("[http] FastAPI/uvicorn not available, HTTP API disabled", flush=True)
+
+    running = True
+
+    def handle_sig(sig, frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGINT, handle_sig)
+    signal.signal(signal.SIGTERM, handle_sig)
+
+    print("Pipeline started. Streaming frames... (Ctrl+C to stop)", flush=True)
+
+    color_count = depth_count = ir_count = 0
+    last_report = time.time()
+
+    _fifo_fail_count = {'color': 0, 'depth': 0, 'ir': 0}
+    _FIFO_MAX_CONSECUTIVE_FAILURES = 10
+
+    def _safe_write(writer, data, fifo_path, label):
+        """Write to FIFO, recovering from BrokenPipeError if the reader (ffmpeg) died."""
+        try:
+            writer.write(data)
+            _fifo_fail_count[label] = 0
+            return writer
+        except (BrokenPipeError, OSError) as exc:
+            print(f"[fifo] {label} writer broken ({exc}), reopening {fifo_path} ...", flush=True)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            try:
+                new_writer = open_fifo_writer_blocking(fifo_path)
+                new_writer.write(data)
+                print(f"[fifo] {label} writer recovered", flush=True)
+                _fifo_fail_count[label] = 0
+                return new_writer
+            except Exception as reopen_exc:
+                _fifo_fail_count[label] += 1
+                print(
+                    f"[fifo] {label} reopen failed ({_fifo_fail_count[label]}"
+                    f"/{_FIFO_MAX_CONSECUTIVE_FAILURES}): {reopen_exc}",
+                    flush=True,
+                )
+                if _fifo_fail_count[label] >= _FIFO_MAX_CONSECUTIVE_FAILURES:
+                    print(f"[fifo] {label} FIFO unrecoverable after {_FIFO_MAX_CONSECUTIVE_FAILURES} failures, crashing for systemd restart", flush=True)
+                    raise RuntimeError(f"FIFO {label} unrecoverable") from reopen_exc
+                return writer  # return original (broken) writer instead of None to avoid AttributeError
+
+    try:
+        while running:
+            frames = pipeline.wait_for_frames()
+
+            if color_mode:
+                cf = frames.get_color_frame()
+                if cf:
+                    color_count += 1
+                    img = np.asanyarray(cf.get_data())
+                    img = rotate_img(img, rotate)
+                    img = np.ascontiguousarray(img)
+                    # Store latest colour frame for HTTP endpoint
+                    service.update_color_rgb(img)
+                    if color_writer is not None:
+                        color_writer = _safe_write(color_writer, img.tobytes(), color_fifo, 'color')
+
+            if depth_mode:
+                df = frames.get_depth_frame()
+                if df and depth_scale is not None:
+                    z16 = np.asanyarray(df.get_data())
+                    service.update_depth_from_z16(z16, depth_scale)
+                    depth_count += 1
+                    if depth_writer:
+                        c = colorizer.process(df)
+                        img = np.asanyarray(c.get_data()).astype(np.uint8)  # HxWx3
+                        img = rotate_img(img, rotate)
+                        if service.depth_flip180:
+                            img = np.rot90(img, 2)  # 180° to match color sensor orientation
+                        img = np.ascontiguousarray(img)
+                        result = _safe_write(depth_writer, img.tobytes(), depth_fifo, 'depth')
+                        if result is not None:
+                            depth_writer = result
+
+            if ir_mode:
+                irf = frames.get_infrared_frame(ir_mode.stream_index)
+                if irf:
+                    ir_count += 1
+                    if ir_writer:
+                        ir = np.asanyarray(irf.get_data())  # HxW, uint8
+                        ir = rotate_img(ir, rotate)
+                        ir = np.ascontiguousarray(ir)
+                        result = _safe_write(ir_writer, ir.tobytes(), ir_fifo, 'ir')
+                        if result is not None:
+                            ir_writer = result
+
+            now = time.time()
+            if now - last_report >= 2.0:
+                print(
+                    f"[stats] color={color_count} depth={depth_count} ir={ir_count} "
+                    f"in last {now - last_report:.1f}s",
+                    flush=True,
+                )
+                color_count = depth_count = ir_count = 0
+                last_report = now
+
+    finally:
+        pipeline.stop()
+        if color_writer:
+            color_writer.close()
+        if depth_writer:
+            depth_writer.close()
+        if ir_writer:
+            ir_writer.close()
+        print("Pipeline stopped.")
+
+
+def _find_mode_index(
+    modes: List[ModeInfo],
+    width: int,
+    height: int,
+    fps: int,
+    fmt_name: str = "",
+) -> int:
+    """Find mode index by resolution/fps/format instead of magic number.
+
+    Returns the index of the first matching mode, or exits with an error
+    if no exact match is found (prints available modes for diagnosis).
+    """
+    fmt_lower = fmt_name.lower()
+    for i, m in enumerate(modes):
+        if m.width == width and m.height == height and m.fps == fps:
+            if fmt_lower and m.format.name.lower() != fmt_lower:
+                continue
+            return i
+    # No exact match — print available modes for diagnosis
+    print(
+        f"No mode matching {width}x{height} @{fps}fps"
+        + (f" format={fmt_name}" if fmt_name else "")
+        + ". Available:",
+        file=sys.stderr,
+    )
+    for i, m in enumerate(modes):
+        print(f"  [{i}] {m.human()}", file=sys.stderr)
+    sys.exit(2)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="RealSense FIFO streamer")
+    parser.add_argument("--list-modes", action="store_true")
+
+    # these arguments can still be used manually, but we hardcode them below
+    parser.add_argument("--color-index", type=int, default=-1)
+    parser.add_argument("--depth-index", type=int, default=-1)
+    parser.add_argument("--ir-index", type=int, default=-1)
+    parser.add_argument("--color-fifo", type=str, default="/run/realsense/color.fifo")
+    parser.add_argument("--depth-fifo", type=str, default="/run/realsense/depth.fifo")
+    parser.add_argument("--ir-fifo", type=str, default="/run/realsense/ir.fifo")
+
+    args = parser.parse_args()
+
+    if args.list_modes:
+        modes = probe_modes()
+        print_modes(modes)
+        return
+
+    rotate = "cw"  # our fixed rotation
+
+    # Prefer semantic mode selection by resolution/fps/format.
+    # Falls back to RS_COLOR_IDX/RS_DEPTH_IDX env vars for manual override.
+    color_idx = int(os.environ.get("RS_COLOR_IDX", "-1"))
+    depth_idx = int(os.environ.get("RS_DEPTH_IDX", "-1"))
+    ir_idx = int(os.environ.get("RS_IR_IDX", "-1"))
+
+    if color_idx < 0 or depth_idx < 0:
+        modes = probe_modes()
+        if color_idx < 0:
+            color_idx = _find_mode_index(
+                modes["color"],
+                width=int(os.environ.get("RS_COLOR_W", "1280")),
+                height=int(os.environ.get("RS_COLOR_H", "720")),
+                fps=int(os.environ.get("RS_COLOR_FPS", "30")),
+                fmt_name=os.environ.get("RS_COLOR_FMT", "yuyv"),
+            )
+        if depth_idx < 0:
+            depth_idx = _find_mode_index(
+                modes["depth"],
+                width=int(os.environ.get("RS_DEPTH_W", "848")),
+                height=int(os.environ.get("RS_DEPTH_H", "480")),
+                fps=int(os.environ.get("RS_DEPTH_FPS", "30")),
+                fmt_name=os.environ.get("RS_DEPTH_FMT", "z16"),
+            )
+
+    run_pipeline(
+        color_idx=color_idx,
+        depth_idx=depth_idx,
+        ir_idx=ir_idx,
+        color_fifo="/run/realsense/color.fifo",
+        depth_fifo="/run/realsense/depth.fifo",
+        # ir_fifo="/run/realsense/ir.fifo",
+        ir_fifo=None,
+        rotate=rotate,
+        depth_flip180=False,             # color and depth sensor are oriented the same way after cw rotation
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+

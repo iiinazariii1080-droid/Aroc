@@ -2,7 +2,6 @@ from app.domain.health import (
     HealthWeights,
     compute_drive_health,
     decide_readiness,
-    resolve_weights,
 )
 
 
@@ -56,33 +55,6 @@ def test_compute_drive_health_penalties_saturate_to_zero() -> None:
     assert health.callback_errors_total == 999
     assert health.health_score == 0
     assert health.degraded == 1
-
-
-def test_resolve_weights_clamps_negative_values() -> None:
-    defaults = HealthWeights(
-        disconnected=50,
-        startup_error=30,
-        telemetry_stale=20,
-        fault_active=30,
-        callback_error_max=20,
-    )
-
-    resolved = resolve_weights(
-        {
-            "DRYVE_HEALTH_WEIGHT_DISCONNECTED": "-1",
-            "DRYVE_HEALTH_WEIGHT_STARTUP_ERROR": "-2",
-            "DRYVE_HEALTH_WEIGHT_TELEMETRY_STALE": "-3",
-            "DRYVE_HEALTH_WEIGHT_FAULT_ACTIVE": "-4",
-            "DRYVE_HEALTH_WEIGHT_CALLBACK_ERROR_MAX": "-5",
-        },
-        defaults,
-    )
-
-    assert resolved.disconnected == 0
-    assert resolved.startup_error == 0
-    assert resolved.telemetry_stale == 0
-    assert resolved.fault_active == 0
-    assert resolved.callback_error_max == 0
 
 
 def test_decide_readiness_priority_offline_over_degraded() -> None:

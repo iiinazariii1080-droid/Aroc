@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from enum import Enum, IntEnum
 
+from ..cia402.bits import bit_is_set as _bit
+
 
 class SWBit(IntEnum):
     READY_TO_SWITCH_ON = 0
@@ -47,10 +49,6 @@ class CiA402State(str, Enum):
     FAULT_REACTION_ACTIVE = "fault_reaction_active"
     FAULT = "fault"
     UNKNOWN = "unknown"
-
-
-def _bit(word: int, bit: int) -> bool:
-    return bool((int(word) >> int(bit)) & 1)
 
 
 def decode_statusword(word: int) -> dict[str, bool]:

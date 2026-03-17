@@ -1,10 +1,10 @@
 [Unit]
 Description=RTP push RGB (V4L2 %i) -> Janus 1305
 Requires=janus.service
-After=janus.service
-Conflicts=camera-webrtc-color.service
-StartLimitIntervalSec=60
-StartLimitBurst=5
+After=janus.service dev-cam\x2drgb.device
+BindsTo=dev-cam\x2drgb.device
+StartLimitIntervalSec=300
+StartLimitBurst=15
 
 [Service]
 Type=simple
@@ -13,8 +13,11 @@ ExecStartPre=/usr/local/bin/cam-wait-capture.sh %i
 ExecStart=/usr/local/bin/rtp-rgb.sh /dev/%i
 Restart=always
 RestartSec=3s
+TimeoutStopSec=5
+SendSIGKILL=yes
 SuccessExitStatus=143 255 SIGTERM
 KillSignal=SIGINT
+MemoryMax=256M
 
 [Install]
 WantedBy=multi-user.target

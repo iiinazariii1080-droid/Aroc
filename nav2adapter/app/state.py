@@ -133,12 +133,12 @@ async def startup(app: FastAPI) -> None:
             event_bus=event_bus,
         )
 
-        async def handle_navigate_to(payload: dict):
+        async def handle_drive_to_position(payload: dict):
             try:
                 command = NavigationCommand(**payload)
-                await command_handler.handle_navigate_to(command)
+                await command_handler.handle_drive_to_position(command)
             except Exception:
-                _LOGGER.error("Error handling navigateTo", exc_info=True)
+                _LOGGER.error("Error handling driveToPosition", exc_info=True)
 
         async def handle_cancel(payload: dict):
             try:
@@ -148,7 +148,7 @@ async def startup(app: FastAPI) -> None:
             except Exception:
                 _LOGGER.error("Error handling cancel", exc_info=True)
 
-        await mqtt_adapter.start_command_consumer(handle_navigate_to, handle_cancel)
+        await mqtt_adapter.start_command_consumer(handle_drive_to_position, handle_cancel)
 
     # Event dispatcher (always on: drives SSE and optionally MQTT event topics)
     event_dispatcher = EventDispatcher(event_bus, mqtt_adapter)
@@ -326,7 +326,7 @@ async def _recover_state(symovo_client: SymovoAgvClient) -> None:
                     return (command_id, "terminal", {"state": state})
 
                 if NavigationStateMachine.is_active_state(state):
-                    # P1-3 fix: if a new navigateTo was received during startup,
+                    # P1-3 fix: if a new driveToPosition was received during startup,
                     # skip recovery of old commands to prevent overwriting
                     # _current_command_id and confusing the StatusPublisher.
                     current = await state_store.get_current_command_id()

@@ -2,10 +2,11 @@
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from db.trajectory import get_trajectory, save_trajectory, init_trajectory_table
+from app.xarm_status import get_velocity_percent as _get_global_velocity
 import math
 import asyncio
 import time
-from app.config import IGUS_CONTAINER_IP, IGUS_CONTAINER_PORT, XARM_CONTAINER_IP, XARM_CONTAINER_PORT, SYMOVO_CONTAINER_IP, DEPTH_CAMERA_CONTAINER_IP, DEPTH_CAMERA_CONTAINER_PORT, XARM_STATUS_CACHE_TTL_SEC
+from app.config import IGUS_CONTAINER_IP, IGUS_CONTAINER_PORT, XARM_CONTAINER_IP, XARM_CONTAINER_PORT, SYMOVO_CONTAINER_IP, DEPTH_CAMERA_CONTAINER_IP, DEPTH_CAMERA_CONTAINER_PORT, XARM_STATUS_CACHE_TTL_SEC, SYMOVO_TELEOP_MOVE_URL, SYMOVO_DRIVE_MODE_URL
 from services.igus_service import IgusMotorClient
 from services.xarm_service import XarmManipulatorClient
 from app import xarm_status
@@ -15,7 +16,7 @@ import logging
 import models.xarm_positions as xarm_positions
 logger = logging.getLogger(__name__)
 import asyncio
-from exceptions import RobotError, DeviceReadyError, DeviceConnectionError
+from exceptions import RobotError, DeviceReadyError, DeviceConnectionError, DeviceError
 from app.decorator import*
 from services.symovo_service import SymovoAgvClient, _normalize_symovo_status
 
@@ -75,7 +76,7 @@ async def igus_move_and_check(pos, velocity):
         return True
 
 async def _preflight_make_transport_safe(params) -> None:
-    v = float(getattr(params, 'velocity_percent', 20.0) or 20.0)
+    v = _get_global_velocity()
     logger.info("preflight: start (transport pose + lift down)")
     # Try to auto-prepare devices if not ready
     try:
@@ -924,6 +925,32 @@ async def autotake(velocity: int) -> bool:
                 velocity_percent=velocity, reset_faults=False,
             ))
 
+        # ── Basket drop ──────────────────────────────────────────────
+        basket_cfg = config.get('basket', {})
+        if basket_cfg.get('active'):
+            box_num = int(basket_cfg.get('boxNumber', 1))
+            depth_mm = float(basket_cfg.get('depthMm', 80))
+            logger.info("Basket: moving to box %d, depth=%.1f mm", box_num, depth_mm)
+            await igus_move_and_check(30000, velocity / 2)
+            # Joint-space move to approach position (STEP_2)
+            approach_params = xarm_positions.get_XarmMoveWithJointsDictParams_direct_to_box(box_num)
+            approach_params.velocity_percent = velocity
+            await asyncio.wait_for(manipulator.complex_move_with_joints(approach_params), timeout=60)
+            # Descend straight into box (tool space)
+            await manipulator.change_tool_position(XarmMoveWithToolParams(
+                x_offset_mm=0, y_offset_mm=0, z_offset_mm=depth_mm,
+                velocity_percent=velocity, reset_faults=False,
+            ))
+            if basket_cfg.get('drop'):
+                logger.info("Basket: dropping gripper")
+                await manipulator.gripper_drop()
+            # Ascend straight back out (tool space)
+            logger.info("Basket: ascending %.1f mm", depth_mm)
+            await manipulator.change_tool_position(XarmMoveWithToolParams(
+                x_offset_mm=0, y_offset_mm=0, z_offset_mm=-depth_mm,
+                velocity_percent=velocity, reset_faults=False,
+            ))
+
         logger.info("Autotake completed successfully")
         return True
     except Exception as e:
@@ -944,271 +971,511 @@ async def set_ready() -> bool:
 
 @guarded_async_call(robot_lock)
 async def move_robot_to_box_1(velocity: int) -> bool:
-    if await igus_move_and_check(30000, velocity/2):
+    v = _get_global_velocity()
+    if await igus_move_and_check(30000, v/2):
         await asyncio.sleep(0)
         params = xarm_positions.get_XarmMoveWithJointsDictParams_with_box_num(1)
-        params.velocity_percent=velocity
+        params.velocity_percent = v
         await asyncio.wait_for(manipulator.complex_move_with_joints(params), timeout=60)
         return True
 
 @guarded_async_call(robot_lock)
 async def move_robot_to_box_2(velocity: int) -> bool:
-    if await igus_move_and_check(30000, velocity/2):
+    v = _get_global_velocity()
+    if await igus_move_and_check(30000, v/2):
         await asyncio.sleep(0)
         params = xarm_positions.get_XarmMoveWithJointsDictParams_with_box_num(2)
-        params.velocity_percent=velocity
+        params.velocity_percent = v
         await asyncio.wait_for(manipulator.complex_move_with_joints(params), timeout=60)
         return True
-    
+
 @guarded_async_call(robot_lock)
 async def move_to_transport_position(velocity: int) -> bool:
-    if await igus_move_and_check(20000, velocity):
+    v = _get_global_velocity()
+    if await igus_move_and_check(20000, v):
         await asyncio.sleep(0)
         current_pose = await manipulator.current_joints_position()
         if current_pose['name'] != "TRANSPORT_STEP_2":
             params = xarm_positions.get_XarmMoveWithJointsDictParams_for_transport_position()
             await asyncio.wait_for(manipulator.complex_move_with_joints(params), timeout=15)
             await asyncio.sleep(0)
-        if await igus_move_and_check(0, velocity):
+        if await igus_move_and_check(0, v):
             return True
 
-@guarded_async_call(robot_lock)
-async def move_robot_to_product(params) -> dict:
-    logger.info("move_robot_to_product: start | params=%s", _ns_to_dict(params))
-    # Ready gate: optionally reset/reference
-    if bool(getattr(params, 'reset_faults', False)):
-        logger.info("move_robot_to_product: reset_faults=True -> calling set_ready()")
-        await set_ready()
+LIFT_TRANSPORT_MAX   = 20_000  # encoder units — транспортная высота лифта
+AGV_SAME_SHELF_TOL_M = 0.10   # метры — радиус "уже на полке"
+AGV_POLL_INTERVAL_S  = 1.0    # секунды между опросами позиции AGV
+AGV_ARRIVAL_TOL_M    = 0.10   # метры — допуск "приехал" (обычная навигация)
+AGV_MICROSTEP_TOL_M  = 0.03   # метры — допуск для микрошага (3 см)
 
-    async def fetch_xarm_state():
+# Micro-step teleop for short backward corrections (avoids double 180° turn)
+AGV_MICROSTEP_DIST_M = 1.00   # max дистанция для микрошага назад, иначе go_to_pose
+AGV_MICROSTEP_MAX_SPD= 0.08   # m/s — максимальная скорость
+AGV_MICROSTEP_MIN_SPD= 0.03   # m/s — минимальная скорость
+AGV_MICROSTEP_K      = 0.6    # пропорциональный коэффициент (speed = K × dist)
+AGV_MICROSTEP_DUR    = 0.20   # s — длительность каждого пульса
+AGV_MICROSTEP_MAX    = 60     # максимум пульсов (~12 s timeout)
+
+
+async def _is_at_shelf(location) -> bool:
+    """True если AGV уже в пределах AGV_SAME_SHELF_TOL_M от целевых координат."""
+    if not location:
+        return False
+    try:
+        pose_resp = await symovo.pose()
+        pose = (pose_resp.get('pose') or {}) if isinstance(pose_resp, dict) else {}
+        cur_x = float(pose.get('x_m') or 0.0)
+        cur_y = float(pose.get('y_m') or 0.0)
+        return math.hypot(float(location.x_m) - cur_x, float(location.y_m) - cur_y) < AGV_SAME_SHELF_TOL_M
+    except Exception:
+        return False
+
+
+async def _move_to_job_pose(velocity: float) -> None:
+    """Перемещает манипулятор в JOB_POSE.
+
+    Если TCP уже внутри job-zone — едет напрямую (TRANSPORT_STEP_1 пропускается).
+    Иначе: TRANSPORT_STEP_1 → JOB_POSE.
+    """
+    if not await _is_in_job_zone():
+        logger.info("_move_to_job_pose: TCP outside job-zone → via TRANSPORT_STEP_1")
+        p1 = xarm_positions.get_XarmMoveWithJointsDictParams_for_transport_step_1()
+        await asyncio.wait_for(manipulator.complex_move_with_joints(p1), timeout=30)
+    else:
+        logger.info("_move_to_job_pose: TCP in job-zone → skip TRANSPORT_STEP_1")
+    p2 = xarm_positions.get_XarmMoveWithJointsDictParams_for_job_pose()
+    await asyncio.wait_for(manipulator.complex_move_with_joints(p2), timeout=30)
+
+
+JOB_ZONE_BOX = {"x": (-307.0, 51.4), "y": (94.5, 425.3), "z": (-38.8, 332.8)}
+
+
+async def _is_in_job_zone() -> bool:
+    """Возвращает True, если TCP сейчас внутри safe-box рабочей зоны."""
+    try:
+        pos = await manipulator.tcp_position()
+        x, y, z = float(pos["x"]), float(pos["y"]), float(pos["z"])
+        return (
+            JOB_ZONE_BOX["x"][0] <= x <= JOB_ZONE_BOX["x"][1]
+            and JOB_ZONE_BOX["y"][0] <= y <= JOB_ZONE_BOX["y"][1]
+            and JOB_ZONE_BOX["z"][0] <= z <= JOB_ZONE_BOX["z"][1]
+        )
+    except Exception:
+        return False
+
+
+async def test_job_zone_corners() -> dict:
+    """Объезжает 8 углов JOB_ZONE_BOX для проверки достижимости.
+
+    Предварительно перемещает манипулятор в JOB_POSE, читает текущую
+    ориентацию TCP (roll/pitch/yaw) и использует её для всех углов.
+    Возвращает dict с полем 'corners' (per-corner ok/error) и 'all_ok'.
+    """
+    await _move_to_job_pose(20.0)
+    tcp = await manipulator.tcp_position()
+    roll = float(tcp["roll"])
+    pitch = float(tcp["pitch"])
+    yaw = float(tcp["yaw"])
+    box = JOB_ZONE_BOX
+    corners = [
+        (x, y, z)
+        for x in box["x"]
+        for y in box["y"]
+        for z in box["z"]
+    ]
+    results = []
+    for cx, cy, cz in corners:
         try:
-            state = await manipulator.status()
-            return state
-        except Exception as e:
-            return ErrorStatus(error={"type": type(e).__name__, "msg": str(e)})
-
-    async def fetch_igus_state():
-        try:
-            state = await lift.status()
-            return state
-        except Exception as e:
-            return ErrorStatus(error={"type": type(e).__name__, "msg": str(e)})
-
-    async def fetch_symovo_state():
-        try:
-            state = await symovo.status()
-            return _normalize_symovo_status(state)
-        except Exception as e:
-            return ErrorStatus(error={"type": type(e).__name__, "msg": str(e)})
-        
-    logger.info("move_robot_to_product: fetching devices status...")
-    results = await asyncio.gather(
-        fetch_xarm_state(), fetch_igus_state(), fetch_symovo_state(), return_exceptions=True
-    )
-    await asyncio.sleep(0)
-    logger.info("move_robot_to_product: status fetched: types=%s",
-                [type(r).__name__ for r in results])
-
-    # Handle exceptions
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            results[i] = ErrorStatus(error={"type": type(result).__name__, "msg": str(result)})
-
-    # Compute readiness of subsystems
-    symovo_ready = (
-        isinstance(results[2], SymovoStatusResponse)
-        and results[2].online
-        and results[2].enabled
-    )
-
-    xarm_ready = bool(isinstance(results[0], dict) and results[0].get("connected") and not results[0].get("has_error") and not results[0].get("has_err_warn"))
-    igus_ready = bool(isinstance(results[1], dict) and results[1].get("connected") and results[1].get("homed") and not results[1].get("error"))
-    logger.info("move_robot_to_product: readiness | xarm=%s igus=%s agv=%s", xarm_ready, igus_ready, symovo_ready)
-
-    # Preflight: make system transport-safe before any movement
-    await _preflight_make_transport_safe(params)
-
-    # Decide requested operations
-    # Manipulator offsets considered only if any component differs from 0 by small eps
-    _offs = getattr(params, 'manipulator_offsets', None)
-    need_xarm = bool(_offs and (abs(float(_offs.x_offset_mm or 0.0)) > 1e-6 or abs(float(_offs.y_offset_mm or 0.0)) > 1e-6 or abs(float(_offs.z_offset_mm or 0.0)) > 1e-6))
-
-    need_igus = getattr(params, 'lift_position_cm', None) is not None
-
-    # AGV movement only if requested location differs from current by noticeable amount
-    need_agv = False
-    _loc = getattr(params, 'location', None)
-    if _loc:
-        # Sentinel: location all zeros => treat as "no AGV move" request
-        tgt_x = float(getattr(_loc, 'x_m', 0.0) or 0.0)
-        tgt_y = float(getattr(_loc, 'y_m', 0.0) or 0.0)
-        tgt_th = float(getattr(_loc, 'theta_deg', 0.0) or 0.0)
-        tgt_map = int(getattr(_loc, 'map_id', 0) or 0)
-        if not (abs(tgt_x) <= 1e-6 and abs(tgt_y) <= 1e-6 and abs(tgt_th) <= 1e-6 and tgt_map == 0):
-            try:
-                initial = await symovo.pose()
-                init_pose = (initial.get('pose') or {}) if isinstance(initial, dict) else {}
-                init_x = float(init_pose.get('x_m') or 0.0)
-                init_y = float(init_pose.get('y_m') or 0.0)
-                planned_dx = tgt_x - init_x
-                planned_dy = tgt_y - init_y
-                planned_dist = math.hypot(planned_dx, planned_dy)
-                need_agv = planned_dist > 1e-6
-            except Exception:
-                # If cannot get pose, fallback: consider AGV needed only if target not zeros
-                need_agv = True
-
-    logger.info("move_robot_to_product: needs | agv=%s igus=%s xarm=%s", need_agv, need_igus, need_xarm)
-
-    missing = []
-    if need_agv and not symovo_ready:
-        missing.append("AGV")
-    if need_igus and not igus_ready:
-        missing.append("Igus")
-    if need_xarm and not xarm_ready:
-        missing.append("XArm")
-
-    if missing:
-        # Attempt auto-prepare IGUS if it's the only blocker and we need IGUS
-        if missing == ["Igus"] and need_igus:
-            try:
-                logger.info("move_robot_to_product: attempting IGUS auto-prepare (fault_reset + reference)")
-                await lift.fault_reset()
-                await lift.reference()
-                st = await lift.status()
-                igus_ready = bool(isinstance(st, dict) and st.get("connected") and st.get("homed") and not st.get("error"))
-                if igus_ready:
-                    logger.info("move_robot_to_product: IGUS auto-prepare succeeded")
-                    missing = [m for m in missing if m != "Igus"]
-                else:
-                    logger.error("move_robot_to_product: IGUS auto-prepare failed, status=%s", st)
-            except Exception as e:
-                logger.error("move_robot_to_product: IGUS auto-prepare exception: %s", e)
-
-        if missing:
-            logger.error("move_robot_to_product: missing subsystems: %s", missing)
-            raise DeviceReadyError("Not ready: " + ", ".join(missing))
-
-    # Execute AGV move first (if requested and ready)
-    if need_agv:
-        # Ensure manipulator in transport-safe pose before AGV move
-        logger.info("move_robot_to_product: AGV requested -> ensure manipulator transport pose")
-        current_pose = await manipulator.current_joints_position()
-        logger.info("move_robot_to_product: current joints pose: %s", current_pose)
-        # if current_pose.get('name') != "TRANSPORT_STEP_2":
-        #     _params = xarm_positions.get_XarmMoveWithJointsDictParams_for_transport_position()
-        #     await asyncio.wait_for(manipulator.complex_move_with_joints(_params), timeout=15)
-        #     await asyncio.sleep(0)
-        #     logger.info("move_robot_to_product: manipulator moved to transport pose")
-
-        # Capture initial AGV pose for relative tolerance calculation
-        logger.info("move_robot_to_product: querying AGV initial pose")
-        initial = await symovo.pose()
-        init_pose = (initial.get('pose') or {}) if isinstance(initial, dict) else {}
-        init_x = float(init_pose.get('x_m') or 0.0)
-        init_y = float(init_pose.get('y_m') or 0.0)
-
-        target_x = float(params.location.x_m or 0.0)
-        target_y = float(params.location.y_m or 0.0)
-        target_th = float(getattr(params.location, 'theta_deg', 0.0) or 0.0)
-        target_map_id = getattr(params.location, 'map_id', None)
-
-        planned_dx = target_x - init_x
-        planned_dy = target_y - init_y
-        planned_dist = math.hypot(planned_dx, planned_dy)
-
-        linear_eps = 1e-6
-        if planned_dist > linear_eps:
-            logger.info(
-                "AGV target: x=%.3f, y=%.3f, theta=%.2f°, map_id=%s | initial: x=%.3f, y=%.3f | planned_dist=%.6f m",
-                target_x, target_y, target_th, str(target_map_id), init_x, init_y, planned_dist
+            await asyncio.wait_for(
+                manipulator.set_tcp_position(
+                    {"x": cx, "y": cy, "z": cz, "roll": roll, "pitch": pitch, "yaw": yaw, "velocity_percent": 15.0}
+                ),
+                timeout=30,
             )
-            logger.info("move_robot_to_product: AGV go_to_pose -> x=%.3f y=%.3f th=%.2f map_id=%s", target_x, target_y, target_th, str(target_map_id))
-            await symovo.go_to_pose(
-                x_m=target_x,
-                y_m=target_y,
-                theta_deg=target_th,
-                map_id=target_map_id,
-                max_speed_m_s=None,
-                wait=False,
-            )
-            await asyncio.sleep(0)
+            results.append({"corner": [cx, cy, cz], "ok": True})
+        except Exception as e:
+            results.append({"corner": [cx, cy, cz], "ok": False, "error": str(e)})
+    all_ok = all(r["ok"] for r in results)
+    return {"all_ok": all_ok, "corners": results}
 
-            percent_tol = 0.1
-            max_wait_s = 180.0
-            interval_s = 2
-            waited = 0.0
-            while True:
+
+async def _wait_agv_arrival(target_x: float, target_y: float) -> None:
+    """Ждёт прибытия AGV в пределах AGV_ARRIVAL_TOL_M от цели.
+
+    При препятствии — висит явно до CancelledError от оператора.
+    Поднимает DeviceConnectionError если AGV ушёл offline.
+    """
+    while True:
+        await asyncio.sleep(AGV_POLL_INTERVAL_S)   # ← точка прерывания (CancelledError)
+
+        pose_resp = await symovo.pose()
+        pose = (pose_resp.get('pose') or {}) if isinstance(pose_resp, dict) else {}
+        cur_x = float(pose.get('x_m') or 0.0)
+        cur_y = float(pose.get('y_m') or 0.0)
+        dist = math.hypot(target_x - cur_x, target_y - cur_y)
+
+        logger.info("AGV navigating: dist=%.3fm | cur=(%.3f,%.3f) tgt=(%.3f,%.3f)",
+                    dist, cur_x, cur_y, target_x, target_y)
+
+        if dist < AGV_ARRIVAL_TOL_M:
+            logger.info("AGV arrived: dist=%.3fm", dist)
+            return
+
+        # Проверяем, что AGV всё ещё онлайн
+        try:
+            st = await symovo.status()
+            nst = _normalize_symovo_status(st) if isinstance(st, dict) else st
+            if hasattr(nst, 'online') and not nst.online:
+                raise DeviceConnectionError("AGV went offline during navigation")
+            logger.debug("AGV state=%s flags=%s", getattr(nst, 'state', None), getattr(nst, 'state_flags', None))
+        except (DeviceConnectionError, DeviceError):
+            raise
+        except Exception as e:
+            logger.warning("AGV status poll error (continuing): %s", e)
+        # Препятствие — продолжаем ждать, пока оператор явно не отменит задачу
+
+
+async def _agv_microstep_to(target_x: float, target_y: float) -> None:
+    """Drive AGV to target using teleop speed pulses.
+
+    Used for short backward corrections that would otherwise cause the
+    navigation planner to make a double 180° turn.
+    """
+    import aiohttp as _aio
+
+    async with _aio.ClientSession() as _sess:
+        # Enable drive mode before teleop commands
+        try:
+            async with _sess.put(
+                SYMOVO_DRIVE_MODE_URL, params={"enable": "true"},
+                timeout=_aio.ClientTimeout(total=5.0),
+            ) as _r:
+                logger.info("AGV drive_mode enable → HTTP %d", _r.status)
+        except Exception as _e:
+            logger.warning("AGV drive_mode enable failed: %s", _e)
+
+        # Poll until drive_ready (charging station must also be INACTIVE before move/speed works)
+        _status_url = SYMOVO_DRIVE_MODE_URL.replace("/drive_mode", "/status")
+        for _poll in range(5):
+            await asyncio.sleep(0.3)
+            try:
+                async with _sess.get(_status_url, timeout=_aio.ClientTimeout(total=2.0)) as _sr:
+                    _st = await _sr.json()
+                    _drive_ready = bool((_st.get("state_flags") or {}).get("drive_ready"))
+                    logger.info("AGV drive_ready poll %d: %s", _poll, _drive_ready)
+                    if _drive_ready:
+                        break
+            except Exception as _se:
+                logger.warning("AGV status poll error: %s", _se)
+        else:
+            logger.warning("AGV drive_ready not confirmed after 1.5s, proceeding anyway")
+
+        try:
+            dist = float("inf")
+            prev_dist = float("inf")
+            for step in range(AGV_MICROSTEP_MAX):
                 pose_resp = await symovo.pose()
-                pose = (pose_resp.get('pose') or {}) if isinstance(pose_resp, dict) else {}
-                cur_x = float(pose.get('x_m') or 0.0)
-                cur_y = float(pose.get('y_m') or 0.0)
+                pose = (pose_resp.get("pose") or {}) if isinstance(pose_resp, dict) else {}
+                cur_x = float(pose.get("x_m") or 0.0)
+                cur_y = float(pose.get("y_m") or 0.0)
+                cur_theta = float(pose.get("theta_deg") or 0.0)
+                dist = math.hypot(target_x - cur_x, target_y - cur_y)
 
-                err_dist = math.hypot(target_x - cur_x, target_y - cur_y)
-                denom_dist = planned_dist if planned_dist > linear_eps else max(1.0, abs(target_x) + abs(target_y))
-                rel_linear = err_dist / denom_dist if denom_dist > 0 else 0.0
-
-                logger.info(
-                    "AGV current: x=%.3f, y=%.3f | err=%.6f m | rel=%.4f",
-                    cur_x, cur_y, err_dist, rel_linear
-                )
-                if rel_linear <= percent_tol:
-                    logger.info(
-                        "AGV reached XY tolerance: err=%.6f m, rel=%.4f <= %.4f — proceeding",
-                        err_dist, rel_linear, percent_tol
-                    )
+                if dist < AGV_MICROSTEP_TOL_M:
+                    logger.info("AGV micro-step arrived: dist=%.3fm steps=%d", dist, step)
                     break
 
-                if waited >= max_wait_s:
-                    logger.warning(
-                        "AGV timeout waiting XY: cur=(%.3f, %.3f), target=(%.3f, %.3f), err=%.6f m",
-                        cur_x, cur_y, target_x, target_y, err_dist
-                    )
-                    raise RuntimeError("AGV did not reach target within timeout")
-                await asyncio.sleep(interval_s)
-                waited += interval_s
-        else:
-            logger.info(
-                "AGV already at XY target within eps: planned_dist=%.6f m, eps=%.6f — proceeding",
-                planned_dist, linear_eps
+                # Обнаружение проскока: если были близко и расстояние начало расти — стоп
+                if step > 0 and dist > prev_dist and prev_dist < 0.10:
+                    logger.info("AGV micro-step overshot, stopping at dist=%.3fm (prev=%.3fm)", dist, prev_dist)
+                    break
+
+                prev_dist = dist
+                theta_rad = math.radians(cur_theta)
+                fwd = (
+                    (target_x - cur_x) * math.cos(theta_rad)
+                    + (target_y - cur_y) * math.sin(theta_rad)
+                )
+                # Пропорциональная скорость: замедляемся при приближении к цели
+                speed_mag = max(AGV_MICROSTEP_MIN_SPD,
+                                min(AGV_MICROSTEP_MAX_SPD, AGV_MICROSTEP_K * dist))
+                speed = speed_mag if fwd >= 0 else -speed_mag
+                logger.info("AGV micro-step %d: dist=%.3fm speed=%.3f fwd=%.3f", step, dist, speed, fwd)
+
+                try:
+                    body = {"speed": speed, "angular_speed": 0.0, "duration": AGV_MICROSTEP_DUR}
+                    async with _sess.post(
+                        SYMOVO_TELEOP_MOVE_URL, json=body,
+                        timeout=_aio.ClientTimeout(total=AGV_MICROSTEP_DUR + 3.0),
+                    ) as _r:
+                        resp_text = await _r.text()
+                        logger.info("AGV micro-step HTTP %d body=%s", _r.status, resp_text[:120])
+                except Exception as _e:
+                    logger.warning("AGV micro-step send failed: %s", _e)
+                # POST возвращает немедленно — ждём пока AGV физически проедет и поза обновится
+                await asyncio.sleep(AGV_MICROSTEP_DUR)
+            else:
+                logger.warning("AGV micro-step: max steps reached, last dist=%.3fm", dist)
+        finally:
+            # Send stop pulse then disable drive mode
+            try:
+                stop = {"speed": 0.0, "angular_speed": 0.0, "duration": AGV_MICROSTEP_DUR}
+                async with _sess.post(
+                    SYMOVO_TELEOP_MOVE_URL, json=stop,
+                    timeout=_aio.ClientTimeout(total=AGV_MICROSTEP_DUR + 3.0),
+                ) as _r:
+                    pass
+            except Exception as _e:
+                logger.warning("AGV micro-step stop failed: %s", _e)
+            try:
+                async with _sess.put(
+                    SYMOVO_DRIVE_MODE_URL, params={"enable": "false"},
+                    timeout=_aio.ClientTimeout(total=5.0),
+                ) as _r:
+                    logger.info("AGV drive_mode disable → HTTP %d", _r.status)
+            except Exception as _e:
+                logger.warning("AGV drive_mode disable failed: %s", _e)
+
+
+async def _stop_agv_safe() -> None:
+    """Best-effort остановка AGV — вызывается при отмене задачи оператором."""
+    try:
+        await asyncio.wait_for(symovo.fault_reset(), timeout=3.0)
+        logger.info("AGV stopped after operator cancel")
+    except Exception as e:
+        logger.warning("AGV stop on cancel failed: %s", e)
+
+
+@guarded_async_call(robot_lock)
+async def move_robot_to_product(params) -> bool:
+    v           = _get_global_velocity()
+    location    = getattr(params, 'location', None)
+    lift_cm     = float(getattr(params, 'lift_position_cm', 0) or 0)
+    lift_units  = int(lift_cm * 1000)           # cm → encoder units
+    xarm_joints = getattr(params, 'xarm_joints', None)
+
+    # ── PREFLIGHT: auto-recover devices ───────────────────────────────────
+    try:
+        await manipulator.fault_reset()
+        await manipulator.enable_motion()
+        logger.info("move_robot_to_product: xArm enabled")
+    except Exception as e:
+        logger.warning("move_robot_to_product: xArm enable failed (continuing): %s", e)
+    try:
+        await lift.fault_reset()
+        logger.info("move_robot_to_product: lift fault_reset ok")
+    except Exception as e:
+        logger.warning("move_robot_to_product: lift fault_reset failed (continuing): %s", e)
+
+    same_shelf = await _is_at_shelf(location)
+
+    if not same_shelf:
+        # ── PHASE 1: PREFLIGHT ────────────────────────────────────────────
+        logger.info("move_robot_to_product: phase=PREFLIGHT same_shelf=False")
+
+        cur = await manipulator.current_joints_position()
+        if cur.get('name') != 'JOB_POSE':
+            logger.info("move_robot_to_product: PREFLIGHT → JOB_POSE")
+            await _move_to_job_pose(v)
+
+        pos_resp = await lift.position()
+        lift_pos = pos_resp.get("position", 0) if isinstance(pos_resp, dict) else float(pos_resp or 0)
+        if lift_pos > LIFT_TRANSPORT_MAX:
+            logger.info("move_robot_to_product: PREFLIGHT lift too high (%s) → %d", lift_pos, LIFT_TRANSPORT_MAX)
+            await igus_move_and_check(LIFT_TRANSPORT_MAX, v)
+
+        # ── PHASE 2: NAVIGATING ───────────────────────────────────────────
+        if location:
+            target_x  = float(location.x_m)
+            target_y  = float(location.y_m)
+            target_th = float(getattr(location, 'theta_deg', 0.0) or 0.0)
+            target_map = getattr(location, 'map_id', None)
+
+            # Decide: short backward move → micro-steps; otherwise → go_to_pose
+            _nav_pose = await symovo.pose()
+            _nav_p = (_nav_pose.get("pose") or {}) if isinstance(_nav_pose, dict) else {}
+            _cur_x = float(_nav_p.get("x_m") or 0.0)
+            _cur_y = float(_nav_p.get("y_m") or 0.0)
+            _cur_th = float(_nav_p.get("theta_deg") or 0.0)
+            _dist = math.hypot(target_x - _cur_x, target_y - _cur_y)
+            _theta_rad = math.radians(_cur_th)
+            _fwd = (
+                (target_x - _cur_x) * math.cos(_theta_rad)
+                + (target_y - _cur_y) * math.sin(_theta_rad)
             )
+            _use_microstep = _fwd < 0 and _dist < AGV_MICROSTEP_DIST_M
 
-    # After AGV arrival or if AGV not requested: execute lift/manipulator
-    if need_igus:
-        target_units = int(params.lift_position_cm * 1000)
-        logger.info(
-            "LIFT: moving to %d (units) [%.2f cm] at velocity=%.1f%%",
-            target_units, float(params.lift_position_cm), float(params.velocity_percent)
-        )
-        ok = await igus_move_and_check(target_units, params.velocity_percent)
-        logger.info("LIFT: move result ok=%s", bool(ok))
-        await asyncio.sleep(0)
+            if _use_microstep:
+                logger.info(
+                    "move_robot_to_product: phase=NAVIGATING micro-step backward dist=%.3fm fwd=%.3f",
+                    _dist, _fwd,
+                )
+                try:
+                    await _agv_microstep_to(target_x, target_y)
+                except asyncio.CancelledError:
+                    logger.warning("move_robot_to_product: NAVIGATING micro-step cancelled")
+                    raise
+            else:
+                logger.info("move_robot_to_product: phase=NAVIGATING → (%.3f, %.3f)", target_x, target_y)
+                await symovo.go_to_pose(
+                    x_m=target_x, y_m=target_y,
+                    theta_deg=target_th, map_id=target_map,
+                    wait=False,    # команда отправлена, дальше сами опрашиваем позицию
+                )
+                try:
+                    await _wait_agv_arrival(target_x, target_y)
+                except asyncio.CancelledError:
+                    logger.warning("move_robot_to_product: NAVIGATING cancelled → stopping AGV")
+                    await _stop_agv_safe()
+                    raise          # propagate → _TaskManager → TaskStatus.CANCELLED
+    else:
+        # Same shelf: сброс в JOB_POSE как базовая точка для offset
+        logger.info("move_robot_to_product: phase=PREFLIGHT same_shelf=True → JOB_POSE baseline")
+        await _move_to_job_pose(v)
 
-    if need_xarm:
-        _params = xarm_positions.get_XarmMoveWithJointsDictParams_for_move_to_center()
-        logger.info("MANIPULATOR: move to center pose before tool offsets")
-        logger.info("MANIPULATOR: moving to center pose")
-        await manipulator.complex_move_with_joints(_params)
-        await asyncio.sleep(0)
-        _params = XarmMoveWithToolParams(
-            x_offset_mm=params.manipulator_offsets.x_offset_mm,
-            y_offset_mm=params.manipulator_offsets.y_offset_mm,
-            z_offset_mm=params.manipulator_offsets.z_offset_mm,
-            velocity_percent=params.velocity_percent,
-            reset_faults=params.reset_faults,
-        )
-        logger.info(
-            "MANIPULATOR: tool offsets dx=%.1f mm, dy=%.1f mm, dz=%.1f mm, v=%.1f%%",
-            float(params.manipulator_offsets.x_offset_mm),
-            float(params.manipulator_offsets.y_offset_mm),
-            float(params.manipulator_offsets.z_offset_mm),
-            float(params.velocity_percent),
-        )
-        await manipulator.change_tool_position(_params)
-        logger.info("MANIPULATOR: tool offset move done")
-        await asyncio.sleep(0)
+    # ── PHASE 3: POSITIONING ──────────────────────────────────────────────
+    _LIFT_TOL  = 500    # encoder units (~5 mm)
+    _JOINT_TOL = 3.0    # degrees per joint
 
-    logger.info("move_robot_to_product: done")
+    # Reset any fault that may have accumulated during navigation (idle_shutdown
+    # can disable the drive while the AGV is moving, leaving the drive in fault).
+    try:
+        await lift.fault_reset()
+    except Exception as _fr_err:
+        logger.warning("move_robot_to_product: lift fault_reset pre-POSITIONING failed (non-fatal): %s", _fr_err)
+
+    logger.info("move_robot_to_product: phase=POSITIONING lift→%d (%.2f cm)", lift_units, lift_cm)
+    joints_data = getattr(xarm_joints, 'joints', None) if xarm_joints else None
+    if joints_data:
+        j_params = XarmMoveWithJointsDictParams(
+            points=[XarmJointsDict(
+                j1=float(getattr(joints_data, 'j1', 0.0)),
+                j2=float(getattr(joints_data, 'j2', 0.0)),
+                j3=float(getattr(joints_data, 'j3', 0.0)),
+                j4=float(getattr(joints_data, 'j4', 0.0)),
+                j5=float(getattr(joints_data, 'j5', 0.0)),
+                j6=float(getattr(joints_data, 'j6', 0.0)),
+            )],
+            velocity_percent=v,
+            reset_faults=False,
+        )
+        logger.info("move_robot_to_product: POSITIONING → parallel lift+arm j1=%.2f j2=%.2f",
+                    getattr(joints_data, 'j1', 0.0), getattr(joints_data, 'j2', 0.0))
+        await asyncio.gather(
+            igus_move_and_check(lift_units, v),
+            asyncio.wait_for(manipulator.complex_move_with_joints(j_params), timeout=60),
+        )
+
+        # ── PHASE 3: VERIFICATION ─────────────────────────────────────────
+        # Gather can be interrupted (task preempted mid-move). Verify actual
+        # positions and finish any move that didn't complete.
+        lift_ok = False
+        arm_ok  = False
+        try:
+            pos_r = await lift.position()
+            actual_lift = float((pos_r or {}).get('position', 0))
+            lift_ok = abs(actual_lift - lift_units) <= _LIFT_TOL
+            logger.info("POSITIONING verify: lift actual=%.0f target=%d ok=%s",
+                        actual_lift, lift_units, lift_ok)
+        except Exception as e:
+            logger.warning("POSITIONING verify: lift position read failed: %s", e)
+
+        try:
+            cj_resp = await manipulator.current_joints_position()
+            cj = (cj_resp or {}).get('joints', {})
+            arm_ok = all(
+                abs(float(cj.get(k, 0)) - float(getattr(joints_data, k, 0))) <= _JOINT_TOL
+                for k in ('j1', 'j2', 'j3', 'j4', 'j5', 'j6')
+            )
+            logger.info("POSITIONING verify: arm j1=%.2f target=%.2f ok=%s",
+                        float(cj.get('j1', 0)), float(getattr(joints_data, 'j1', 0)), arm_ok)
+        except Exception as e:
+            logger.warning("POSITIONING verify: arm joints read failed: %s", e)
+
+        if not lift_ok:
+            logger.info("POSITIONING verify: lift not at target → retry")
+            await igus_move_and_check(lift_units, v)
+        if not arm_ok:
+            logger.info("POSITIONING verify: arm not at target → retry")
+            await asyncio.wait_for(manipulator.complex_move_with_joints(j_params), timeout=60)
+    else:
+        logger.info("move_robot_to_product: POSITIONING → lift only (no joints data)")
+        await igus_move_and_check(lift_units, v)
+
+        try:
+            pos_r = await lift.position()
+            actual_lift = float((pos_r or {}).get('position', 0))
+            if abs(actual_lift - lift_units) > _LIFT_TOL:
+                logger.info("POSITIONING verify: lift at %.0f, target %d → retry",
+                            actual_lift, lift_units)
+                await igus_move_and_check(lift_units, v)
+        except Exception as e:
+            logger.warning("POSITIONING verify: lift check failed: %s", e)
+
+    logger.info("move_robot_to_product: phase=DONE")
+    return True
+
+
+@guarded_async_call(robot_lock)
+async def go_to_charging_station(station_id: int) -> bool:
+    """Оркестрированная отправка на зарядную станцию.
+
+    PREFLIGHT — arm→JOB_POSE, lift↓
+    CLEAR     — очистить транспорты (symovo.fault_reset)
+    ACTIVATE  — включить зарядную станцию → Symovo запускает скрипт заезда
+    """
+    v = _get_global_velocity()
+
+    # ── PREFLIGHT ──────────────────────────────────────────────────────────
+    logger.info("go_to_charging: phase=PREFLIGHT station_id=%s", station_id)
+    try:
+        await manipulator.fault_reset()
+        await manipulator.enable_motion()
+    except Exception as e:
+        logger.warning("go_to_charging: xArm enable failed (continuing): %s", e)
+    try:
+        await lift.fault_reset()
+    except Exception as e:
+        logger.warning("go_to_charging: lift fault_reset failed (continuing): %s", e)
+
+    cur = await manipulator.current_joints_position()
+    if cur.get('name') != 'JOB_POSE':
+        logger.info("go_to_charging: PREFLIGHT → JOB_POSE")
+        await _move_to_job_pose(v)
+
+    pos_resp = await lift.position()
+    lift_pos = pos_resp.get("position", 0) if isinstance(pos_resp, dict) else float(pos_resp or 0)
+    if lift_pos > LIFT_TRANSPORT_MAX:
+        logger.info("go_to_charging: PREFLIGHT lift too high (%s) → %d", lift_pos, LIFT_TRANSPORT_MAX)
+        await igus_move_and_check(LIFT_TRANSPORT_MAX, v)
+
+    # ── CLEAR TRANSPORTS ──────────────────────────────────────────────────
+    logger.info("go_to_charging: phase=CLEAR_TRANSPORTS")
+    try:
+        await symovo.fault_reset()
+    except Exception as e:
+        logger.warning("go_to_charging: clear transports failed (continuing): %s", e)
+
+    # ── ACTIVATE ──────────────────────────────────────────────────────────
+    logger.info("go_to_charging: phase=ACTIVATE station_id=%s", station_id)
+    await symovo.go_to_charging_station(station_id)
+
+    # ── RELEASE DRIVE MODE ────────────────────────────────────────────────
+    # Disable drive_mode so Symovo controller takes over and executes its
+    # internal docking script to navigate to the charging station.
+    logger.info("go_to_charging: phase=RELEASE_DRIVE_MODE")
+    import aiohttp as _aio
+    try:
+        async with _aio.ClientSession() as _sess:
+            async with _sess.put(
+                SYMOVO_DRIVE_MODE_URL, params={"enable": "false"},
+                timeout=_aio.ClientTimeout(total=5.0),
+            ) as _r:
+                logger.info("go_to_charging: drive_mode disable → HTTP %d", _r.status)
+    except Exception as e:
+        logger.warning("go_to_charging: drive_mode disable failed: %s", e)
+
+    logger.info("go_to_charging: phase=DONE — charger activated, Symovo docking script started")
     return True
 
 

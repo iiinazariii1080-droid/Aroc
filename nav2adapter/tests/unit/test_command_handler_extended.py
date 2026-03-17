@@ -1,4 +1,4 @@
-"""Tests for CommandHandler — navigate_to, cancel, resolve_target, busy policy, readiness."""
+"""Tests for CommandHandler — drive_to_position, cancel, resolve_target, busy policy, readiness."""
 import pytest
 import math
 import asyncio
@@ -74,15 +74,15 @@ def _patch_state_store(**overrides):
     return patch("services.command_handler.state_store", **defaults)
 
 
-# ── navigate_to: happy path ─────────────────────────────────────────
+# ── drive_to_position: happy path ──────────────────────────────────
 
-class TestNavigateToHappyPath:
+class TestDriveToPositionHappyPath:
     @pytest.mark.asyncio
     async def test_pose_navigation(self, event_bus_instance):
         handler = _make_handler(event_bus_instance)
         with _patch_state_store(), \
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
         assert status.status == NavigationStatusEnum.NAVIGATING
         assert status.goal_id == "cmd-001"
         assert status.progress_percent == 1
@@ -94,20 +94,20 @@ class TestNavigateToHappyPath:
         handler = _make_handler(event_bus_instance)
         with _patch_state_store(), \
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record(theta_deg=180.0)):
-            await handler.handle_navigate_to(_cmd())
+            await handler.handle_drive_to_position(_cmd())
         kwargs = handler.transport_orchestrator.create_transport_to_pose.call_args.kwargs
         assert abs(kwargs["theta_rad"] - math.pi) < 1e-3
 
 
-# ── navigate_to: error conditions ───────────────────────────────────
+# ── drive_to_position: error conditions ─────────────────────────────
 
-class TestNavigateToErrors:
+class TestDriveToPositionErrors:
     @pytest.mark.asyncio
     async def test_invalid_target_id(self, event_bus_instance):
         handler = _make_handler(event_bus_instance)
         with _patch_state_store(), \
              patch("services.command_handler.get_robot_position_by_name", return_value=None):
-            status = await handler.handle_navigate_to(_cmd(target_id="unknown"))
+            status = await handler.handle_drive_to_position(_cmd(target_id="unknown"))
         assert status.status == NavigationStatusEnum.ERROR
         assert "invalid_target_id" in status.error_reason
 
@@ -118,7 +118,7 @@ class TestNavigateToErrors:
         active = MagicMock(state=1, command_id="old-cmd", transport_id="t0", target_id="OldTarget")
         with _patch_state_store(get_all_active_commands=AsyncMock(return_value={"old-cmd": active})), \
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
-            status = await handler.handle_navigate_to(_cmd(command_id="new-cmd"))
+            status = await handler.handle_drive_to_position(_cmd(command_id="new-cmd"))
         assert status.status == NavigationStatusEnum.ERROR
         assert status.error_reason == "busy"
 
@@ -136,7 +136,7 @@ class TestNavigateToErrors:
              patch("services.command_handler.settings") as s:
             s.symovo_auto_set_drive_mode = False
             s.symovo_clear_transports_before_navigate = False
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
         assert status.status == NavigationStatusEnum.ERROR
         assert "not_ready" in status.error_reason
 
@@ -153,7 +153,7 @@ class TestNavigateToErrors:
              patch("services.command_handler.settings") as s:
             s.symovo_auto_set_drive_mode = False
             s.symovo_clear_transports_before_navigate = False
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
         assert status.status == NavigationStatusEnum.ERROR
 
     @pytest.mark.asyncio
@@ -167,7 +167,7 @@ class TestNavigateToErrors:
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()), \
              patch("services.command_handler.settings") as s:
             s.symovo_clear_transports_before_navigate = False
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
         assert status.status == NavigationStatusEnum.ERROR
         assert status.error_reason == "transport_creation_failed"
 
@@ -181,7 +181,7 @@ class TestIdempotency:
         existing = MagicMock(command_id="cmd-001", transport_id="t1", target_id="TestPose", state=1)
         with _patch_state_store(get_active_transport=AsyncMock(return_value=existing)), \
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
         # Should return navigating, not error
         assert status.status in (NavigationStatusEnum.NAVIGATING, NavigationStatusEnum.ERROR) or status.goal_id == "cmd-001"
 
@@ -191,7 +191,7 @@ class TestIdempotency:
         existing = MagicMock(command_id="cmd-001", transport_id="t1", target_id="OldTarget", state=1)
         with _patch_state_store(get_active_transport=AsyncMock(return_value=existing)), \
              patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
-            status = await handler.handle_navigate_to(_cmd(target_id="NewTarget"))
+            status = await handler.handle_drive_to_position(_cmd(target_id="NewTarget"))
         assert status.status == NavigationStatusEnum.ERROR
         assert "conflict" in status.error_reason
 
@@ -357,6 +357,6 @@ class TestAutoDriveMode:
             s.symovo_auto_set_drive_mode = True
             s.symovo_auto_set_drive_mode_wait_s = 0.01
             s.symovo_clear_transports_before_navigate = False
-            status = await handler.handle_navigate_to(_cmd())
+            status = await handler.handle_drive_to_position(_cmd())
         assert status.status == NavigationStatusEnum.NAVIGATING
         symovo.set_drive_mode.assert_awaited_once()

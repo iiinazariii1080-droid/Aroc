@@ -19,16 +19,19 @@ The drive exposes diagnostic objects such as:
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
-from typing import Protocol
+
+_LOGGER = logging.getLogger(__name__)
 
 from ..od.controlword import CWBit, cw_fault_reset, cw_set_bits, cw_shutdown
 from ..od.indices import ODIndex
 from ..od.statusword import SWBit
+from ..protocol.accessor import AsyncODAccessor
 from ..transport.clock import monotonic_s
+from .bits import _U16_MASK
+from .bits import bit_is_set as _bit
 from .dominance import require_remote_enabled
-
-_U16_MASK = 0xFFFF
 
 # Standard CANopen diagnostic objects frequently present on drives
 OD_ERROR_REGISTER = 0x1001
@@ -37,15 +40,6 @@ OD_PREDEFINED_ERROR_FIELD = 0x1003
 
 class FaultResetError(RuntimeError):
     """Raised when a fault reset attempt fails or times out."""
-
-
-class AsyncODAccessor(Protocol):
-    async def read_u16(self, index: int, subindex: int = 0) -> int: ...
-    async def write_u16(self, index: int, value: int, subindex: int = 0) -> None: ...
-
-
-def _bit(word: int, bit: int) -> bool:
-    return bool(((int(word) & _U16_MASK) >> int(bit)) & 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,15 +82,22 @@ class FaultManager:
         """
         try:
             count = int(await self._od.read_u16(OD_PREDEFINED_ERROR_FIELD, 0)) & 0x00FF
+        except (TimeoutError, OSError, ConnectionError):
+            _LOGGER.debug("Error history unavailable (connection issue)", exc_info=True)
+            return []
         except Exception:
-            # Not all firmware/configs expose this; treat as unavailable
+            _LOGGER.warning("Unexpected error reading error history count", exc_info=True)
             return []
         count = max(0, min(int(count), int(max_entries)))
         hist: list[int] = []
         for si in range(1, count + 1):
             try:
                 hist.append(int(await self._od.read_u16(OD_PREDEFINED_ERROR_FIELD, si)) & _U16_MASK)
+            except (TimeoutError, OSError, ConnectionError):
+                _LOGGER.debug("Error history entry %d unavailable (connection issue)", si, exc_info=True)
+                break
             except Exception:
+                _LOGGER.warning("Unexpected error reading error history entry %d", si, exc_info=True)
                 break
         return hist
 
@@ -107,24 +108,36 @@ class FaultManager:
             # Best-effort reads; don't let diagnostics hide original fault
             try:
                 ec = await self.read_error_code()
+            except (TimeoutError, OSError, ConnectionError):
+                _LOGGER.debug("Error code unavailable (connection issue)", exc_info=True)
+                ec = None
             except Exception:
+                _LOGGER.warning("Unexpected error reading error code", exc_info=True)
                 ec = None
             try:
                 er = await self.read_error_register()
+            except (TimeoutError, OSError, ConnectionError):
+                _LOGGER.debug("Error register unavailable (connection issue)", exc_info=True)
+                er = None
             except Exception:
+                _LOGGER.warning("Unexpected error reading error register", exc_info=True)
                 er = None
             hist = None
             if include_history:
                 try:
                     hist_list = await self.read_error_history()
                     hist = hist_list if hist_list else None
+                except (TimeoutError, OSError, ConnectionError):
+                    _LOGGER.debug("Error history unavailable (connection issue)", exc_info=True)
+                    hist = None
                 except Exception:
+                    _LOGGER.warning("Unexpected error reading error history", exc_info=True)
                     hist = None
             return FaultInfo(statusword=sw, error_code=ec, error_register=er, history=hist)
         return info
 
     async def reset_fault(self, *, timeout_s: float = 5.0, poll_interval_s: float = 0.05) -> None:
-        """Attempt to reset a fault.
+        """Attempt to reset a fault (standalone, without state machine context).
 
         Sequence (safe baseline):
         - Verify Remote enabled (DI7 high), otherwise reset is not permitted.
@@ -132,6 +145,10 @@ class FaultManager:
         - Pulse/clear by sending Shutdown.
         - Set HALT=1 (safe) after reset, per manual guidance for restarting after faults.
         - Wait until Statusword bit3 clears or timeout.
+
+        Note: Production fault_reset flow uses ``CiA402StateMachine.fault_reset()``
+        (state_machine.py), which integrates with the CiA402 state transition logic.
+        This method is a lower-level alternative for direct FaultManager usage.
         """
         sw0 = await self.read_statusword()
         if not _bit(sw0, SWBit.FAULT):

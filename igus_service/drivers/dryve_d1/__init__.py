@@ -2,13 +2,11 @@
 
 Public entry points:
 - DryveD1 (async facade)
-- MotorManager (optional multi-axis orchestration)
 - TelemetryPoller / DriveSnapshot (telemetry helpers)
 """
 
 # Public API
 from .api.drive import DryveD1
-from .api.motor_manager import MotorManager
 
 # Exceptions
 from .protocol.exceptions import MotionAborted
@@ -22,7 +20,6 @@ __all__ = [
     "DriveSnapshot",
     "DryveD1",
     "MotionAborted",
-    "MotorManager",
     "TelemetryConfig",
     "TelemetryPoller",
     "__version__",

@@ -1,22 +1,13 @@
-
 import os
 import sys
 import time
 import stat
-from dataclasses import dataclass
-from typing import List, Dict, Optional
-import threading
-import signal
-import argparse
-import os
-import sys
-import time
-import stat
-from dataclasses import dataclass
-from typing import List, Dict, Optional
-import threading
-import signal
 import json
+import argparse
+import threading
+import signal
+from dataclasses import dataclass
+from typing import List, Dict, Optional
 
 import pyrealsense2 as rs
 import numpy as np

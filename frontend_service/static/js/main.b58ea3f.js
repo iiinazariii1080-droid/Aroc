@@ -17942,7 +17942,7 @@ window.api = {
         t("iframe", {
             attrs: {
                 id: "arm3d_viewer",
-                src: "arm3d_viewer?axes=all&coords&camera_frustum&depth_cloud=0&fallback=1", 
+                src: "arm3d_viewer?fallback=1", 
                 frameborder: "0"
             }
         }),

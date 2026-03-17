@@ -114,6 +114,31 @@ def get_robot_position(position_id: str) -> Optional[Dict[str, Any]]:
         conn.close()
 
 
+def get_robot_position_by_name(name: str) -> Optional[Dict[str, Any]]:
+    """Return single position by unique name (case-insensitive) or None if not found."""
+    if not isinstance(name, str) or not name.strip():
+        return None
+    init_robot_positions_table()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        c = conn.cursor()
+        c.execute(
+            "SELECT id, name, params FROM robot_positions WHERE LOWER(name) = LOWER(?) LIMIT 1",
+            (name.strip(),),
+        )
+        row = c.fetchone()
+        if not row:
+            return None
+        pid, name_db, params_json = row
+        try:
+            params = json.loads(params_json) if params_json else None
+        except Exception:
+            params = None
+        return {"id": pid, "name": name_db, "params": params}
+    finally:
+        conn.close()
+
+
 def delete_robot_position(position_id: str) -> bool:
     """Delete position by id."""
     if not position_id:

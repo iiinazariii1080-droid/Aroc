@@ -2,22 +2,25 @@ from __future__ import annotations
 
 import pytest
 
-from app.api_models import (
-    FaultResetRequest,
-    JogMoveRequest,
-    MoveToPositionRequest,
-    ProfileConfig,
-    ReferenceRequest,
-    StopRequest,
+from app.application.commands import (
+    FaultResetCommand,
+    JogCommand,
+    MotionProfile,
+    MoveCommand,
+    ReferenceCommand,
+    StopCommand,
 )
 from app.application.drive_service import ServiceError
 from app.application.use_cases import DriveUseCases
 from drivers.dryve_d1.protocol.exceptions import MotionAborted
+from tests.fakes import AsyncNoopLock, FakeDrive, FakeSnapshot
 
 
-class _AsyncNoopLock:
+class _AsyncLockedLock:
+    """Lock that is permanently locked — simulates another command holding it."""
+
     def locked(self) -> bool:
-        return False
+        return True
 
     async def __aenter__(self):
         return self
@@ -26,78 +29,32 @@ class _AsyncNoopLock:
         return False
 
 
-class _DriveFake:
-    def __init__(self) -> None:
-        self.is_connected = True
-        self.calls: list[tuple[str, object]] = []
-        self.raise_on_move: Exception | None = None
-
-    async def get_position(self):
-        return 100
-
-    async def jog_stop(self, **kwargs):
-        self.calls.append(("jog_stop", kwargs or None))
-
-    async def move_to_position(self, **kwargs):
-        self.calls.append(("move_to_position", kwargs))
-        if self.raise_on_move is not None:
-            raise self.raise_on_move
-
-    async def jog_start(self, **kwargs):
-        self.calls.append(("jog_start", kwargs))
-
-    async def jog_update(self, **kwargs):
-        self.calls.append(("jog_update", kwargs))
-
-    async def quick_stop(self, **kwargs):
-        self.calls.append(("quick_stop", kwargs or None))
-
-    async def stop(self, **kwargs):
-        self.calls.append(("stop", kwargs or None))
-
-    async def home(self, **kwargs):
-        self.calls.append(("home", kwargs))
-        return "ok"
-
-    async def fault_reset(self, **kwargs):
-        self.calls.append(("fault_reset", kwargs))
-
-    async def get_status_live(self):
-        return {"fault": False, "operation_enabled": False}
-
-    async def read_u16(self, index, sub=0):
-        return 0
-
-    def telemetry_latest(self):
-        return None
-
-
 class _State:
     pass
 
 
-def _make_uc() -> tuple[DriveUseCases, _DriveFake]:
+def _make_uc() -> tuple[DriveUseCases, FakeDrive]:
     state = _State()
-    drive = _DriveFake()
+    drive = FakeDrive()
     state.drive = drive
-    state.motor_lock = _AsyncNoopLock()
+    state.motor_lock = AsyncNoopLock()
     uc = DriveUseCases(state)
     return uc, drive
 
 
 async def test_move_to_position_relative_uses_current_pos_and_profile() -> None:
     uc, drive = _make_uc()
-    req = MoveToPositionRequest(
+    req = MoveCommand(
         target_position=20,
         relative=True,
-        profile=ProfileConfig(velocity=200, acceleration=100, deceleration=100),
+        profile=MotionProfile(velocity=200, acceleration=100, deceleration=100),
         timeout_ms=20000,
     )
 
     data = await uc.move_to_position(req)
 
     assert data["target_position"] == 120
-    assert ("jog_stop", None) in drive.calls
+    assert any(c[0] == "jog_stop" for c in drive.calls)
     move_call = next(c for c in drive.calls if c[0] == "move_to_position")
     kwargs = move_call[1]
     assert kwargs["target_position"] == 120
@@ -107,10 +64,10 @@ async def test_move_to_position_relative_uses_current_pos_and_profile() -> None:
 async def test_move_to_position_motion_aborted_returns_ok_payload() -> None:
     uc, drive = _make_uc()
     drive.raise_on_move = MotionAborted("aborted")
-    req = MoveToPositionRequest(
+    req = MoveCommand(
         target_position=10,
         relative=False,
-        profile=ProfileConfig(velocity=200, acceleration=100, deceleration=100),
+        profile=MotionProfile(velocity=200, acceleration=100, deceleration=100),
         timeout_ms=20000,
     )
 
@@ -127,7 +84,7 @@ async def test_reference_aborted_returns_homed_false() -> None:
 
     drive.home = _aborted_home  # type: ignore[assignment]
 
-    data = await uc.reference(ReferenceRequest(timeout_ms=1000))
+    data = await uc.reference(ReferenceCommand(timeout_ms=1000))
 
     assert data == {"homed": False, "aborted": True}
 
@@ -141,7 +98,7 @@ async def test_stop_timeout_maps_to_service_error_timeout() -> None:
     drive.quick_stop = _timeout_stop  # type: ignore[assignment]
 
     with pytest.raises(ServiceError) as exc:
-        await uc.stop(StopRequest(mode="quick_stop", timeout_ms=1000))
+        await uc.stop(StopCommand(mode="quick_stop"))
 
     assert exc.value.status_code == 504
     assert exc.value.code == "TIMEOUT"
@@ -150,11 +107,11 @@ async def test_stop_timeout_maps_to_service_error_timeout() -> None:
 async def test_fault_reset_respects_auto_enable() -> None:
     uc, drive = _make_uc()
 
-    data = await uc.fault_reset(FaultResetRequest(after_reset={"auto_enable": False}, timeout_ms=1000))
+    data = await uc.fault_reset(FaultResetCommand(auto_enable=False))
 
-    assert data["recovered"] is False
+    assert data["auto_enable_requested"] is False
     assert data["fault_cleared"] is True
-    assert "previous_fault" in data
+    assert data["previous_fault"] is None or isinstance(data["previous_fault"], dict)
     fault_call = next(c for c in drive.calls if c[0] == "fault_reset")
     assert fault_call[1]["recover"] is False
     assert isinstance(fault_call[1].get("op_id"), str)
@@ -163,8 +120,8 @@ async def test_fault_reset_respects_auto_enable() -> None:
 async def test_jog_flow_direction_signs() -> None:
     uc, drive = _make_uc()
 
-    start_data = await uc.jog_start(JogMoveRequest(direction="positive", speed=12, ttl_ms=200))
-    update_data = await uc.jog_update(JogMoveRequest(direction="negative", speed=7, ttl_ms=300))
+    start_data = await uc.jog_start(JogCommand(direction="positive", speed=12, ttl_ms=200))
+    update_data = await uc.jog_update(JogCommand(direction="negative", speed=7, ttl_ms=300))
 
     assert start_data["velocity"] == 12
     assert update_data["velocity"] == -7
@@ -189,44 +146,70 @@ async def test_get_drive_status_from_cached_snapshot() -> None:
 
     status = await uc.get_drive_status()
 
-    assert status.online.value in {"online", "degraded", "offline"}
+    assert status.online in {"online", "degraded", "offline"}
     assert status.statusword == 4660
     assert status.position == 123.0
     assert status.velocity == 5.0
+
+
+async def test_get_drive_status_via_constructor_cached_snapshot() -> None:
+    """Cached-telemetry hot path using FakeDrive(cached_snapshot=FakeSnapshot()).
+
+    Exercises the _read_drive_state() branch where telemetry_latest() returns a
+    snapshot — the normal production path.  No OD register reads should occur.
+    """
+    snap = FakeSnapshot(statusword=0x0240, position=500, velocity=10, mode_display=1)
+    state = _State()
+    drive = FakeDrive(cached_snapshot=snap)
+    state.drive = drive
+    state.motor_lock = AsyncNoopLock()
+    uc = DriveUseCases(state)
+
+    status = await uc.get_drive_status()
+
+    assert status.position == 500.0
+    assert status.velocity == 10.0
+    assert status.statusword == 0x0240
+    # Verify the cached path was used: no direct OD reads on telemetry fields
+    od_reads = {c[0] for c in drive.calls}
+    assert "get_statusword" not in od_reads
+    assert "get_position" not in od_reads
+    assert "get_velocity_actual" not in od_reads
 
 
 async def test_get_drive_telemetry_direct_read_path() -> None:
     uc, drive = _make_uc()
     drive.telemetry_latest = lambda: None  # type: ignore[assignment]
 
-    async def _read_i32(index, sub):
+    async def _get_velocity_actual():
         return 77
 
-    async def _read_u16(index, sub):
+    async def _get_statusword():
         return 0
 
-    async def _read_i8(index, sub):
+    async def _get_cia402_state():
+        from drivers.dryve_d1.od.statusword import infer_cia402_state
+        return infer_cia402_state(0)
+
+    async def _get_mode_display():
         return 1
 
-    async def _get_status():
-        return {"fault": False}
-
-    drive.read_i32 = _read_i32  # type: ignore[assignment]
-    drive.read_u16 = _read_u16  # type: ignore[assignment]
-    drive.read_i8 = _read_i8  # type: ignore[assignment]
-    drive.get_status = _get_status  # type: ignore[assignment]
+    drive.get_velocity_actual = _get_velocity_actual  # type: ignore[assignment]
+    drive.get_statusword = _get_statusword  # type: ignore[assignment]
+    drive.get_cia402_state = _get_cia402_state  # type: ignore[assignment]
+    drive.get_mode_display = _get_mode_display  # type: ignore[assignment]
 
     telemetry = await uc.get_drive_telemetry()
 
     assert telemetry["velocity"] == 77.0
-    assert "cia402_state" in telemetry
+    assert isinstance(telemetry["cia402_state"], str)
 
 
 # ---------------------------------------------------------------------------
 # Fault gate tests (Phase A) — require_not_in_fault blocks commands
 # ---------------------------------------------------------------------------
 
-def _make_uc_in_fault() -> tuple[DriveUseCases, _DriveFake]:
+def _make_uc_in_fault() -> tuple[DriveUseCases, FakeDrive]:
     """Create a use-case where the fake drive reports FAULT."""
     uc, drive = _make_uc()
 
@@ -239,10 +222,10 @@ def _make_uc_in_fault() -> tuple[DriveUseCases, _DriveFake]:
 
 async def test_move_to_position_blocked_when_drive_in_fault() -> None:
     uc, _drive = _make_uc_in_fault()
-    req = MoveToPositionRequest(
+    req = MoveCommand(
         target_position=10,
         relative=False,
-        profile=ProfileConfig(velocity=200, acceleration=100, deceleration=100),
+        profile=MotionProfile(velocity=200, acceleration=100, deceleration=100),
         timeout_ms=5000,
     )
 
@@ -255,7 +238,7 @@ async def test_move_to_position_blocked_when_drive_in_fault() -> None:
 
 async def test_jog_start_blocked_when_drive_in_fault() -> None:
     uc, _drive = _make_uc_in_fault()
-    req = JogMoveRequest(direction="positive", speed=10, ttl_ms=200)
+    req = JogCommand(direction="positive", speed=10, ttl_ms=200)
 
     with pytest.raises(ServiceError) as exc:
         await uc.jog_start(req)
@@ -268,7 +251,7 @@ async def test_reference_blocked_when_drive_in_fault() -> None:
     uc, _drive = _make_uc_in_fault()
 
     with pytest.raises(ServiceError) as exc:
-        await uc.reference(ReferenceRequest(timeout_ms=1000))
+        await uc.reference(ReferenceCommand(timeout_ms=1000))
 
     assert exc.value.status_code == 409
     assert exc.value.code == "DRIVE_IN_FAULT"
@@ -277,7 +260,7 @@ async def test_reference_blocked_when_drive_in_fault() -> None:
 async def test_fault_gate_passes_when_not_in_fault() -> None:
     """Normal (no-fault) path should not raise."""
     uc, drive = _make_uc()
-    req = JogMoveRequest(direction="positive", speed=5, ttl_ms=200)
+    req = JogCommand(direction="positive", speed=5, ttl_ms=200)
 
     data = await uc.jog_start(req)
 
@@ -285,26 +268,28 @@ async def test_fault_gate_passes_when_not_in_fault() -> None:
     assert any(c[0] == "jog_start" for c in drive.calls)
 
 
-async def test_fault_gate_tolerates_status_read_failure() -> None:
-    """If get_status_live raises, fallthrough and let the command proceed."""
+async def test_fault_gate_blocks_when_status_read_fails() -> None:
+    """If get_status_live raises, motion must be blocked (fail-closed)."""
     uc, drive = _make_uc()
 
     async def _broken_status():
         raise ConnectionError("Modbus lost")
 
     drive.get_status_live = _broken_status  # type: ignore[assignment]
-    req = JogMoveRequest(direction="positive", speed=5, ttl_ms=200)
+    req = JogCommand(direction="positive", speed=5, ttl_ms=200)
 
-    # Should NOT raise — gate is best-effort
-    data = await uc.jog_start(req)
-    assert data["velocity"] == 5
+    with pytest.raises(ServiceError) as exc:
+        await uc.jog_start(req)
+
+    assert exc.value.status_code == 503
+    assert exc.value.code == "FAULT_CHECK_FAILED"
 
 
 # ---------------------------------------------------------------------------
 # Safety lockout gate — fault + remote=False (DI7 low) → SAFETY_LOCKOUT
 # ---------------------------------------------------------------------------
 
-def _make_uc_safety_lockout() -> tuple[DriveUseCases, _DriveFake]:
+def _make_uc_safety_lockout() -> tuple[DriveUseCases, FakeDrive]:
     """Fake drive in fault with remote=False (safety relay open)."""
     uc, drive = _make_uc()
 
@@ -318,7 +303,7 @@ def _make_uc_safety_lockout() -> tuple[DriveUseCases, _DriveFake]:
 async def test_safety_lockout_returns_503() -> None:
     """P0: fault + remote=False → ServiceError(503, SAFETY_LOCKOUT)."""
     uc, _drive = _make_uc_safety_lockout()
-    req = JogMoveRequest(direction="positive", speed=5, ttl_ms=200)
+    req = JogCommand(direction="positive", speed=5, ttl_ms=200)
 
     with pytest.raises(ServiceError) as exc:
         await uc.jog_start(req)
@@ -333,14 +318,13 @@ async def test_safety_lockout_returns_503() -> None:
 
 async def test_fault_reset_returns_enhanced_payload() -> None:
     uc, drive = _make_uc()
-    data = await uc.fault_reset(FaultResetRequest(after_reset={"auto_enable": True}, timeout_ms=1000))
+    data = await uc.fault_reset(FaultResetCommand(auto_enable=True))
 
-    assert data["recovered"] is True
+    assert data["auto_enable_requested"] is True
     assert data["fault_cleared"] is True
     assert data["previous_fault"] is not None
     assert isinstance(data["previous_fault"], dict)
-    # new_state is str|None — just check it's present
-    assert "new_state" in data
+    assert data["new_state"] is None or isinstance(data["new_state"], str)
 
 
 async def test_fault_reset_detects_fault_not_cleared() -> None:
@@ -352,7 +336,7 @@ async def test_fault_reset_detects_fault_not_cleared() -> None:
 
     drive.get_status_live = _still_in_fault  # type: ignore[assignment]
 
-    data = await uc.fault_reset(FaultResetRequest(timeout_ms=1000))
+    data = await uc.fault_reset(FaultResetCommand())
 
     assert data["fault_cleared"] is False
     assert data["new_state"] is None
@@ -404,3 +388,138 @@ async def test_get_drive_status_no_fault_details_when_healthy() -> None:
 
     assert status.fault.active is False
     assert status.fault.details is None
+
+
+# ---------------------------------------------------------------------------
+# reference() motor_lock contention tests
+# ---------------------------------------------------------------------------
+
+def _make_uc_with_locked_lock() -> tuple[DriveUseCases, FakeDrive]:
+    """Create a use-case where motor_lock is already held."""
+    state = _State()
+    drive = FakeDrive()
+    state.drive = drive
+    state.motor_lock = _AsyncLockedLock()
+    return DriveUseCases(state), drive
+
+
+async def test_reference_blocked_when_motor_busy() -> None:
+    uc, _drive = _make_uc_with_locked_lock()
+
+    with pytest.raises(ServiceError) as exc:
+        await uc.reference(ReferenceCommand(timeout_ms=1000))
+
+    assert exc.value.status_code == 409
+    assert exc.value.code == "MOTOR_BUSY"
+
+
+async def test_reference_proceeds_when_lock_free() -> None:
+    uc, drive = _make_uc()
+
+    data = await uc.reference(ReferenceCommand(timeout_ms=1000))
+
+    assert data["homed"] is True
+    assert any(c[0] == "home" for c in drive.calls)
+
+
+# ---------------------------------------------------------------------------
+# jog_update motor_lock contention
+# ---------------------------------------------------------------------------
+
+async def test_jog_update_succeeds_when_motor_busy() -> None:
+    """jog_update does not use motor_lock — succeeds even when lock is held."""
+    uc, _drive = _make_uc_with_locked_lock()
+    req = JogCommand(direction="positive", speed=5, ttl_ms=200)
+
+    # Should NOT raise — jog_update is lock-free
+    data = await uc.jog_update(req)
+    assert data["direction"] == "positive"
+
+
+async def test_jog_update_proceeds_when_lock_free() -> None:
+    """jog_update succeeds when motor_lock is not held."""
+    uc, drive = _make_uc()
+    drive._jog_active = True  # jog must be active for update to proceed
+    req = JogCommand(direction="negative", speed=10, ttl_ms=300)
+
+    data = await uc.jog_update(req)
+
+    assert data["velocity"] == -10
+    assert data["direction"] == "negative"
+    assert any(c[0] == "jog_update" for c in drive.calls)
+
+
+# ---------------------------------------------------------------------------
+# Jog: hot/warm path bypass motor_lock, abort_event cleared
+# ---------------------------------------------------------------------------
+
+
+async def test_jog_start_hot_path_bypasses_motor_lock() -> None:
+    """When jog is already active (hot path), jog_start must not use motor_lock."""
+    uc, drive = _make_uc_with_locked_lock()
+
+    # Simulate active jog via public protocol method
+    drive._jog_active = True
+
+    req = JogCommand(direction="positive", speed=10, ttl_ms=200)
+    # Should NOT raise MOTOR_BUSY — hot path bypasses lock
+    data = await uc.jog_start(req)
+    assert data["velocity"] > 0
+
+
+async def test_jog_start_warm_path_bypasses_motor_lock() -> None:
+    """When drive is in PV+OPERATION_ENABLED (warm), jog_start skips motor_lock."""
+    uc, drive = _make_uc_with_locked_lock()
+
+    # Not hot (jog not active)
+    drive._jog_active = False
+
+    # is_jog_warm returns True — override on instance
+    async def _warm() -> bool:
+        return True
+
+    drive.is_jog_warm = _warm  # type: ignore[assignment]
+
+    req = JogCommand(direction="negative", speed=5, ttl_ms=200)
+    # Should NOT raise MOTOR_BUSY — warm path bypasses lock
+    data = await uc.jog_start(req)
+    assert data["velocity"] < 0
+
+
+async def test_jog_start_cold_path_requires_motor_lock() -> None:
+    """Cold path (not hot, not warm) must acquire motor_lock → MOTOR_BUSY when held."""
+    uc, drive = _make_uc_with_locked_lock()
+    # FakeDrive: is_jog_active()=False, is_jog_warm()=False → cold path
+    drive._jog_active = False
+
+    req = JogCommand(direction="positive", speed=10, ttl_ms=200)
+    with pytest.raises(ServiceError) as exc:
+        await uc.jog_start(req)
+    assert exc.value.code == "MOTOR_BUSY"
+
+
+async def test_jog_update_succeeds_during_cold_path() -> None:
+    """jog_update must succeed even when motor_lock is held (lock-free)."""
+    uc, drive = _make_uc_with_locked_lock()
+    drive._jog_active = True
+
+    req = JogCommand(direction="positive", speed=10, ttl_ms=200)
+    # Should NOT raise — jog_update is lock-free
+    data = await uc.jog_update(req)
+    assert data["direction"] == "positive"
+
+
+# ---------------------------------------------------------------------------
+# TEST-03: FakeDrive satisfies DriveProtocol (runtime_checkable conformance)
+# ---------------------------------------------------------------------------
+
+def test_fake_drive_satisfies_drive_protocol() -> None:
+    """FakeDrive must pass isinstance check against DriveProtocol.
+
+    This catches method signature drift between the protocol and the test
+    fake — a missing or renamed method will fail here rather than silently
+    producing incorrect test results.
+    """
+    from app.protocols import DriveProtocol
+
+    assert isinstance(FakeDrive(), DriveProtocol)

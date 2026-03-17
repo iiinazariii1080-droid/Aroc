@@ -1,6 +1,6 @@
 """Command handler methods for MqttCommandBridge.
 
-Handles navigateTo, cancel, and estop robot commands.
+Handles navigateTo, goToCharging, cancel, and estop robot commands.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class CommandHandlerMixin:
-    """Navigate / cancel / estop command processing.
+    """Navigate / goToCharging / cancel / estop command processing.
 
     Mixed into :class:`MqttCommandBridge` — all ``self.*`` references
     are typed via :class:`BridgeProtocol`.
@@ -66,6 +66,54 @@ class CommandHandlerMixin:
                 "command_name": "navigateTo",
                 "command_id": command_id,
                 "target_id": target_id,
+                "status_type": "navigation",
+            },
+        }
+
+        self._submit_http(
+            service="robot",
+            request_id=command_id,
+            method="POST",
+            url=url,
+            headers=headers,
+            body=body,
+            context=context,
+        )
+
+    def _handle_go_to_charging_command(self: BridgeProtocol, command_id: str, data: dict[str, Any]) -> None:
+        station_id = data.get("station_id")
+        if not station_id:
+            self._publish_command_error("goToCharging", command_id, "station_id is required.")
+            self._finish_command(command_id)
+            return
+
+        headers = data.get("headers") or {}
+        if not isinstance(headers, dict):
+            self._publish_command_error("goToCharging", command_id, "headers must be an object.")
+            self._finish_command(command_id)
+            return
+
+        url = self._build_http_url("robot", "/tasks/go_to_charging_station")
+        if not url:
+            self._publish_command_error("goToCharging", command_id, "Robot service is not configured.")
+            self._finish_command(command_id)
+            return
+
+        body = {
+            "station_id": station_id,
+        }
+
+        context = {
+            "source": "command",
+            "command_name": "goToCharging",
+            "command_id": command_id,
+            "station_id": station_id,
+            "status_type": "navigation",
+            "publish_navigation": True,
+            "metadata": {
+                "command_name": "goToCharging",
+                "command_id": command_id,
+                "station_id": station_id,
                 "status_type": "navigation",
             },
         }

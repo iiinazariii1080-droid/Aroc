@@ -7,17 +7,20 @@ ENV PYTHONPATH=/app
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
 
 # Copy requirements first for better caching
-COPY requirements.lock /app/
+COPY mqtt_command_service/requirements.lock /app/
 RUN pip install --no-cache-dir -r requirements.lock
 
 # Copy all Python files from root
-COPY *.py /app/
+COPY mqtt_command_service/*.py /app/
 
 # Copy app directory with all subdirectories
-COPY app/ /app/app/
+COPY mqtt_command_service/app/ /app/app/
 
 # Copy scripts directory
-COPY scripts/ /app/scripts/
+COPY mqtt_command_service/scripts/ /app/scripts/
+
+# Copy shared_config
+COPY shared_config/ /app/shared_config/
 
 # Create directories writable by appuser
 RUN mkdir -p /app/data /app/certs /app/logs && \

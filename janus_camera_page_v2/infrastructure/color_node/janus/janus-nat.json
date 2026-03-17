@@ -1,0 +1,15 @@
+{
+  "stun_server": "82.165.177.194",
+  "stun_port": 3478,
+  "turn_server": "82.165.177.194",
+  "turn_port": 3478,
+  "turn_type": "tcp",
+  "turn_user": "webrtc",
+  "turn_pwd": "__TURN_PWD__",
+  "nat_1_1_mapping": "87.156.23.54",
+  "ice_tcp": false,
+  "full_trickle": true,
+  "keep_private_host": true,
+  "min_port": 40000,
+  "max_port": 41000
+}

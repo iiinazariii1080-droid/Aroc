@@ -9,12 +9,10 @@ Modules:
 - profile_position: Profile Position mode (6060=1)
 - profile_velocity: Profile Velocity mode (6060=3)
 - jog: Hold-to-move built on profile velocity with TTL watchdog support
-- limits: Input validation and motion limits
 """
 
 from .homing import Homing, HomingConfig, HomingResult
 from .jog import JogConfig, JogController, JogState
-from .limits import MotionLimits, validate_limits
 from .profile_position import ProfilePosition, ProfilePositionConfig
 from .profile_velocity import ProfileVelocity, ProfileVelocityConfig
 
@@ -25,10 +23,8 @@ __all__ = [
     "JogConfig",
     "JogController",
     "JogState",
-    "MotionLimits",
     "ProfilePosition",
     "ProfilePositionConfig",
     "ProfileVelocity",
     "ProfileVelocityConfig",
-    "validate_limits",
 ]

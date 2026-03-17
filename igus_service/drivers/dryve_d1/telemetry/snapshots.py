@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from ..od.statusword import CiA402State
 
@@ -27,6 +26,3 @@ class DriveSnapshot:
     mode_display: int | None = None
 
     decoded_status: dict[str, bool] | None = None
-
-    # reserved extension point for vendor-specific metadata
-    extra: dict[str, Any] | None = None

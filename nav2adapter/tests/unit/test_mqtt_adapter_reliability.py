@@ -56,7 +56,7 @@ async def test_publish_command_disconnected_raises_and_increments_skipped() -> N
 
     with patch("services.mqtt_adapter.reliability_metrics") as metrics:
         with pytest.raises(MqttUnavailableError):
-            await adapter.publish_command("navigateTo", {"command_id": "c1"})
+            await adapter.publish_command("driveToPosition", {"command_id": "c1"})
 
         metrics.inc.assert_called_with("mqtt.publish.command.skipped_disconnected")
 

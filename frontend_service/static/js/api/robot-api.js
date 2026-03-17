@@ -17,15 +17,19 @@ class RobotApi extends ApiConnector {
 
   status() { return this._get('/status'); }
 
-  fetch_robot_positions_list() { return this._get('/robot_positions/list'); }
-  save_robot_position(payload) { return this._post('/robot_positions/save', payload); }
+  fetch_robot_positions_list() { return this._get('/waypoints/list'); }
+  save_robot_position(payload) { return this._post('/waypoints/save', payload); }
+  update_robot_position(position_id, payload) {
+    if (!position_id) throw new Error('positionId is required');
+    return this._request('PUT', `/waypoints/update?position_id=${encodeURIComponent(position_id)}`, payload);
+  }
   run_to_robot_position(position_id) {
     if (!position_id) throw new Error('positionId is required');
-    return this._post(`/robot_positions/run?position_id=${encodeURIComponent(position_id)}`, {});
+    return this._post(`/waypoints/run?position_id=${encodeURIComponent(position_id)}`, {});
   }
   delete_robot_position(position_id) {
     if (!position_id) throw new Error('positionId is required');
-    return this._post(`/robot_positions/delete?position_id=${encodeURIComponent(position_id)}`, {});
+    return this._post(`/waypoints/delete?position_id=${encodeURIComponent(position_id)}`, {});
   }
   set_ready() { return this._post('/set_ready', {}); }
 

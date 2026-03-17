@@ -178,21 +178,21 @@ class TestAehubRoutes:
         data = resp.json()
         assert "events" in data
 
-    def test_send_navigate_command_no_facade(self, test_client):
+    def test_send_drive_to_position_no_facade(self, test_client):
         """When navigation_facade is absent on app.state, expect 503."""
         with patch("routes.aehub.settings") as s:
             s.robot_id = "test-robot"
             # The fake startup does not set navigation_facade → 503
             resp = test_client.post(
-                "/api/v1/robots/test-robot/commands/navigateTo",
+                "/api/v1/robots/test-robot/commands/driveToPosition",
                 json={"target_id": "TestPose"},
             )
         assert resp.status_code == 503
 
-    def test_send_navigate_command_success(self, test_client):
-        """With a mocked facade, navigateTo should return 200."""
+    def test_send_drive_to_position_success(self, test_client):
+        """With a mocked facade, driveToPosition should return 200."""
         mock_facade = AsyncMock()
-        mock_facade.send_navigate_to = AsyncMock(
+        mock_facade.send_drive_to_position = AsyncMock(
             return_value=MagicMock(topic="nav/cmd", payload={"target": "A"})
         )
         with patch("routes.aehub.settings") as s:
@@ -200,7 +200,7 @@ class TestAehubRoutes:
             app.state.navigation_facade = mock_facade
             try:
                 resp = test_client.post(
-                    "/api/v1/robots/test-robot/commands/navigateTo",
+                    "/api/v1/robots/test-robot/commands/driveToPosition",
                     json={"target_id": "TestPose"},
                 )
             finally:

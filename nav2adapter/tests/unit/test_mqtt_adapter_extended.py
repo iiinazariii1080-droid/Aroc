@@ -384,7 +384,7 @@ class TestPublishErrorPaths:
         a.client.publish = AsyncMock(side_effect=MqttCodeError())
         with patch("services.mqtt_adapter.reliability_metrics"):
             with pytest.raises(MqttUnavailableError):
-                await a.publish_command("navigateTo", {"target_id": "A"})
+                await a.publish_command("driveToPosition", {"target_id": "A"})
 
     @pytest.mark.asyncio
     async def test_publish_command_os_error(self):
@@ -393,7 +393,7 @@ class TestPublishErrorPaths:
         a.client.publish = AsyncMock(side_effect=OSError("socket error"))
         with patch("services.mqtt_adapter.reliability_metrics"):
             with pytest.raises(MqttUnavailableError):
-                await a.publish_command("navigateTo", {"target_id": "A"})
+                await a.publish_command("driveToPosition", {"target_id": "A"})
 
     @pytest.mark.asyncio
     async def test_publish_command_unexpected_error(self):
@@ -402,7 +402,7 @@ class TestPublishErrorPaths:
         a.client.publish = AsyncMock(side_effect=ValueError("unexpected"))
         with patch("services.mqtt_adapter.reliability_metrics"):
             with pytest.raises(MqttUnavailableError):
-                await a.publish_command("navigateTo", {"target_id": "A"})
+                await a.publish_command("driveToPosition", {"target_id": "A"})
 
     @pytest.mark.asyncio
     async def test_publish_navigation_type_error_fallback(self):

@@ -27,8 +27,8 @@ services:
   # ---------- API Gateway (reverse proxy / aggregator) ----------
   api-gateway:
     build:
-      context: ./api_gateway_service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: api_gateway_service/Dockerfile
     container_name: api-gateway
     env_file: .env
     environment:
@@ -57,8 +57,8 @@ services:
   # NOTE: network_mode: host required for Modbus/TCP to physical motor on LAN
   igus-service:
     build:
-      context: ./igus_service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: igus_service/Dockerfile
     container_name: igus-service
     env_file: .env
     network_mode: host
@@ -120,7 +120,7 @@ services:
       SYMOVO_CONTAINER_IP: ${HOST_LAN_IP:-192.168.1.10}
       SYMOVO_CONTAINER_PORT: ${SYMOVO_PORT:-7905}
       SYMOVO_NAV2ADAPTER_HOST: ${HOST_LAN_IP:-192.168.1.10}
-      SYMOVO_ROBOT_ID: ${ROBOT_ID:-fahrdummy-01}
+      SYMOVO_ROBOT_ID: ${SYMOVO_ROBOT_ID:-fahrdummy-01}
       DEPTH_CAMERA_CONTAINER_IP: ${DEPTH_CAMERA_IP:-192.168.1.55}
       DEPTH_CAMERA_CONTAINER_PORT: "8900"
       XARM_WS_URL: "ws://${XARM_HARDWARE_IP:-192.168.1.220}:${XARM_WS_PORT:-18333}/ws?channel=prod&lang=en&v=1&id=robot"
@@ -143,15 +143,15 @@ services:
   # ---------- Nav2 Adapter (Symovo AGV) ----------
   symovo-service:
     build:
-      context: ./nav2adapter
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: nav2adapter/Dockerfile
     container_name: symovo-service
     env_file: .env
     environment:
       ROBOT_POSITIONS_DB_PATH: /app/data/database.db
       PERSISTENCE_PATH: /app/data/state.json
     volumes:
-      - nav2adapter-data:/app/data
+      - robot-service-data:/app/data
     ports:
       - "${SYMOVO_PORT:-7905}:${SYMOVO_PORT:-7905}"
       - "${TELEOP_PORT:-7906}:${TELEOP_PORT:-7906}"
@@ -173,8 +173,8 @@ services:
   # ---------- MQTT Command Service (bridge to AE.HUB) ----------
   mqtt-service:
     build:
-      context: ./mqtt_command_service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: mqtt_command_service/Dockerfile
     container_name: mqtt-service
     env_file: .env
     environment:
@@ -223,7 +223,6 @@ services:
 # ── Volumes ─────────────────────────────────────────────────────────────────
 volumes:
   robot-service-data:
-  nav2adapter-data:
   mqtt-data:
   mqtt-certs:
 

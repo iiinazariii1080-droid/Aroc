@@ -17,10 +17,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
+COPY api_gateway_service/requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
 
-COPY . /app
+COPY api_gateway_service/ /app/
+COPY shared_config/ /app/shared_config/
 
 # Create non-root user and ensure ownership for runtime user
 RUN useradd -m -u 10001 appuser && \

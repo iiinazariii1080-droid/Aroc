@@ -71,7 +71,7 @@ async def test_move_to_pulses_new_setpoint_set_then_clear() -> None:
         config=ProfilePositionConfig(
             verify_mode=False,
             mode_settle_s=0.0,
-            system_cycle_delay_s=0.0,
+            system_cycle_delay_s=0.001,
             poll_interval_s=0.0,
             move_timeout_s=0.5,
         ),
