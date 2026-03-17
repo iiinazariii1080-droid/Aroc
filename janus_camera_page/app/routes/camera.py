@@ -7,7 +7,7 @@ from email.utils import formatdate
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Response as _Response
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -276,21 +276,28 @@ def get_snapshot() -> FileResponse:
     )
 
 
-@router.get("/admin/camera/config", include_in_schema=False, dependencies=[ADMIN_DEPENDENCY])
-async def legacy_get_camera_stream_config() -> CameraStreamConfig:
+@router.get("/admin/camera/config", include_in_schema=False, deprecated=True, dependencies=[ADMIN_DEPENDENCY])
+async def legacy_get_camera_stream_config(response: _Response) -> CameraStreamConfig:
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = '</config>; rel="successor-version"'
     return await get_camera_stream_config()
 
 
-@router.post("/admin/camera/config", include_in_schema=False, dependencies=[ADMIN_DEPENDENCY])
-async def legacy_update_camera_stream_config(cfg: CameraStreamConfig) -> CameraStreamConfig:
+@router.post("/admin/camera/config", include_in_schema=False, deprecated=True, dependencies=[ADMIN_DEPENDENCY])
+async def legacy_update_camera_stream_config(cfg: CameraStreamConfig, response: _Response) -> CameraStreamConfig:
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = '</config>; rel="successor-version"'
     return await update_camera_stream_config(cfg)
 
 
-@router.get("/admin/camera/modes", include_in_schema=False)
-def legacy_get_camera_modes() -> Dict[str, Any]:
+@router.get("/admin/camera/modes", include_in_schema=False, deprecated=True)
+def legacy_get_camera_modes(response: _Response) -> Dict[str, Any]:
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = '</modes>; rel="successor-version"'
     return get_camera_modes()
 
 
-@router.get("/snapshot.jpg", include_in_schema=False)
-def legacy_get_snapshot() -> FileResponse:
+@router.get("/snapshot.jpg", include_in_schema=False, deprecated=True)
+def legacy_get_snapshot(response: _Response) -> FileResponse:
+    response.headers["Deprecation"] = "true"
     return get_snapshot()

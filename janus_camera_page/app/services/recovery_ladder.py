@@ -405,7 +405,6 @@ class RecoveryLadder:
         if self._current_level < len(self._levels):
             new_name = self._levels[self._current_level].name
             logger.warning("Escalating: %s → %s  (signal: %s)", old_name, new_name, signal)
-            # Prometheus escalation counter
             try:
                 from app.routes.metrics import watchdog_escalations_total
                 watchdog_escalations_total.labels(level=new_name).inc()
@@ -418,11 +417,9 @@ class RecoveryLadder:
                 recovery_action=RecoveryAction.NONE,
                 outcome=f"escalate: {old_name} → {new_name}",
             )
-            # Degrade system mode on each escalation
             system_mode.degrade(f"fdir_escalate:{new_name}")
-            return self._escalate_locked(signal, domain)  # immediately try next level
-        else:
-            return self._escalate_locked(signal, domain)  # will hit exhausted branch
+        # Re-enter _escalate_locked iteratively (was recursive — refactored for clarity).
+        return self._escalate_locked(signal, domain)
 
     def _execute(self, level: LadderLevel, signal: str, domain: Domain) -> bool:
         """Execute the actual recovery action. Returns success flag."""

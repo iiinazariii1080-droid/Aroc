@@ -14,7 +14,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Dict, List, Literal, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, Request, Response as _Response, WebSocket
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 import requests
@@ -476,16 +476,22 @@ async def janus_ws_proxy(client_ws: WebSocket) -> None:
         logging.error("WS proxy error [url=%s]: %s", upstream_url, exc, exc_info=True)
         await client_ws.close()
 
-@router.get("/janus_healthz", include_in_schema=False)
-def legacy_janus_healthz() -> Dict[str, object]:
+@router.get("/janus_healthz", include_in_schema=False, deprecated=True)
+def legacy_janus_healthz(response: _Response) -> Dict[str, object]:
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = '</janus/healthz>; rel="successor-version"'
     return janus_healthz()
 
-@router.get("/admin/janus-nat", include_in_schema=False, response_model=JanusNatConfig, dependencies=[ADMIN_DEPENDENCY])
-async def legacy_get_janus_nat_config():
+@router.get("/admin/janus-nat", include_in_schema=False, deprecated=True, response_model=JanusNatConfig, dependencies=[ADMIN_DEPENDENCY])
+async def legacy_get_janus_nat_config(response: _Response):
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = '</janus/nat>; rel="successor-version"'
     return await get_janus_nat_config()
 
-@router.post("/admin/janus-nat", include_in_schema=False, response_model=JanusNatConfig, dependencies=[ADMIN_DEPENDENCY])
-async def legacy_update_janus_nat_config(new_cfg: JanusNatConfig):
+@router.post("/admin/janus-nat", include_in_schema=False, deprecated=True, response_model=JanusNatConfig, dependencies=[ADMIN_DEPENDENCY])
+async def legacy_update_janus_nat_config(new_cfg: JanusNatConfig, response: _Response):
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = '</janus/nat>; rel="successor-version"'
     return await update_janus_nat_config(new_cfg)
 
 @router.get(f"/api/v1/{CAM_TYPE}/janus-ws", include_in_schema=False)
