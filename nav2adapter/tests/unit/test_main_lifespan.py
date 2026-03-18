@@ -101,21 +101,6 @@ class TestStaticRoutes:
             resp = test_client.get("/map_viewer.html")
         assert resp.status_code == 404
 
-    def test_robot_monitor_not_found(self, test_client):
-        with patch("main.STATIC_DIR", "/tmp/__nonexistent_static_dir__"):
-            resp = test_client.get("/robot_monitor.html")
-        assert resp.status_code == 404
-
-    def test_nav_console_not_found(self, test_client):
-        with patch("main.STATIC_DIR", "/tmp/__nonexistent_static_dir__"):
-            resp = test_client.get("/nav_console.html")
-        assert resp.status_code == 404
-
-    def test_teleop_console_not_found(self, test_client):
-        with patch("main.STATIC_DIR", "/tmp/__nonexistent_static_dir__"):
-            resp = test_client.get("/teleop_console.html")
-        assert resp.status_code == 404
-
     def test_dashboard_exists(self, test_client, tmp_path):
         html_file = tmp_path / "dashboard.html"
         html_file.write_text("<html>dash</html>")
@@ -128,25 +113,4 @@ class TestStaticRoutes:
         html_file.write_text("<html>map</html>")
         with patch("main.STATIC_DIR", str(tmp_path)):
             resp = test_client.get("/map_viewer.html")
-        assert resp.status_code == 200
-
-    def test_robot_monitor_exists(self, test_client, tmp_path):
-        html_file = tmp_path / "robot_monitor.html"
-        html_file.write_text("<html>monitor</html>")
-        with patch("main.STATIC_DIR", str(tmp_path)):
-            resp = test_client.get("/robot_monitor.html")
-        assert resp.status_code == 200
-
-    def test_nav_console_exists(self, test_client, tmp_path):
-        html_file = tmp_path / "nav_console.html"
-        html_file.write_text("<html>nav</html>")
-        with patch("main.STATIC_DIR", str(tmp_path)):
-            resp = test_client.get("/nav_console.html")
-        assert resp.status_code == 200
-
-    def test_teleop_console_exists(self, test_client, tmp_path):
-        html_file = tmp_path / "teleop_console.html"
-        html_file.write_text("<html>teleop</html>")
-        with patch("main.STATIC_DIR", str(tmp_path)):
-            resp = test_client.get("/teleop_console.html")
         assert resp.status_code == 200

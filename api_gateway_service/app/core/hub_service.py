@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -9,9 +11,33 @@ from fastapi import FastAPI, HTTPException
 from app.core.auth_client import get_auth_client
 from app.core.auth_service import AuthSetupError, load_auth_context, request_robot_token as auth_request_robot_token
 from app.core.hub_state import hub_state_store
-from app.core.http_client import get_http_client
+from app.core.lifecycle import get_http_client
 from app.core.secret_store import robot_secret_store
 from app.core.http_proxy_utils import join_url
+
+
+def _validate_target_url(url: str) -> None:
+    """Block SSRF attempts by rejecting loopback and link-local addresses.
+
+    Cloud metadata endpoints (169.254.x.x) and localhost are never valid
+    targets for connection-test / demo-auth pings.
+    """
+    parsed = urlparse(url)
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(status_code=400, detail="Invalid target URL: no host")
+    # Block obvious localhost
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        raise HTTPException(status_code=400, detail="Target URL must not point to localhost")
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return  # hostname, not IP — allow (DNS resolution is fine)
+    if addr.is_loopback or addr.is_link_local:
+        raise HTTPException(
+            status_code=400,
+            detail="Target URL must not point to loopback or link-local addresses",
+        )
 
 
 async def require_hub_config() -> Dict[str, Any]:
@@ -78,6 +104,7 @@ async def perform_robot_auth(
 
 
 async def run_connection_test(app: FastAPI, target_url: str) -> Dict[str, Any]:
+    _validate_target_url(target_url)
     client = get_http_client(app)
     started = time.perf_counter()
     try:
@@ -100,6 +127,7 @@ async def run_connection_test(app: FastAPI, target_url: str) -> Dict[str, Any]:
 
 
 async def run_demo_ping(app: FastAPI, token: str, ping_endpoint: str) -> Dict[str, Any]:
+    _validate_target_url(ping_endpoint)
     client = get_http_client(app)
     started = time.perf_counter()
     try:

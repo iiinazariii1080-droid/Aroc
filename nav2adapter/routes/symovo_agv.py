@@ -1,5 +1,5 @@
 """
-Оптимизированные роуты для Symovo AGV.
+Optimized routes for Symovo AGV.
 """
 from typing import Any
 import logging
@@ -12,8 +12,7 @@ _logger = logging.getLogger(__name__)
 from routes.decorators import safe_getter
 from services.symovo_service import SymovoAgvClient, normalize_symovo_status
 from models.api_types import ErrorStatus
-from services.state_store import state_store
-from app.dependencies import SymovoClient
+from app.dependencies import SymovoClient, InjectedStateStore, InjectedSafetyTracker
 from app.config import settings
 from exceptions import DeviceConnectionError
 from models.api_types import (
@@ -49,7 +48,7 @@ router = APIRouter(
 )
 @safe_getter(GenericResponse)
 async def clear_all_transports(client: SymovoClient) -> Any:
-    """Очистить все транспортные задачи."""
+    """Clear all transport tasks."""
     result = await client.clear_all_transports()
     if isinstance(result, list):
         return {"status": "ok", "deleted": len(result)}
@@ -67,32 +66,24 @@ async def clear_all_transports(client: SymovoClient) -> Any:
     response_model_exclude_none=True,
 )
 @safe_getter(GenericResponse)
-async def get_pose(client: SymovoClient) -> Any:
-    """Получить текущую позицию AGV (из фонового кеша, fallback на прямой запрос)."""
-    import logging as _logging
-    _log = _logging.getLogger(__name__)
-
+async def get_pose(client: SymovoClient, store: InjectedStateStore) -> Any:
+    """Get current AGV pose (from background cache, fallback to direct request)."""
     # Try background cache first
-    raw = await state_store.get_last_raw_pose()
-    age = await state_store.get_last_raw_pose_age_s()
+    raw = await store.get_last_raw_pose()
+    age = await store.get_last_raw_pose_age_s()
     max_age = float(settings.cache_max_age_s)
 
     if raw is None or age > max_age:
-        _log.debug("Pose cache miss (raw=%s, age=%.1fs, max=%.1fs) — falling back to direct request", raw is not None, age, max_age)
+        _logger.debug("Pose cache miss (raw=%s, age=%.1fs, max=%.1fs) — falling back to direct request", raw is not None, age, max_age)
         raw = await client.pose()
         if isinstance(raw, dict):
-            await state_store.set_last_raw_pose(raw)
+            await store.set_last_raw_pose(raw)
 
     if isinstance(raw, dict):
         normalized = normalize_symovo_status(raw)
         if isinstance(normalized, ErrorStatus):
             raise HTTPException(status_code=502, detail=normalized.model_dump())
-        if hasattr(normalized, 'dict'):
-            return normalized.dict()
-        elif hasattr(normalized, 'model_dump'):
-            return normalized.model_dump()
-        else:
-            return raw
+        return normalized.model_dump()
     raise HTTPException(status_code=500, detail={"error": "Unexpected pose payload"})
 
 
@@ -108,32 +99,24 @@ async def get_pose(client: SymovoClient) -> Any:
     response_model_exclude_none=True,
 )
 @safe_getter(GenericResponse)
-async def get_status(client: SymovoClient) -> Any:
-    """Получить статус AGV (из фонового кеша, fallback на прямой запрос)."""
-    import logging as _logging
-    _log = _logging.getLogger(__name__)
-
+async def get_status(client: SymovoClient, store: InjectedStateStore) -> Any:
+    """Get AGV status (from background cache, fallback to direct request)."""
     # Try background cache first
-    raw = await state_store.get_last_raw_status()
-    age = await state_store.get_last_raw_status_age_s()
+    raw = await store.get_last_raw_status()
+    age = await store.get_last_raw_status_age_s()
     max_age = float(settings.cache_max_age_s)
 
     if raw is None or age > max_age:
-        _log.debug("Status cache miss (raw=%s, age=%.1fs, max=%.1fs) — falling back to direct request", raw is not None, age, max_age)
+        _logger.debug("Status cache miss (raw=%s, age=%.1fs, max=%.1fs) — falling back to direct request", raw is not None, age, max_age)
         raw = await client.status()
         if isinstance(raw, dict):
-            await state_store.set_last_raw_status(raw)
+            await store.set_last_raw_status(raw)
 
     if isinstance(raw, dict):
         normalized = normalize_symovo_status(raw)
         if isinstance(normalized, ErrorStatus):
             raise HTTPException(status_code=502, detail=normalized.model_dump())
-        if hasattr(normalized, 'dict'):
-            return normalized.dict()
-        elif hasattr(normalized, 'model_dump'):
-            return normalized.model_dump()
-        else:
-            return raw
+        return normalized.model_dump()
     raise HTTPException(status_code=500, detail={"error": "Unexpected status payload"})
 
 
@@ -242,21 +225,8 @@ async def reset_software_fuse(client: SymovoClient) -> Any:
     response_model_exclude_none=True,
 )
 @safe_getter(GenericResponse)
-async def get_safety_state() -> Any:
-    """Return cached safety state from the background tracker."""
-    raw = await state_store.get_last_raw_status()
-    if raw is None:
-        return {
-            "status": "unknown",
-            "safety_lockout": True,
-            "reason": "no_data",
-            "state_flags": {},
-            "recovery_available": False,
-        }
-
-    from services.safety_state_tracker import SafetyStateTracker
-    tracker = SafetyStateTracker()
-    tracker.evaluate(raw)
+async def get_safety_state(tracker: InjectedSafetyTracker) -> Any:
+    """Return safety state from the shared background tracker."""
     state = tracker.current_state()
     return {"status": "ok", **state.to_dict()}
 
@@ -270,7 +240,7 @@ async def get_safety_state() -> Any:
 )
 @safe_getter(GenericResponse)
 async def get_charging_stations(client: SymovoClient) -> Any:
-    """Получить список всех зарядных станций."""
+    """Get list of all charging stations."""
     data = await client.get_charging_stations()
     if isinstance(data, dict):
         return data
@@ -291,13 +261,29 @@ async def go_to_charging_station(
     client: SymovoClient,
     station_id: int = Path(..., description="ID of the charging station")
 ) -> Any:
-    """Перейти к зарядной станции."""
-    # Включаем станцию
+    """Go to charging station."""
+    # Enable the station
     result = await client.set_charging_station_enabled(station_id, active=True)
 
     if isinstance(result, dict):
         return result
     return {"station_id": station_id, "activated": bool(result)}
+
+
+@router.post(
+    "/charging_stations/disable_all",
+    response_model=GenericResponse,
+    summary="Deactivate all charging stations",
+    description=(
+        "Deactivates every charging station so the AGV does not return to the dock. "
+        "Waits up to 5 s for the controller to confirm INACTIVE state."
+    ),
+)
+@safe_getter(GenericResponse)
+async def disable_all_charging_stations(client: SymovoClient) -> Any:
+    results = await client.disable_all_charging_stations()
+    ok = await client.wait_until_charging_stations_inactive(timeout=5.0)
+    return {"deactivated": len(results), "all_inactive": ok}
 
 
 @router.get(
@@ -311,7 +297,7 @@ async def go_to_charging_station(
 )
 @safe_getter(GenericResponse)
 async def get_transport(transport_id: int, client: SymovoClient) -> Any:
-    """Получить информацию о транспортной задаче по ID."""
+    """Get transport task info by ID."""
     data = await client.transport_get(transport_id)
     if isinstance(data, dict):
         return data
@@ -329,7 +315,7 @@ async def get_transport(transport_id: int, client: SymovoClient) -> Any:
 )
 @safe_getter(GenericResponse)
 async def wait_transport_changes(transport_id: int, client: SymovoClient) -> Any:
-    """Ожидать изменения в транспортной задаче."""
+    """Wait for transport task changes."""
     data = await client.transport_wait_for_changes(transport_id)
     if isinstance(data, dict):
         return data
@@ -345,7 +331,7 @@ async def wait_transport_changes(transport_id: int, client: SymovoClient) -> Any
 )
 @safe_getter(GenericResponse)
 async def get_map(client: SymovoClient) -> Any:
-    """Получить список доступных карт."""
+    """Get list of available maps."""
     data = await client.map()
     if isinstance(data, dict):
         return data
@@ -362,7 +348,7 @@ async def get_map_png(
     client: SymovoClient,
     map_id: int = Path(..., description="Map ID"),
 ):
-    """Получить карту в виде PNG изображения."""
+    """Get map as PNG image."""
     try:
         from fastapi.responses import Response
 
@@ -394,7 +380,7 @@ async def get_map_png(
 )
 @safe_getter(GenericResponse)
 async def go_to_pose(req: GoToPoseRequest, client: SymovoClient) -> Any:
-    """Переместить AGV в указанную позицию."""
+    """Move AGV to the specified pose."""
     # Prefer transport API, which is stable on some firmware versions
     rad = req.theta_deg * math.pi / 180.0
     data = await client.transport_move_to_pose(
@@ -408,7 +394,7 @@ async def go_to_pose(req: GoToPoseRequest, client: SymovoClient) -> Any:
     # P1-1: when wait=True, lock is already released; poll for completion outside it.
     if isinstance(data, dict) and "_wait_transport_id" in data:
         tid = data.pop("_wait_transport_id")
-        data = await client._poll_transport_completion(tid)
+        data = await client.poll_transport_completion(tid)
     if isinstance(data, dict):
         return data
     return {"result": data}
@@ -538,22 +524,6 @@ async def get_lidar_scan_png_v1(client: SymovoClient) -> Response:
     except Exception as e:
         _logger.error("Error fetching lidar scan PNG: %s", e)
         raise HTTPException(status_code=503, detail={"error": {"type": "controller_error", "msg": "Controller communication error"}})
-
-
-@router.get(
-    "/api/v1/symovo/lidar/raw",
-    response_model=GenericResponse,
-    summary="[v1] Raw lidar capability",
-    description="Read-only capability endpoint. Raw ranges/point-cloud are not available in current adapter.",
-)
-@safe_getter(GenericResponse)
-async def get_lidar_raw_v1() -> Any:
-    return {
-        "supported": False,
-        "formats": [],
-        "message": "Raw lidar data is not available in nav2adapter; use scan.png and SLAM endpoints.",
-        "source": "symovo-http",
-    }
 
 
 @router.get(

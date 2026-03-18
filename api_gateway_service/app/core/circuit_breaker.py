@@ -11,28 +11,30 @@ HALF-OPEN – one probe request is allowed through.
 
 Usage (inside proxy)::
 
-    from app.core.circuit_breaker import circuit_breakers
+    from app.core.circuit_breaker import get_breaker
 
-    cb = circuit_breakers.get(service)
-    if not cb.allow_request():
+    cb = await get_breaker(service)
+    if not await cb.allow_request():
         return JSONResponse(status_code=502, ...)
     try:
         resp = await stream_request(...)
-        cb.record_success()
+        await cb.record_success()
     except ...:
-        cb.record_failure()
+        await cb.record_failure()
         ...
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from threading import Lock
 from typing import Dict
+
+from .service_metrics import PROM_CB_STATE
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,9 @@ class _State(Enum):
     HALF_OPEN = "half_open"
 
 
+_CB_STATE_VALUE = {_State.CLOSED: 0, _State.OPEN: 1, _State.HALF_OPEN: 2}
+
+
 # ── Tunables (env-overridable) ──────────────────────────────────
 FAILURE_THRESHOLD = int(os.getenv("CB_FAILURE_THRESHOLD", "3"))
 RECOVERY_TIMEOUT_S = float(os.getenv("CB_RECOVERY_TIMEOUT", "15.0"))
@@ -51,7 +56,13 @@ SUCCESS_THRESHOLD = int(os.getenv("CB_SUCCESS_THRESHOLD", "1"))
 
 @dataclass
 class CircuitBreaker:
-    """Lightweight per-service circuit breaker (sync-safe, single-process)."""
+    """Lightweight per-service circuit breaker (async-safe, single-process).
+
+    All state mutations happen under an asyncio.Lock so the event loop
+    is never blocked.  For callers that need a sync API (e.g. health
+    endpoints), use the ``*_sync`` helpers which are safe because all
+    operations under the lock are pure in-memory with no I/O.
+    """
 
     service: str
     failure_threshold: int = FAILURE_THRESHOLD
@@ -63,13 +74,13 @@ class CircuitBreaker:
     _success_count: int = field(default=0, init=False, repr=False)
     _last_failure_time: float = field(default=0.0, init=False, repr=False)
     _half_open_since: float = field(default=0.0, init=False, repr=False)
-    _lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     # ── Public API ──────────────────────────────────────────────
 
-    def allow_request(self) -> bool:
+    async def allow_request(self) -> bool:
         """Return *True* if the request should be forwarded upstream."""
-        with self._lock:
+        async with self._lock:
             if self._state is _State.CLOSED:
                 return True
 
@@ -78,6 +89,7 @@ class CircuitBreaker:
                     self._state = _State.HALF_OPEN
                     self._success_count = 0
                     self._half_open_since = time.monotonic()
+                    self._emit_prom_state()
                     logger.info("Circuit %s → HALF_OPEN (probing)", self.service)
                     return True
                 return False
@@ -86,40 +98,47 @@ class CircuitBreaker:
             if time.monotonic() - self._half_open_since >= self.recovery_timeout_s:
                 self._state = _State.OPEN
                 self._last_failure_time = time.monotonic()
+                self._emit_prom_state()
                 logger.warning("Circuit %s → OPEN (probe timeout)", self.service)
                 return False
             return True
 
-    def record_success(self) -> None:
-        with self._lock:
+    def _emit_prom_state(self) -> None:
+        PROM_CB_STATE.labels(service=self.service).set(_CB_STATE_VALUE[self._state])
+
+    async def record_success(self) -> None:
+        async with self._lock:
             if self._state is _State.HALF_OPEN:
                 self._success_count += 1
                 if self._success_count >= self.success_threshold:
                     self._state = _State.CLOSED
                     self._failure_count = 0
+                    self._emit_prom_state()
                     logger.info("Circuit %s → CLOSED", self.service)
             else:
                 # Reset failure count on any success in CLOSED state
                 self._failure_count = 0
 
-    def record_failure(self) -> None:
-        with self._lock:
+    async def record_failure(self) -> None:
+        async with self._lock:
             self._failure_count += 1
             self._last_failure_time = time.monotonic()
 
             if self._state is _State.HALF_OPEN:
                 self._state = _State.OPEN
+                self._emit_prom_state()
                 logger.warning("Circuit %s → OPEN (probe failed)", self.service)
             elif self._failure_count >= self.failure_threshold:
                 self._state = _State.OPEN
+                self._emit_prom_state()
                 logger.warning(
                     "Circuit %s → OPEN after %d consecutive failures",
                     self.service,
                     self._failure_count,
                 )
 
-    def describe(self) -> Dict:
-        with self._lock:
+    async def describe(self) -> Dict:
+        async with self._lock:
             return {
                 "service": self.service,
                 "state": self._state.value,
@@ -132,18 +151,22 @@ class CircuitBreaker:
 
 # ── Global registry (one CB per service name) ──────────────────
 _breakers: Dict[str, CircuitBreaker] = {}
-_registry_lock = Lock()
+_registry_lock = asyncio.Lock()
 
 
-def get_breaker(service: str) -> CircuitBreaker:
+async def get_breaker(service: str) -> CircuitBreaker:
     """Get or create a CircuitBreaker for *service*."""
-    if service not in _breakers:
-        with _registry_lock:
-            if service not in _breakers:
-                _breakers[service] = CircuitBreaker(service=service)
+    if service in _breakers:
+        return _breakers[service]
+    async with _registry_lock:
+        if service not in _breakers:
+            _breakers[service] = CircuitBreaker(service=service)
     return _breakers[service]
 
 
-def all_breakers() -> Dict[str, Dict]:
+async def all_breakers() -> Dict[str, Dict]:
     """Snapshot of every known breaker (for health endpoints)."""
-    return {name: cb.describe() for name, cb in _breakers.items()}
+    result = {}
+    for name, cb in _breakers.items():
+        result[name] = await cb.describe()
+    return result

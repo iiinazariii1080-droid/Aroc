@@ -1,146 +1,145 @@
-"""Tests for CommandDeduplicator — in-flight guard and result history."""
+"""Tests for CommandDeduplicator: in-flight guard and result history."""
 
 import threading
 import time
 
 from command_dedup import CommandDeduplicator
 
-# ---------------------------------------------------------------------------
-# In-flight guard
-# ---------------------------------------------------------------------------
 
 class TestTryStart:
     def test_first_call_returns_true(self):
         d = CommandDeduplicator()
         assert d.try_start("cmd-1") is True
 
-    def test_duplicate_returns_false(self):
+    def test_duplicate_call_returns_false(self):
         d = CommandDeduplicator()
         d.try_start("cmd-1")
         assert d.try_start("cmd-1") is False
 
-    def test_different_ids_both_succeed(self):
+    def test_empty_command_id_always_returns_true(self):
+        d = CommandDeduplicator()
+        assert d.try_start("") is True
+        assert d.try_start("") is True
+
+    def test_different_ids_are_independent(self):
         d = CommandDeduplicator()
         assert d.try_start("cmd-1") is True
         assert d.try_start("cmd-2") is True
 
-    def test_empty_id_always_returns_true(self):
-        d = CommandDeduplicator()
-        assert d.try_start("") is True
-        assert d.try_start("") is True
-
 
 class TestFinish:
-    def test_releases_lock(self):
+    def test_finish_allows_restart(self):
         d = CommandDeduplicator()
         d.try_start("cmd-1")
         d.finish("cmd-1")
-        # Should be able to start again
         assert d.try_start("cmd-1") is True
 
     def test_finish_none_is_noop(self):
         d = CommandDeduplicator()
-        d.finish(None)  # Should not raise
+        d.finish(None)  # should not raise
+
+    def test_finish_empty_string_is_noop(self):
+        d = CommandDeduplicator()
+        d.finish("")  # should not raise
 
     def test_finish_unknown_id_is_noop(self):
         d = CommandDeduplicator()
-        d.finish("unknown")  # Should not raise
+        d.finish("never-started")  # should not raise
 
 
 class TestInFlightCount:
-    def test_zero_initially(self):
+    def test_count_starts_at_zero(self):
         d = CommandDeduplicator()
         assert d.in_flight_count == 0
 
-    def test_increments_on_start(self):
+    def test_count_increments(self):
         d = CommandDeduplicator()
         d.try_start("cmd-1")
         d.try_start("cmd-2")
         assert d.in_flight_count == 2
 
-    def test_decrements_on_finish(self):
+    def test_count_decrements_on_finish(self):
         d = CommandDeduplicator()
         d.try_start("cmd-1")
+        d.try_start("cmd-2")
         d.finish("cmd-1")
+        assert d.in_flight_count == 1
+
+    def test_empty_id_not_counted(self):
+        d = CommandDeduplicator()
+        d.try_start("")
         assert d.in_flight_count == 0
 
 
-# ---------------------------------------------------------------------------
-# Result history
-# ---------------------------------------------------------------------------
-
 class TestStore:
-    def test_stores_and_retrieves(self):
+    def test_store_and_get(self):
         d = CommandDeduplicator()
-        d.store("cmd-1", {"success": True, "data": 42})
+        payload = {"service": "robot", "success": True}
+        d.store("cmd-1", payload)
         result = d.get("cmd-1")
-        assert result == {"success": True, "data": 42}
+        assert result == payload
 
-    def test_deep_copies_payload(self):
+    def test_stored_payload_is_deep_copied(self):
         d = CommandDeduplicator()
-        original = {"nested": {"value": 1}}
-        d.store("cmd-1", original)
-        # Mutate original — should not affect stored copy
-        original["nested"]["value"] = 999
+        payload = {"service": "robot", "nested": {"key": "value"}}
+        d.store("cmd-1", payload)
+        payload["nested"]["key"] = "mutated"
         result = d.get("cmd-1")
-        assert result["nested"]["value"] == 1
+        assert result["nested"]["key"] == "value"
 
     def test_get_returns_deep_copy(self):
         d = CommandDeduplicator()
-        d.store("cmd-1", {"nested": {"value": 1}})
-        r1 = d.get("cmd-1")
-        r2 = d.get("cmd-1")
-        assert r1 is not r2
-        assert r1 == r2
+        d.store("cmd-1", {"data": [1, 2, 3]})
+        result1 = d.get("cmd-1")
+        result2 = d.get("cmd-1")
+        assert result1 == result2
+        assert result1 is not result2
 
-    def test_empty_id_is_noop(self):
+    def test_store_empty_id_is_noop(self):
         d = CommandDeduplicator()
-        d.store("", {"data": 1})
+        d.store("", {"data": "value"})
         assert d.get("") is None
 
 
-class TestHistoryExpiry:
+class TestGetExpiry:
     def test_expired_entry_returns_none(self):
-        d = CommandDeduplicator(history_ttl=0.1)
-        d.store("cmd-1", {"data": 1})
-        time.sleep(0.15)
+        d = CommandDeduplicator(history_ttl=0.05)
+        d.store("cmd-1", {"data": "value"})
+        time.sleep(0.1)
         assert d.get("cmd-1") is None
 
-    def test_non_expired_entry_returns_value(self):
+    def test_non_expired_entry_returns_payload(self):
         d = CommandDeduplicator(history_ttl=10.0)
-        d.store("cmd-1", {"data": 1})
-        assert d.get("cmd-1") == {"data": 1}
+        d.store("cmd-1", {"data": "value"})
+        assert d.get("cmd-1") is not None
+
+    def test_absent_entry_returns_none(self):
+        d = CommandDeduplicator()
+        assert d.get("nonexistent") is None
 
 
-class TestHistorySizeCap:
-    def test_evicts_oldest_when_over_cap(self):
-        d = CommandDeduplicator(max_history=3)
+class TestMaxHistory:
+    def test_excess_entries_evicted(self):
+        d = CommandDeduplicator(max_history=3, history_ttl=60.0)
         for i in range(5):
-            d.store(f"cmd-{i}", {"i": i})
-            time.sleep(0.01)  # ensure distinct timestamps
-        # Oldest 2 should be evicted
+            d.store(f"cmd-{i}", {"index": i})
+        # Oldest entries (cmd-0, cmd-1) should be evicted
         assert d.get("cmd-0") is None
         assert d.get("cmd-1") is None
-        # Newest 3 should remain
         assert d.get("cmd-2") is not None
         assert d.get("cmd-3") is not None
         assert d.get("cmd-4") is not None
 
 
-# ---------------------------------------------------------------------------
-# Thread safety
-# ---------------------------------------------------------------------------
-
 class TestThreadSafety:
     def test_concurrent_try_start(self):
-        """Only one of N threads should win try_start for the same command_id."""
         d = CommandDeduplicator()
         results = []
         barrier = threading.Barrier(10)
 
         def worker():
             barrier.wait()
-            results.append(d.try_start("cmd-race"))
+            results.append(d.try_start("shared-cmd"))
 
         threads = [threading.Thread(target=worker) for _ in range(10)]
         for t in threads:
@@ -148,5 +147,51 @@ class TestThreadSafety:
         for t in threads:
             t.join()
 
+        # Exactly one thread should succeed
         assert results.count(True) == 1
         assert results.count(False) == 9
+
+
+class TestConcurrentStoreAndGet:
+    """Test concurrent store/get operations."""
+
+    def test_concurrent_store_different_ids(self):
+        """Multiple threads storing different command IDs concurrently."""
+        dedup = CommandDeduplicator(history_ttl=60, max_history=100)
+        results = []
+        barrier = threading.Barrier(10)
+
+        def worker(i):
+            barrier.wait()
+            cid = f"cmd-{i}"
+            dedup.try_start(cid)
+            dedup.store(cid, {"status": i})
+            results.append(dedup.get(cid))
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert len(results) == 10
+        assert all(r is not None for r in results)
+
+    def test_concurrent_try_start_same_id(self):
+        """Only one thread wins try_start for the same command_id."""
+        dedup = CommandDeduplicator(history_ttl=60, max_history=100)
+        winners = []
+        barrier = threading.Barrier(10)
+
+        def worker():
+            barrier.wait()
+            if dedup.try_start("same-cmd"):
+                winners.append(True)
+
+        threads = [threading.Thread(target=worker) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert len(winners) == 1  # Exactly one winner

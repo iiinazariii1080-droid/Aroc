@@ -15,7 +15,9 @@ def _skip_grace_period():
     """Ensure no test is affected by the startup grace period."""
     watchdogs._STARTUP_TS = 0  # far in the past
     watchdogs._last_escalation_ts = 0.0
+    watchdogs._stop_event.clear()
     yield
+    watchdogs._stop_event.clear()
     watchdogs._STARTUP_TS = time.time()
 
 
@@ -37,11 +39,14 @@ class TestStartJanusWatchdog:
 
 
 class TestWatchdogLoop:
-    @patch("app.services.watchdogs.time.sleep", side_effect=StopIteration)
+    def _stop_after_one(self, _timeout=None):
+        """Signal the loop to stop after one iteration."""
+        watchdogs._stop_event.set()
+
     @patch("app.services.watchdogs.get_ladder")
     @patch("app.services.watchdogs.janus.janus_summary")
     @patch("app.services.watchdogs.get_settings")
-    def test_stale_video_triggers_escalate(self, mock_settings, mock_summary, mock_ladder, _):
+    def test_stale_video_triggers_escalate(self, mock_settings, mock_summary, mock_ladder):
         mock_settings.return_value = MagicMock(
             janus_mount_id=1, watchdog_stale_ms=5000, watchdog_interval_sec=5,
             watchdog_grace_sec=0,
@@ -49,15 +54,14 @@ class TestWatchdogLoop:
         mock_summary.return_value = {"video_age_ms": 99999}
         ladder_inst = MagicMock()
         mock_ladder.return_value = ladder_inst
-        with pytest.raises(StopIteration):
+        with patch.object(watchdogs._stop_event, "wait", side_effect=self._stop_after_one):
             watchdogs._watchdog_loop()
         ladder_inst.escalate.assert_called_once()
 
-    @patch("app.services.watchdogs.time.sleep", side_effect=StopIteration)
     @patch("app.services.watchdogs.get_ladder")
     @patch("app.services.watchdogs.janus.janus_summary")
     @patch("app.services.watchdogs.get_settings")
-    def test_fresh_video_no_escalate(self, mock_settings, mock_summary, mock_ladder, _):
+    def test_fresh_video_no_escalate(self, mock_settings, mock_summary, mock_ladder):
         mock_settings.return_value = MagicMock(
             janus_mount_id=1, watchdog_stale_ms=5000, watchdog_interval_sec=5,
             watchdog_grace_sec=0,
@@ -65,22 +69,21 @@ class TestWatchdogLoop:
         mock_summary.return_value = {"video_age_ms": 100}
         ladder_inst = MagicMock()
         mock_ladder.return_value = ladder_inst
-        with pytest.raises(StopIteration):
+        with patch.object(watchdogs._stop_event, "wait", side_effect=self._stop_after_one):
             watchdogs._watchdog_loop()
         ladder_inst.escalate.assert_not_called()
 
-    @patch("app.services.watchdogs.time.sleep", side_effect=StopIteration)
     @patch("app.services.watchdogs.get_ladder")
     @patch("app.services.watchdogs.janus.janus_summary", side_effect=Exception("fail"))
     @patch("app.services.watchdogs.get_settings")
-    def test_exception_does_not_crash(self, mock_settings, mock_summary, mock_ladder, _):
+    def test_exception_does_not_crash(self, mock_settings, mock_summary, mock_ladder):
         mock_settings.return_value = MagicMock(
             janus_mount_id=1, watchdog_stale_ms=5000, watchdog_interval_sec=5,
             watchdog_grace_sec=0,
         )
         ladder_inst = MagicMock()
         mock_ladder.return_value = ladder_inst
-        with pytest.raises(StopIteration):
+        with patch.object(watchdogs._stop_event, "wait", side_effect=self._stop_after_one):
             watchdogs._watchdog_loop()
 
 
@@ -115,17 +118,12 @@ class TestSnapshotWatchdogLoop:
         )
         ladder_inst = MagicMock()
         mock_ladder.return_value = ladder_inst
-        call_count = 0
 
         async def _one_shot(sec):
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 1:
-                raise asyncio.CancelledError
+            watchdogs._stop_event.set()  # stop after first iteration
 
         with patch("app.services.watchdogs.asyncio.sleep", side_effect=_one_shot):
-            with pytest.raises(asyncio.CancelledError):
-                await watchdogs._snapshot_watchdog_loop()
+            await watchdogs._snapshot_watchdog_loop()
         ladder_inst.escalate.assert_called_once()
 
     @pytest.mark.asyncio
@@ -144,9 +142,8 @@ class TestSnapshotWatchdogLoop:
         mock_ladder.return_value = ladder_inst
 
         async def _one_shot(sec):
-            raise asyncio.CancelledError
+            watchdogs._stop_event.set()  # stop after first iteration
 
         with patch("app.services.watchdogs.asyncio.sleep", side_effect=_one_shot):
-            with pytest.raises(asyncio.CancelledError):
-                await watchdogs._snapshot_watchdog_loop()
+            await watchdogs._snapshot_watchdog_loop()
         ladder_inst.escalate.assert_called_once()

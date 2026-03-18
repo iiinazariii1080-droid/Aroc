@@ -1,0 +1,4 @@
+fastapi~=0.128
+uvicorn~=0.40
+requests~=2.32
+prometheus_client~=0.20

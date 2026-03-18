@@ -898,6 +898,22 @@ async def cancel_current_task():
     return await task_manager.cancel(tid) if tid else TaskStatusResponse(status=TaskStatus.NOT_FOUND, result=None)
 
 
+@router.post("/tasks/estop")
+async def emergency_stop(request: Request):
+    """Emergency stop — immediately halt ALL devices (AGV, arm, lift) in parallel."""
+    import app.robot_scripts as robot_scripts
+
+    # 1. Fire-and-forget cancel of current task
+    tid = task_manager.current_id()
+    if tid and task_manager._task and not task_manager._task.done():
+        task_manager._task.cancel()
+
+    # 2. Stop all devices in parallel
+    await robot_scripts._stop_all_devices()
+
+    return {"stopped": True, "cancelled_task": tid}
+
+
 # ----------------------------
 # Safety recovery
 # ----------------------------

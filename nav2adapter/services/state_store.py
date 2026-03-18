@@ -15,29 +15,12 @@ from services.reliability_metrics import reliability_metrics
 
 _LOGGER = logging.getLogger(__name__)
 
-# Thread that creates the StateStore instance — used for runtime assertion.
-_OWNER_THREAD: threading.Thread = threading.current_thread()
-
-
-def _assert_owner_thread() -> None:
-    """Raise if called from a thread other than the one that created the store.
-
-    asyncio.Lock is NOT cross-thread safe, so every public async method must
-    run in the same thread (the main event-loop thread).
-    """
-    current = threading.current_thread()
-    if current is not _OWNER_THREAD:
-        raise RuntimeError(
-            f"StateStore accessed from thread {current.name!r} "
-            f"but was created in {_OWNER_THREAD.name!r}. "
-            "asyncio.Lock does not protect across threads."
-        )
-
 
 class StateStore:
     """In-memory state store for command registry and status tracking."""
-    
+
     def __init__(self):
+        self._owner_thread = threading.current_thread()
         self._command_registry: Dict[str, ActiveTransport] = {}
         self._sessions: Dict[str, NavigationSession] = {}
         # Backend/UI policy: treat navigation as a single active command stream.
@@ -61,12 +44,26 @@ class StateStore:
         self._persistence_task: Optional[asyncio.Task] = None
         self._persistence_running = False
 
+    def _assert_owner_thread(self) -> None:
+        """Raise if called from a thread other than the one that created the store.
+
+        asyncio.Lock is NOT cross-thread safe, so every public async method must
+        run in the same thread (the main event-loop thread).
+        """
+        current = threading.current_thread()
+        if current is not self._owner_thread:
+            raise RuntimeError(
+                f"StateStore accessed from thread {current.name!r} "
+                f"but was created in {self._owner_thread.name!r}. "
+                "asyncio.Lock does not protect across threads."
+            )
+
     def _iso_now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
     
     async def start_persistence(self) -> None:
         """Start background persistence writer task."""
-        _assert_owner_thread()
+        self._assert_owner_thread()
         if not self._persistence or self._persistence_running:
             return
         self._persistence_running = True
@@ -239,7 +236,7 @@ class StateStore:
         Returns:
             ActiveTransport instance
         """
-        _assert_owner_thread()
+        self._assert_owner_thread()
         async with self._lock:
             # Increment generation if command_id already exists (reuse case)
             existing = self._command_registry.get(command_id)
@@ -306,7 +303,7 @@ class StateStore:
     
     async def update_transport_state(self, command_id: str, state: int) -> Optional[ActiveTransport]:
         """Update transport state for a command_id."""
-        _assert_owner_thread()
+        self._assert_owner_thread()
         transport: Optional[ActiveTransport] = None
         async with self._lock:
             if command_id in self._command_registry:
@@ -330,7 +327,7 @@ class StateStore:
 
     async def set_last_result(self, command_id: str, result: Dict[str, Any]) -> None:
         """Persist last terminal result for command_id."""
-        _assert_owner_thread()
+        self._assert_owner_thread()
         transport = await self.get_active_transport(command_id)
         if not self._persistence or not transport:
             return
@@ -350,7 +347,7 @@ class StateStore:
     
     async def clear_transport(self, command_id: str) -> bool:
         """Clear transport for a command_id."""
-        _assert_owner_thread()
+        self._assert_owner_thread()
         async with self._lock:
             if command_id in self._command_registry:
                 del self._command_registry[command_id]
@@ -394,7 +391,7 @@ class StateStore:
         return len(command_ids)
 
     async def upsert_session(self, session: NavigationSession) -> None:
-        _assert_owner_thread()
+        self._assert_owner_thread()
         async with self._lock:
             self._sessions[session.command_id] = session
         # Enqueue persistence operation (non-blocking, best-effort)
@@ -419,7 +416,7 @@ class StateStore:
             return self._sessions.get(command_id)
 
     async def clear_session(self, command_id: str) -> None:
-        _assert_owner_thread()
+        self._assert_owner_thread()
         async with self._lock:
             self._sessions.pop(command_id, None)
         # Enqueue persistence operation (non-blocking, best-effort)
@@ -508,7 +505,3 @@ class StateStore:
             self._last_raw_pose_ts = 0.0
             self._last_raw_status = None
             self._last_raw_status_ts = 0.0
-
-
-# Global state store instance
-state_store = StateStore()

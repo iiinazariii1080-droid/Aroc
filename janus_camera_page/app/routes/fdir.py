@@ -8,14 +8,16 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.core.admin import require_admin
 from app.services import system_mode
 from app.services.fdir_events import recent as fdir_recent
 from app.services.recovery_ladder import get_ladder
 
 router = APIRouter(prefix="/fdir", tags=["fdir"])
+ADMIN_DEPENDENCY = Depends(require_admin)
 
 
 class LadderStatus(BaseModel):
@@ -50,17 +52,20 @@ def mode_status() -> ModeInfo:
     return ModeInfo(**data)
 
 
-@router.post("/mode/{target}", summary="Force system mode transition (admin)")
+@router.post("/mode/{target}", summary="Force system mode transition (admin)", dependencies=[ADMIN_DEPENDENCY])
 def force_mode(target: str, reason: str = "manual_override") -> Dict[str, Any]:
     try:
         mode = system_mode.SystemMode(target)
     except ValueError:
-        return {"error": f"unknown mode: {target}", "valid": [m.value for m in system_mode.SystemMode]}
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown mode: {target}, valid: {[m.value for m in system_mode.SystemMode]}",
+        )
     ok = system_mode.transition(mode, reason)
     return {"transitioned": ok, "current": system_mode.current_mode().value}
 
 
-@router.post("/ladder/reset", summary="Reset recovery ladder to level 0")
+@router.post("/ladder/reset", summary="Reset recovery ladder to level 0", dependencies=[ADMIN_DEPENDENCY])
 def reset_ladder() -> Dict[str, Any]:
     get_ladder().reset()
     return {"reset": True, "status": get_ladder().status()}

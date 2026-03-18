@@ -29,7 +29,6 @@ import json
 import logging
 import os
 import subprocess
-import tempfile
 import time
 import threading
 from dataclasses import dataclass, field
@@ -44,6 +43,7 @@ from app.services.fdir_events import (
     emit,
 )
 from app.services import system_mode
+from app.services.system import atomic_write_text, run as run_cmd
 
 logger = logging.getLogger("fdir.ladder")
 
@@ -166,7 +166,6 @@ def _atomic_increment_reboot_count() -> int:
 def _save_ladder_state(level: int, levels: List[LadderLevel], total: int) -> None:
     """Atomically persist ladder state to tmpfs (survives process restart, not reboot)."""
     try:
-        _LADDER_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         state = {
             "level": level,
             "attempts": [lv.attempts for lv in levels],
@@ -174,22 +173,7 @@ def _save_ladder_state(level: int, levels: List[LadderLevel], total: int) -> Non
             "total_recoveries": total,
             "ts": time.time(),
         }
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(_LADDER_STATE_PATH.parent),
-            prefix=".fdir_ladder_",
-            suffix=".tmp",
-        )
-        try:
-            os.write(fd, json.dumps(state).encode())
-            os.fsync(fd)
-            os.close(fd)
-            fd = -1
-            os.rename(tmp_path, str(_LADDER_STATE_PATH))
-        finally:
-            if fd >= 0:
-                os.close(fd)
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+        atomic_write_text(_LADDER_STATE_PATH, json.dumps(state))
     except OSError as exc:
         logger.warning("Cannot save ladder state: %s", exc)
 
@@ -319,7 +303,7 @@ class RecoveryLadder:
 
         # Prometheus gauge
         try:
-            from app.routes.metrics import recovery_ladder_level
+            from app.metrics import recovery_ladder_level
             recovery_ladder_level.set(self._current_level)
         except Exception:
             pass
@@ -345,7 +329,7 @@ class RecoveryLadder:
 
     def _reset_locked(self) -> None:
         try:
-            from app.routes.metrics import recovery_ladder_level
+            from app.metrics import recovery_ladder_level
             recovery_ladder_level.set(0)
         except Exception:
             pass
@@ -406,7 +390,7 @@ class RecoveryLadder:
             new_name = self._levels[self._current_level].name
             logger.warning("Escalating: %s → %s  (signal: %s)", old_name, new_name, signal)
             try:
-                from app.routes.metrics import watchdog_escalations_total
+                from app.metrics import watchdog_escalations_total
                 watchdog_escalations_total.labels(level=new_name).inc()
             except Exception:
                 pass
@@ -442,19 +426,19 @@ class RecoveryLadder:
                 outcome = f"handle_retry: janus_ok, pipeline_active={pipeline_active}"
 
             elif action == RecoveryAction.RESTART_PIPELINE:
-                _run_cmd(["sudo", "systemctl", "restart", settings.service_name], timeout=45)
+                run_cmd(["sudo", "systemctl", "restart", settings.service_name], timeout=45)
                 outcome = f"restarted {settings.service_name}"
 
             elif action == RecoveryAction.RESTART_JANUS:
                 # Ordered restart: stop ffmpeg first to avoid pushing RTP into
                 # a restarting Janus (causes v4l2 buffer corruption).
-                _run_cmd(["sudo", "systemctl", "stop", settings.service_name], timeout=15)
-                _run_cmd(["sudo", "systemctl", "restart", "janus.service"], timeout=60)
+                run_cmd(["sudo", "systemctl", "stop", settings.service_name], timeout=15)
+                run_cmd(["sudo", "systemctl", "restart", "janus.service"], timeout=60)
                 # ffmpeg auto-restarts via Restart=always after Janus is up
                 outcome = "restarted janus.service (ordered: pipeline stopped first)"
 
             elif action == RecoveryAction.USB_RESET:
-                _run_cmd(["sudo", "systemctl", "start", "realsense-failsafe.service"], timeout=90)
+                run_cmd(["sudo", "systemctl", "start", "realsense-failsafe.service"], timeout=90)
                 outcome = "usb_reset via realsense-failsafe"
 
             elif action == RecoveryAction.REBOOT_NODE:
@@ -506,7 +490,7 @@ class RecoveryLadder:
                     recovery_action=action,
                     outcome=f"initiating node reboot (count={reboots + 1})",
                 )
-                _run_cmd(["sudo", "systemctl", "reboot"], timeout=10)
+                run_cmd(["sudo", "systemctl", "reboot"], timeout=10)
                 outcome = "reboot initiated"
 
             else:
@@ -535,23 +519,15 @@ class RecoveryLadder:
             return False
 
 
-def _run_cmd(cmd: list[str], timeout: int = 10) -> str:
-    """Run a shell command; raise on failure."""
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=timeout,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"{' '.join(cmd)} exit={result.returncode}: {result.stderr.strip()}")
-    return result.stdout
-
-
-# ── Module-level singleton ────────────────────────────────────────────
-_ladder = RecoveryLadder()
+# ── Module-level lazy singleton ───────────────────────────────────────
+_ladder: Optional[RecoveryLadder] = None
+_ladder_lock = threading.Lock()
 
 
 def get_ladder() -> RecoveryLadder:
+    global _ladder
+    if _ladder is None:
+        with _ladder_lock:
+            if _ladder is None:
+                _ladder = RecoveryLadder()
     return _ladder

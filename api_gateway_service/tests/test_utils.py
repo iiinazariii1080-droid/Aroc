@@ -2,10 +2,12 @@
 
 import pytest
 
-from app.core.utils import (
+from app.core.http_proxy_utils import (
     join_url,
     filter_response_headers,
     forward_request_headers,
+)
+from app.core.openapi_utils import (
     strip_prefix,
     rename_component_refs,
     merge_component_sections,
@@ -72,12 +74,30 @@ class TestForwardRequestHeaders:
             "authorization": "Bearer token",
             "x-custom": "val",
         }
+        request.scope = {"state": {"request_id": "test-rid-123"}}
         fwd = forward_request_headers(request)
         assert "host" not in fwd
         assert "content-length" not in fwd
         assert "accept-encoding" not in fwd
         assert fwd["authorization"] == "Bearer token"
         assert fwd["x-custom"] == "val"
+        assert fwd["x-request-id"] == "test-rid-123"
+
+    def test_propagates_request_id_from_scope(self):
+        from unittest.mock import MagicMock
+        request = MagicMock()
+        request.headers = {"x-foo": "bar"}
+        request.scope = {"state": {"request_id": "abc-123"}}
+        fwd = forward_request_headers(request)
+        assert fwd["x-request-id"] == "abc-123"
+
+    def test_no_request_id_when_scope_empty(self):
+        from unittest.mock import MagicMock
+        request = MagicMock()
+        request.headers = {"x-foo": "bar"}
+        request.scope = {}
+        fwd = forward_request_headers(request)
+        assert "x-request-id" not in fwd
 
 
 # ── strip_prefix ─────────────────────────────────────────
@@ -146,3 +166,32 @@ class TestMergeComponentSections:
         source = {"schemas": {"X": {"type": "integer"}}}
         merge_component_sections(target, source)
         assert target["schemas"]["X"]["type"] == "integer"
+
+
+# ── atomic_write ────────────────────────────────────────
+
+class TestAtomicWrite:
+    def test_roundtrip(self, tmp_path):
+        from app.core.utils import atomic_write
+        p = tmp_path / "state.json"
+        atomic_write(p, '{"key": "value"}')
+        assert p.read_text(encoding="utf-8") == '{"key": "value"}'
+
+    def test_no_tmp_leftover(self, tmp_path):
+        from app.core.utils import atomic_write
+        p = tmp_path / "data.txt"
+        atomic_write(p, "hello")
+        assert not p.with_suffix(".tmp").exists()
+
+    def test_creates_parent_dirs(self, tmp_path):
+        from app.core.utils import atomic_write
+        p = tmp_path / "sub" / "dir" / "file.txt"
+        atomic_write(p, "nested")
+        assert p.read_text(encoding="utf-8") == "nested"
+
+    def test_overwrite(self, tmp_path):
+        from app.core.utils import atomic_write
+        p = tmp_path / "over.txt"
+        atomic_write(p, "first")
+        atomic_write(p, "second")
+        assert p.read_text(encoding="utf-8") == "second"

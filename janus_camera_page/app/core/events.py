@@ -9,7 +9,6 @@ from app.core.settings import get_settings
 from app.services import janus_proxy, relay_proxy, watchdogs
 from app.services.thermal import start_thermal_monitor
 
-_is_color = get_settings().camera_type == "color_camera"
 _log = logging.getLogger("events")
 
 # ── systemd sd_notify via raw socket (no C dependency) ──────────
@@ -50,7 +49,7 @@ def register_event_handlers(app: FastAPI) -> None:
         start_thermal_monitor()
         await janus_proxy.start_client()
         await relay_proxy.start_client()
-        if _is_color:
+        if get_settings().camera_type == "color_camera":
             from app.services import depth_camera_proxy
             await depth_camera_proxy.start_client()
         _sd_notify("READY=1")
@@ -58,9 +57,20 @@ def register_event_handlers(app: FastAPI) -> None:
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        # Stop daemon threads and async watchdog tasks first
+        watchdogs.stop_all()
+        from app.services.thermal import stop_thermal_monitor
+        stop_thermal_monitor()
+        # Close HTTP proxy clients
         await janus_proxy.stop_client()
         await relay_proxy.stop_client()
-        if _is_color:
+        if get_settings().camera_type == "color_camera":
             from app.services import depth_camera_proxy
             await depth_camera_proxy.stop_client()
+        # Close realsense_mux HTTP client
+        from app.routes.depth import close_mux_client
+        await close_mux_client()
+        # Shutdown Janus REST thread pool (non-blocking)
+        from app.services.janus import _executor
+        _executor.shutdown(wait=False)
 

@@ -8,6 +8,7 @@ PYTEST     ?= $(PYTHON) -m pytest
 RUFF       ?= $(PYTHON) -m ruff
 MYPY       ?= $(PYTHON) -m mypy
 COVERAGE   ?= $(PYTHON) -m coverage
+MEMGUARD   := -p testing.memory_guard
 
 # All services with tests (order: critical → important → other)
 SERVICES := xarm_service igus_service robot_service \
@@ -60,6 +61,7 @@ test: ## Run unit tests for all services (no hardware)
 	    echo "══════════════════════════════════════════════════════════════"; \
 	    PYTHONPATH="$$svc:$$PWD:$$PYTHONPATH" \
 	    $(PYTEST) "$$svc/tests" \
+	      $(MEMGUARD) \
 	      -m "not hardware and not simulator" \
 	      --timeout=30 \
 	      -q --tb=short \
@@ -74,6 +76,7 @@ test-service: ## Run tests for a single service: make test-service SVC=xarm_serv
 	@if [ -z "$(SVC)" ]; then echo "Usage: make test-service SVC=<name>"; exit 1; fi
 	PYTHONPATH="$(SVC):$$PWD:$$PYTHONPATH" \
 	$(PYTEST) "$(SVC)/tests" \
+	  $(MEMGUARD) \
 	  -m "not hardware and not simulator" \
 	  --timeout=30 -v --tb=short
 
@@ -84,6 +87,7 @@ test-cov: ## Run tests with coverage report
 	    echo "── coverage: $$svc ──"; \
 	    PYTHONPATH="$$svc:$$PWD:$$PYTHONPATH" \
 	    $(PYTEST) "$$svc/tests" \
+	      $(MEMGUARD) \
 	      -m "not hardware and not simulator" \
 	      --cov="$$svc/app" \
 	      --cov-report=term-missing:skip-covered \

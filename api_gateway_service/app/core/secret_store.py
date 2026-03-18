@@ -6,21 +6,26 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .config import ROBOT_API_KEY_FILE
+from .config import settings
+from .utils import atomic_write
 
 logger = logging.getLogger(__name__)
 
 
 class RobotSecretStore:
     """
-    Keeps robot API key only in memory.
-    Initial value is loaded from environment (ROBOT_API_KEY) or a configured file.
+    Robot API key store.  Initial value is loaded from environment
+    (ROBOT_API_KEY) or a configured file.
+
+    When ``set_api_key()`` is called **and** a ``robot_api_key_file`` is
+    configured, the new value is persisted to that file so it survives
+    container restarts (symmetric durability with HubStateStore).
     """
 
     def __init__(self, env_var: str = "ROBOT_API_KEY", file_path: str | None = None) -> None:
         self._env_var = env_var
         self._lock = asyncio.Lock()
-        self._file_path = Path(file_path) if file_path else (Path(ROBOT_API_KEY_FILE) if ROBOT_API_KEY_FILE else None)
+        self._file_path = Path(file_path) if file_path else (Path(settings.robot_api_key_file) if settings.robot_api_key_file else None)
         self._api_key = self._load_initial_api_key()
 
     def _load_initial_api_key(self) -> Optional[str]:
@@ -41,6 +46,15 @@ class RobotSecretStore:
             logger.warning("Failed to read API key file %s: %s", self._file_path, exc)
             return None
 
+    def _persist_api_key(self, value: Optional[str]) -> None:
+        """Write api_key to file if a file path is configured."""
+        if self._file_path is None:
+            return
+        try:
+            atomic_write(self._file_path, value or "")
+        except OSError as exc:
+            logger.error("Failed to persist API key to %s: %s", self._file_path, exc)
+
     async def get_api_key(self) -> Optional[str]:
         async with self._lock:
             return self._api_key
@@ -48,6 +62,7 @@ class RobotSecretStore:
     async def set_api_key(self, value: Optional[str]) -> None:
         async with self._lock:
             self._api_key = value
+        await asyncio.to_thread(self._persist_api_key, value)
 
     async def masked_api_key(self) -> Optional[str]:
         api_key = await self.get_api_key()

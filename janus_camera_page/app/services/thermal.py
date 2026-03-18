@@ -37,6 +37,9 @@ PROFILE_NORMAL = "normal"     # e.g. 15 FPS
 PROFILE_LOW = "low"           # e.g. 5 FPS
 PROFILE_STOP = "stop"         # pipeline should halt
 
+# Stop signal for the thermal monitor thread — set during shutdown.
+_stop_event = threading.Event()
+
 
 def read_cpu_temp() -> float | None:
     """Read CPU temperature in °C. Returns None if unavailable."""
@@ -71,15 +74,15 @@ def _thermal_loop() -> None:
     """Main thermal monitoring loop (runs in daemon thread)."""
     current_profile = PROFILE_NORMAL
 
-    while True:
+    while not _stop_event.is_set():
         temp = read_cpu_temp()
         if temp is None:
-            time.sleep(POLL_INTERVAL)
+            _stop_event.wait(POLL_INTERVAL)
             continue
 
         # Export temp to Prometheus if available
         try:
-            from app.routes.metrics import cpu_temp_celsius
+            from app.metrics import cpu_temp_celsius
             cpu_temp_celsius.set(temp)
         except Exception:
             pass
@@ -123,7 +126,7 @@ def _thermal_loop() -> None:
                 outcome=f"resumed normal FPS (thermal cool {temp:.1f}°C)",
             )
 
-        time.sleep(POLL_INTERVAL)
+        _stop_event.wait(POLL_INTERVAL)
 
 
 def start_thermal_monitor() -> None:
@@ -137,3 +140,8 @@ def start_thermal_monitor() -> None:
         "Thermal monitor started (warn=%s°C, crit=%s°C, resume=%s°C, poll=%ds)",
         WARN_C, CRIT_C, RESUME_C, POLL_INTERVAL,
     )
+
+
+def stop_thermal_monitor() -> None:
+    """Signal the thermal monitor thread to stop (called on app shutdown)."""
+    _stop_event.set()

@@ -1,0 +1,4 @@
+paho-mqtt~=2.1
+requests~=2.32
+python-dateutil~=2.9
+prometheus_client~=0.20

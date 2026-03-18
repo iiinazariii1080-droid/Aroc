@@ -4,7 +4,8 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, MagicMock, patch, call
 
-from services.symovo_service import SymovoAgvClient, symovo_lock
+from services.symovo_service import SymovoAgvClient
+from exceptions import DeviceError
 
 
 def _make_client(**overrides):
@@ -20,6 +21,8 @@ def _make_client(**overrides):
     c.post = AsyncMock(return_value={})
     c.get_raw = AsyncMock(return_value=b"\x89PNG")
     c._make_request = AsyncMock(return_value={})
+    # Bind the real _with_endpoint_fallback so inner methods can use it.
+    c._with_endpoint_fallback = SymovoAgvClient._with_endpoint_fallback.__get__(c, SymovoAgvClient)
     for k, v in overrides.items():
         setattr(c, k, v)
     return c
@@ -39,32 +42,27 @@ def _bind(client, method_name):
 
 class TestSetDriveMode:
     @pytest.mark.asyncio
-    async def test_enable_calls_charger_workflow(self):
+    async def test_enable_drive_mode(self):
         client = _make_client()
         client.put = AsyncMock(return_value={"ok": True})
         _bind(client, "set_drive_mode")
-        with patch("services.charger_workflow.maybe_deactivate_on_drive_mode", new_callable=AsyncMock) as mock_cw:
-            result = await client.set_drive_mode(enable=True)
-        mock_cw.assert_awaited_once()
+        result = await client.set_drive_mode(enable=True)
         assert result == {"ok": True}
 
     @pytest.mark.asyncio
-    async def test_disable_skips_charger_workflow(self):
+    async def test_disable_drive_mode(self):
         client = _make_client()
         client.put = AsyncMock(return_value={"ok": True})
         _bind(client, "set_drive_mode")
-        with patch("services.charger_workflow.maybe_deactivate_on_drive_mode", new_callable=AsyncMock) as mock_cw:
-            await client.set_drive_mode(enable=False)
-        mock_cw.assert_not_awaited()
+        result = await client.set_drive_mode(enable=False)
+        assert result == {"ok": True}
 
     @pytest.mark.asyncio
     async def test_fallback_to_amr(self):
         client = _make_client()
-        from exceptions import DeviceError
         client.put = AsyncMock(side_effect=[DeviceError("fail"), {"ok": True}])
         _bind(client, "set_drive_mode")
-        with patch("services.charger_workflow.maybe_deactivate_on_drive_mode", new_callable=AsyncMock):
-            result = await client.set_drive_mode(enable=True)
+        result = await client.set_drive_mode(enable=True)
         assert result == {"ok": True}
         assert client.put.call_count == 2
 
@@ -84,7 +82,7 @@ class TestSimplePutMethods:
     @pytest.mark.asyncio
     async def test_pause_stop_fallback(self):
         client = _make_client()
-        client.put = AsyncMock(side_effect=[RuntimeError(), {"ok": True}])
+        client.put = AsyncMock(side_effect=[DeviceError("fail"), {"ok": True}])
         _bind(client, "pause_stop")
         result = await client.pause_stop()
         assert result == {"ok": True}
@@ -116,7 +114,7 @@ class TestSimplePutMethods:
     @pytest.mark.asyncio
     async def test_reset_software_fuse_fallback(self):
         client = _make_client()
-        client.put = AsyncMock(side_effect=[RuntimeError(), {"done": True}])
+        client.put = AsyncMock(side_effect=[DeviceError("fail"), {"done": True}])
         _bind(client, "reset_software_fuse")
         result = await client.reset_software_fuse()
         assert result == {"done": True}
@@ -222,7 +220,7 @@ class TestMapMethods:
     @pytest.mark.asyncio
     async def test_scan_png_fallback(self):
         client = _make_client()
-        client.get_raw = AsyncMock(side_effect=[RuntimeError(), b"scan_agv"])
+        client.get_raw = AsyncMock(side_effect=[DeviceError("fail"), b"scan_agv"])
         _bind(client, "scan_png")
         with patch("services.symovo_service.settings") as s:
             s.symovo_timeout_seconds = 10
@@ -244,7 +242,7 @@ class TestSlamMethods:
     @pytest.mark.asyncio
     async def test_slam_state_fallback(self):
         client = _make_client()
-        client.get = AsyncMock(side_effect=[RuntimeError(), {"state": "IDLE"}])
+        client.get = AsyncMock(side_effect=[DeviceError("fail"), {"state": "IDLE"}])
         _bind(client, "slam_state")
         result = await client.slam_state()
         assert result["state"] == "IDLE"
@@ -281,7 +279,6 @@ class TestCheckPose:
 
     @pytest.mark.asyncio
     async def test_check_pose_fallback_agv(self):
-        from exceptions import DeviceError
         client = _make_client()
         client.put = AsyncMock(side_effect=[DeviceError("fail"), {"cost": 10}])
         client.post = AsyncMock(return_value={"reachable": True})
@@ -291,7 +288,6 @@ class TestCheckPose:
 
     @pytest.mark.asyncio
     async def test_check_pose_fallback_v1_reachable(self):
-        from exceptions import DeviceError
         client = _make_client()
         client.put = AsyncMock(side_effect=[DeviceError("a"), DeviceError("b")])
         client.post = AsyncMock(return_value={"reachable": True})
@@ -357,6 +353,7 @@ class TestTransportMoveToPose:
     async def test_transport_move_to_pose_with_max_speed(self):
         client = _make_client()
         _bind(client, "_transport_move_to_pose_guarded")
+        _bind(client, "_build_transport_payload")
         captured = {}
         async def _capture(payload):
             captured["payload"] = payload
@@ -370,14 +367,14 @@ class TestTransportMoveToPose:
         assert pose["theta"] == 0.5
 
     @pytest.mark.asyncio
-    async def test_transport_move_to_pose_calls_charger_disable(self):
-        """The outer method calls charger_workflow.disable_all_before_move."""
+    async def test_transport_move_to_pose_delegates_to_guarded(self):
+        """The outer method delegates to _transport_move_to_pose_guarded."""
         client = _make_client()
         _bind(client, "transport_move_to_pose")
         client._transport_move_to_pose_guarded = AsyncMock(return_value={"id": 1})
-        with patch("services.charger_workflow.disable_all_before_move", new_callable=AsyncMock) as mock_dab:
-            await client.transport_move_to_pose(x_m=1.0, y_m=2.0)
-        mock_dab.assert_awaited_once()
+        result = await client.transport_move_to_pose(x_m=1.0, y_m=2.0)
+        client._transport_move_to_pose_guarded.assert_awaited_once()
+        assert result == {"id": 1}
 
 
 # ── transport_wait_for_changes ───────────────────────────────────────
@@ -398,12 +395,12 @@ class TestTransportWaitForChanges:
     @pytest.mark.asyncio
     async def test_error_increments_counter(self):
         client = _make_client()
-        client.get = AsyncMock(side_effect=RuntimeError("timeout issue"))
+        client.get = AsyncMock(side_effect=DeviceError("timeout issue"))
         _bind(client, "transport_wait_for_changes")
         with patch("services.symovo_service.settings") as s, \
              patch("services.symovo_service.reliability_metrics") as rm:
             s.transport_watch_timeout = 30.0
-            with pytest.raises(RuntimeError):
+            with pytest.raises(DeviceError):
                 await client.transport_wait_for_changes(42)
         rm.inc.assert_any_call("symovo.transport_wait_for_changes.error")
         rm.inc.assert_any_call("symovo.transport_wait_for_changes.timeout")
@@ -427,7 +424,7 @@ class TestAmrWaitForChanges:
     @pytest.mark.asyncio
     async def test_amr_fallback_to_agv(self):
         client = _make_client()
-        client.get = AsyncMock(side_effect=[RuntimeError(), {"changed": True}])
+        client.get = AsyncMock(side_effect=[DeviceError("fail"), {"changed": True}])
         _bind(client, "amr_wait_for_changes")
         with patch("services.symovo_service.settings") as s, \
              patch("services.symovo_service.reliability_metrics") as rm:
@@ -438,12 +435,12 @@ class TestAmrWaitForChanges:
     @pytest.mark.asyncio
     async def test_amr_both_fail_raises(self):
         client = _make_client()
-        client.get = AsyncMock(side_effect=[RuntimeError("a"), RuntimeError("timeout b")])
+        client.get = AsyncMock(side_effect=[DeviceError("a"), DeviceError("timeout b")])
         _bind(client, "amr_wait_for_changes")
         with patch("services.symovo_service.settings") as s, \
              patch("services.symovo_service.reliability_metrics") as rm:
             s.transport_watch_timeout = 30.0
-            with pytest.raises(RuntimeError):
+            with pytest.raises(DeviceError):
                 await client.amr_wait_for_changes()
         rm.inc.assert_any_call("symovo.amr_wait_for_changes.error")
 
@@ -615,7 +612,7 @@ class TestClearAllTransportsExtended:
     @pytest.mark.asyncio
     async def test_fetch_error_returns_empty(self):
         client = _make_client()
-        client.get = AsyncMock(side_effect=RuntimeError("connection error"))
+        client.get = AsyncMock(side_effect=DeviceError("connection error"))
         _bind(client, "clear_all_transports")
         result = await client.clear_all_transports()
         assert result == []

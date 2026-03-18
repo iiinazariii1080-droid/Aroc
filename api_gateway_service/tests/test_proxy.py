@@ -4,19 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-
-def _make_mock_response(status_code: int = 200, body: bytes = b'{"ok":true}', headers: dict | None = None):
-    """Create a mock httpx.Response suitable for streaming proxy tests."""
-    resp = AsyncMock()
-    resp.status_code = status_code
-    resp.headers = httpx.Headers(headers or {"content-type": "application/json"})
-
-    async def _aiter_bytes(chunk_size=65536):
-        yield body
-
-    resp.aiter_bytes = _aiter_bytes
-    resp.aclose = AsyncMock()
-    return resp
+from app.core.config import settings
+from tests.helpers import make_mock_response as _make_mock_response
 
 
 @pytest.mark.asyncio
@@ -86,7 +75,7 @@ async def test_proxy_request_id_header(client):
 @pytest.mark.asyncio
 async def test_proxy_body_too_large(client, mock_http_client):
     """Returns 413 when request body exceeds MAX_REQUEST_BODY_BYTES."""
-    with patch("app.routers.proxy_http.MAX_REQUEST_BODY_BYTES", 10):
+    with patch.object(settings, "max_request_body_bytes", 10):
         mock_resp = _make_mock_response()
         with patch("app.routers.proxy_http.stream_request", return_value=mock_resp):
             resp = await client.post("/api/v1/robot/data", content=b"x" * 100)

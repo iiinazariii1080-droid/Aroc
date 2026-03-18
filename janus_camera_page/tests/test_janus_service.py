@@ -26,12 +26,12 @@ def _ok_response(data: dict | None = None):
 
 
 class TestCreateSession:
-    @patch("app.services.janus.requests.post", return_value=_ok_response({"id": 42}))
+    @patch("app.services.janus.httpx.post", return_value=_ok_response({"id": 42}))
     def test_returns_session_id(self, mock_post):
         sid = janus_create_session()
         assert sid == 42
 
-    @patch("app.services.janus.requests.post")
+    @patch("app.services.janus.httpx.post")
     def test_error_raises(self, mock_post):
         mock_post.return_value.json.return_value = {"janus": "error", "error": {"reason": "fail"}}
         with pytest.raises(JanusError):
@@ -39,14 +39,14 @@ class TestCreateSession:
 
 
 class TestAttachStreaming:
-    @patch("app.services.janus.requests.post", return_value=_ok_response({"id": 99}))
+    @patch("app.services.janus.httpx.post", return_value=_ok_response({"id": 99}))
     def test_returns_handle_id(self, mock_post):
         hid = janus_attach_streaming(42)
         assert hid == 99
 
 
 class TestJanusMessage:
-    @patch("app.services.janus.requests.post")
+    @patch("app.services.janus.httpx.post")
     def test_returns_plugindata(self, mock_post):
         mock_post.return_value.json.return_value = {
             "janus": "success",
@@ -57,7 +57,7 @@ class TestJanusMessage:
 
 
 class TestJanusDetach:
-    @patch("app.services.janus.requests.post")
+    @patch("app.services.janus.httpx.post")
     def test_no_exception_on_failure(self, mock_post):
         mock_post.side_effect = Exception("network error")
         # Should not raise
@@ -65,7 +65,7 @@ class TestJanusDetach:
 
 
 class TestJanusDestroy:
-    @patch("app.services.janus.requests.post")
+    @patch("app.services.janus.httpx.post")
     def test_no_exception_on_failure(self, mock_post):
         mock_post.side_effect = Exception("network error")
         janus_destroy(1)

@@ -6,11 +6,17 @@ import uuid
 from functools import wraps
 from typing import Any, Callable, Dict
 
-import requests
+import httpx
 
 from app.core.settings import get_settings
 
 _DECORATOR_TIMEOUT_SEC = 30
+
+# Shared executor for Janus REST calls — avoids creating a new
+# ThreadPoolExecutor on every watchdog tick / health check.
+_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="janus-rest",
+)
 
 
 class JanusError(Exception):
@@ -23,7 +29,7 @@ def _txid() -> str:
 
 def janus_create_session() -> int:
     settings = get_settings()
-    response = requests.post(
+    response = httpx.post(
         settings.janus_url,
         json={"janus": "create", "transaction": _txid()},
         timeout=settings.janus_timeout,
@@ -36,7 +42,7 @@ def janus_create_session() -> int:
 
 def janus_attach_streaming(session_id: int) -> int:
     settings = get_settings()
-    response = requests.post(
+    response = httpx.post(
         f"{settings.janus_url}/{session_id}",
         json={
             "janus": "attach",
@@ -53,7 +59,7 @@ def janus_attach_streaming(session_id: int) -> int:
 
 def janus_message(session_id: int, handle_id: int, body: Dict[str, Any]) -> Dict[str, Any]:
     settings = get_settings()
-    response = requests.post(
+    response = httpx.post(
         f"{settings.janus_url}/{session_id}/{handle_id}",
         json={"janus": "message", "transaction": _txid(), "body": body},
         timeout=settings.janus_timeout,
@@ -72,7 +78,7 @@ def janus_detach(session_id: int, handle_id: int) -> bool:
     """Detach handle. Returns True on success, False on failure."""
     settings = get_settings()
     try:
-        requests.post(
+        httpx.post(
             f"{settings.janus_url}/{session_id}/{handle_id}",
             json={"janus": "detach", "transaction": _txid()},
             timeout=settings.janus_timeout,
@@ -87,7 +93,7 @@ def janus_destroy(session_id: int) -> bool:
     """Destroy session. Returns True on success, False on failure."""
     settings = get_settings()
     try:
-        requests.post(
+        httpx.post(
             f"{settings.janus_url}/{session_id}",
             json={"janus": "destroy", "transaction": _txid()},
             timeout=settings.janus_timeout,
@@ -108,9 +114,8 @@ def with_streaming_handle(
         try:
             handle_id = janus_attach_streaming(session_id)
             # Guard against func() hanging forever (e.g. Janus unresponsive).
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(func, session_id, handle_id, *args, **kwargs)
-                return future.result(timeout=_DECORATOR_TIMEOUT_SEC)
+            future = _executor.submit(func, session_id, handle_id, *args, **kwargs)
+            return future.result(timeout=_DECORATOR_TIMEOUT_SEC)
         except concurrent.futures.TimeoutError:
             logging.error(
                 "with_streaming_handle timed out after %ds (session=%s, handle=%s)",

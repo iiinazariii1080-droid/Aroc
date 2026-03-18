@@ -15,56 +15,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-import app.core.circuit_breaker as cb_mod
 from app.core.circuit_breaker import get_breaker, CircuitBreaker
-from app.core.config import DEFAULT_SERVICE_CONCURRENCY
-
-
-# ────────────────────────────────────────────────────────────────
-# Helpers
-# ────────────────────────────────────────────────────────────────
-
-def _make_mock_response(
-    status_code: int = 200,
-    body: bytes = b'{"ok":true}',
-    headers: dict | None = None,
-    *,
-    delay: float = 0.0,
-    chunk_size: int | None = None,
-):
-    """
-    Create a mock httpx.Response for streaming proxy tests.
-
-    Args:
-        delay: seconds to sleep between chunks (simulates slow upstream).
-        chunk_size: if set, split body into chunks of this size.
-    """
-    resp = AsyncMock()
-    resp.status_code = status_code
-    resp.headers = httpx.Headers(headers or {"content-type": "application/json"})
-
-    if chunk_size and len(body) > chunk_size:
-        chunks = [body[i:i + chunk_size] for i in range(0, len(body), chunk_size)]
-    else:
-        chunks = [body]
-
-    async def _aiter_bytes(chunk_size=65536):
-        for c in chunks:
-            if delay > 0:
-                await asyncio.sleep(delay)
-            yield c
-
-    resp.aiter_bytes = _aiter_bytes
-    resp.aclose = AsyncMock()
-    return resp
-
-
-@pytest.fixture(autouse=True)
-def _reset_circuit_breakers():
-    """Clear the global circuit breaker registry between tests."""
-    cb_mod._breakers.clear()
-    yield
-    cb_mod._breakers.clear()
+from app.core.config import settings
+from tests.helpers import make_mock_response as _make_mock_response
 
 
 # ────────────────────────────────────────────────────────────────
@@ -87,11 +40,11 @@ class TestSemaphoreLeaks:
         assert all(r.status_code == 200 for r in results)
 
         # Semaphore should be fully released (value == initial value)
-        from app.core.http_client import get_service_semaphore
+        from app.core.lifecycle import get_service_semaphore
         sem = get_service_semaphore(app, "xarm")
         # _value reflects available slots; after all released it should be at max
-        assert sem._value == DEFAULT_SERVICE_CONCURRENCY, (
-            f"Semaphore leak: {DEFAULT_SERVICE_CONCURRENCY - sem._value} unreleased slots"
+        assert sem._value == settings.default_service_concurrency, (
+            f"Semaphore leak: {settings.default_service_concurrency - sem._value} unreleased slots"
         )
 
     @pytest.mark.asyncio
@@ -108,9 +61,9 @@ class TestSemaphoreLeaks:
 
         assert all(r.status_code == 502 for r in results)
 
-        from app.core.http_client import get_service_semaphore
+        from app.core.lifecycle import get_service_semaphore
         sem = get_service_semaphore(app, "xarm")
-        assert sem._value == DEFAULT_SERVICE_CONCURRENCY, "Semaphore leaked on ConnectError"
+        assert sem._value == settings.default_service_concurrency, "Semaphore leaked on ConnectError"
 
     @pytest.mark.asyncio
     async def test_semaphore_released_on_timeout(self, client, app):
@@ -127,9 +80,9 @@ class TestSemaphoreLeaks:
         # All should be 504 (timeout) — CB opens at exactly 3 but these are concurrent
         assert all(r.status_code in (502, 504) for r in results)
 
-        from app.core.http_client import get_service_semaphore
+        from app.core.lifecycle import get_service_semaphore
         sem = get_service_semaphore(app, "robot")
-        assert sem._value == DEFAULT_SERVICE_CONCURRENCY, "Semaphore leaked on ReadTimeout"
+        assert sem._value == settings.default_service_concurrency, "Semaphore leaked on ReadTimeout"
 
     @pytest.mark.asyncio
     async def test_semaphore_released_after_body_streaming(self, client, app):
@@ -148,9 +101,9 @@ class TestSemaphoreLeaks:
             assert len(resp.content) == 4096
 
         # After full consumption → semaphore released
-        from app.core.http_client import get_service_semaphore
+        from app.core.lifecycle import get_service_semaphore
         sem = get_service_semaphore(app, "xarm")
-        assert sem._value == DEFAULT_SERVICE_CONCURRENCY, "Semaphore leaked after body streaming"
+        assert sem._value == settings.default_service_concurrency, "Semaphore leaked after body streaming"
 
         # resp.aclose must have been called
         mock_resp.aclose.assert_called()
@@ -176,10 +129,10 @@ class TestSemaphoreLeaks:
         errors = sum(1 for r in results if r.status_code in (502, 504))
         assert success + errors == n
 
-        from app.core.http_client import get_service_semaphore
+        from app.core.lifecycle import get_service_semaphore
         sem = get_service_semaphore(app, "igus")
-        assert sem._value == DEFAULT_SERVICE_CONCURRENCY, (
-            f"Semaphore leak in mixed scenario: {DEFAULT_SERVICE_CONCURRENCY - sem._value} stuck"
+        assert sem._value == settings.default_service_concurrency, (
+            f"Semaphore leak in mixed scenario: {settings.default_service_concurrency - sem._value} stuck"
         )
 
 
@@ -249,18 +202,18 @@ class TestCircuitBreakerLoad:
         # requests 4 and 5 should be rejected by circuit breaker
         assert call_count == 3, f"Expected 3 actual calls, got {call_count}"
 
-        cb = get_breaker("xarm")
-        assert cb.describe()["state"] == "open"
+        cb = await get_breaker("xarm")
+        assert (await cb.describe())["state"] == "open"
 
     @pytest.mark.asyncio
     async def test_circuit_open_returns_fast(self, client):
         """When circuit is open, requests return instantly (no network wait)."""
         # Force circuit open
-        cb = get_breaker("symovo")
+        cb = await get_breaker("symovo")
         for _ in range(3):
-            cb.record_failure()
+            await cb.record_failure()
 
-        assert cb.describe()["state"] == "open"
+        assert (await cb.describe())["state"] == "open"
 
         import time
         start = time.monotonic()
@@ -278,10 +231,10 @@ class TestCircuitBreakerLoad:
     @pytest.mark.asyncio
     async def test_circuit_recovers_after_success(self, client):
         """OPEN → HALF_OPEN → probe succeeds → CLOSED."""
-        cb = get_breaker("robot")
+        cb = await get_breaker("robot")
         for _ in range(3):
-            cb.record_failure()
-        assert cb.describe()["state"] == "open"
+            await cb.record_failure()
+        assert (await cb.describe())["state"] == "open"
 
         # Simulate recovery timeout passing
         cb._last_failure_time = 0  # force expiry
@@ -291,15 +244,15 @@ class TestCircuitBreakerLoad:
             resp = await client.get("/api/v1/robot/status")
 
         assert resp.status_code == 200
-        assert cb.describe()["state"] == "closed"
+        assert (await cb.describe())["state"] == "closed"
 
     @pytest.mark.asyncio
     async def test_independent_circuits_per_service(self, client):
         """Failure in one service doesn't affect another."""
         # Kill xarm circuit
-        cb_xarm = get_breaker("xarm")
+        cb_xarm = await get_breaker("xarm")
         for _ in range(3):
-            cb_xarm.record_failure()
+            await cb_xarm.record_failure()
 
         mock_resp = _make_mock_response(200, b'{"ok":true}')
         with patch("app.routers.proxy_http.stream_request", return_value=mock_resp):
@@ -340,7 +293,7 @@ class TestTimeouts:
 
         with (
             patch("app.routers.proxy_http.stream_request", return_value=mock_resp),
-            patch("app.routers.proxy_http.PROXY_BODY_TIMEOUT_S", 0.3),
+            patch.object(settings, "proxy_body_timeout", 0.3),
         ):
             # The body timeout fires mid-stream which propagates as
             # an ExceptionGroup through Starlette's task group.
@@ -355,9 +308,9 @@ class TestTimeouts:
         await asyncio.sleep(0.5)
 
         # Key assertion: semaphore is released even after body timeout
-        from app.core.http_client import get_service_semaphore
+        from app.core.lifecycle import get_service_semaphore
         sem = get_service_semaphore(app, "xarm")
-        assert sem._value == DEFAULT_SERVICE_CONCURRENCY, "Semaphore leaked on body timeout"
+        assert sem._value == settings.default_service_concurrency, "Semaphore leaked on body timeout"
 
         # Connection must be closed
         mock_resp.aclose.assert_called()
@@ -373,15 +326,15 @@ class TestTimeouts:
 
         with (
             patch("app.routers.proxy_http.stream_request", side_effect=_slow_connect),
-            patch("app.routers.proxy_http.PROXY_CONNECT_TIMEOUT_S", 0.3),
+            patch.object(settings, "proxy_connect_timeout", 0.3),
         ):
             resp = await client.get("/api/v1/robot/data")
 
         assert resp.status_code == 504  # TimeoutError → 504
 
-        from app.core.http_client import get_service_semaphore
+        from app.core.lifecycle import get_service_semaphore
         sem = get_service_semaphore(app, "robot")
-        assert sem._value == DEFAULT_SERVICE_CONCURRENCY, "Semaphore leaked on connect timeout"
+        assert sem._value == settings.default_service_concurrency, "Semaphore leaked on connect timeout"
 
 
 # ────────────────────────────────────────────────────────────────
@@ -404,9 +357,9 @@ class TestConcurrencyStress:
         assert all(r.status_code == 200 for r in results)
         assert len(results) == n
 
-        from app.core.http_client import get_service_semaphore
+        from app.core.lifecycle import get_service_semaphore
         sem = get_service_semaphore(app, "xarm")
-        assert sem._value == DEFAULT_SERVICE_CONCURRENCY
+        assert sem._value == settings.default_service_concurrency
 
     @pytest.mark.asyncio
     async def test_concurrent_requests_across_services(self, client, app):
@@ -425,10 +378,10 @@ class TestConcurrencyStress:
         assert all(r.status_code == 200 for r in results)
         assert len(results) == len(services) * n_per_service
 
-        from app.core.http_client import get_service_semaphore
+        from app.core.lifecycle import get_service_semaphore
         for svc in services:
             sem = get_service_semaphore(app, svc)
-            assert sem._value == DEFAULT_SERVICE_CONCURRENCY, f"Leak in {svc}"
+            assert sem._value == settings.default_service_concurrency, f"Leak in {svc}"
 
     @pytest.mark.asyncio
     async def test_semaphore_contention_under_limit(self, client, app):
@@ -436,7 +389,7 @@ class TestConcurrencyStress:
         Set semaphore to 2, fire 10 requests with slow upstream →
         all complete sequentially without deadlock.
         """
-        from app.core.http_client import get_service_semaphore
+        from app.core.lifecycle import get_service_semaphore
 
         # Restrict to 2 concurrent slots for igus
         app.state.service_semaphores["igus"] = asyncio.Semaphore(2)

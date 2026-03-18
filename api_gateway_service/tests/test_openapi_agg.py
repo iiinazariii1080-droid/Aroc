@@ -135,8 +135,8 @@ async def test_populate_openapi_cache_records_failure_reason_and_fallback():
     assert metrics["attempts"] == 1
     assert metrics["successes"] == 0
     assert metrics["failures"] == 1
-    assert metrics["failure_reasons"]["schema_value_error"] == 1
-    assert metrics["last_failure_reason"] == "schema_value_error"
+    assert metrics["failure_reasons"]["ValueError"] == 1
+    assert metrics["last_failure_reason"] == "ValueError"
     assert "bad schema" in metrics["last_failure_error"]
     assert "paths" in app.state._openapi_cache
 

@@ -40,31 +40,11 @@ class TestPublishOverflow:
     async def test_drop_rate_limited_logging(self):
         bus = EventBus(queue_size=1)
         q = await bus.subscribe()
-        bus._last_drop_log_time = 0.0
+        bus._last_drop_log_time = {}  # per-subscriber dict
         await bus.publish(_make_event())
         await bus.publish(_make_event())  # triggers drop
-        # The warning should have been issued (time > 10s since epoch 0)
-        assert bus._last_drop_log_time > 0
-
-
-class TestStream:
-    @pytest.mark.asyncio
-    async def test_stream_yields_events(self):
-        bus = EventBus(queue_size=10)
-        e = _make_event(type="state.executing")
-
-        async def _producer():
-            await asyncio.sleep(0.01)
-            await bus.publish(e)
-
-        task = asyncio.create_task(_producer())
-        collected = []
-        async for ev in bus.stream(timeout=0.5):
-            collected.append(ev)
-            break  # just get one
-        await task
-        assert len(collected) == 1
-        assert collected[0].type == "state.executing"
+        # The warning should have been issued (per-subscriber tracking)
+        assert len(bus._last_drop_log_time) > 0
 
 
 class TestDrain:

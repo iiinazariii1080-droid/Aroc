@@ -21,13 +21,10 @@ def test_service_urls_are_http():
         IGUS_CONTAINER_PORT,
         XARM_CONTAINER_IP,
         XARM_CONTAINER_PORT,
-        SYMOVO_CONTAINER_IP,
-        SYMOVO_CONTAINER_PORT,
     )
     # All ports should be numeric strings
     assert IGUS_CONTAINER_PORT.isdigit()
     assert XARM_CONTAINER_PORT.isdigit()
-    assert SYMOVO_CONTAINER_PORT.isdigit()
 
 
 def test_joystick_defaults():

@@ -32,6 +32,7 @@ class Settings:
     janus_http_base: str = os.environ.get("JANUS_HTTP", f"http://127.0.0.1:{PORTS.JANUS_HTTP}")
     relay_url: str = os.environ.get("RELAY_URL", f"http://127.0.0.1:{PORTS.DEPTH_PROXY}").rstrip("/")
     depth_cam_url: str = os.environ.get("DEPTH_CAM_URL", f"http://{DEVICES.DEPTH_CAMERA_IP}:{PORTS.COLOR_CAMERA}").rstrip("/")
+    realsense_mux_url: str = os.environ.get("REALSENSE_MUX_URL", "http://localhost:8000")
     allow_insecure_tls: bool = os.environ.get("ALLOW_INSECURE_TLS", "0") == "1"
     turn_host: str = os.getenv("TURN_HOST", DEVICES.TURN_HOST)
     turn_port: int = int(os.getenv("TURN_PORT", "3478"))
@@ -40,6 +41,9 @@ class Settings:
     turn_shared_secret: str = os.getenv("TURN_SHARED_SECRET", "")  # coturn static-auth-secret for ephemeral creds
     turn_cred_ttl: int = int(os.getenv("TURN_CRED_TTL", "86400"))  # ephemeral credential lifetime in seconds (24h)
     ice_policy: str = os.getenv("ICE_POLICY", "all")
+
+    janus_cfg_path: Path = Path(os.getenv("JANUS_CFG_PATH", "/opt/janus/etc/janus/janus.jcfg"))
+    janus_nat_json: Path = Path(os.getenv("JANUS_NAT_JSON", "/etc/robot/janus-nat.json"))
 
     def __post_init__(self) -> None:
         if not self.turn_pass and not self.turn_shared_secret:

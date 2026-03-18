@@ -105,7 +105,7 @@ def emit(
 
     # Prometheus counter (lazy import to avoid circular deps)
     try:
-        from app.routes.metrics import fdir_events_total
+        from app.metrics import fdir_events_total
         fdir_events_total.labels(domain=event.domain, severity=event.severity).inc()
     except Exception:
         pass

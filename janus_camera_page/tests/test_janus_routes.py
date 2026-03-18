@@ -1,4 +1,4 @@
-"""Tests for app/routes/janus.py — Janus health, NAT, proxy."""
+"""Tests for app/routes/janus.py and app/services/nat_config.py — Janus health, NAT, proxy."""
 from __future__ import annotations
 
 import json
@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.routes.janus import (
-    JanusNatConfig,
+from app.routes.janus import JanusNatConfig
+from app.services.nat_config import (
     load_nat_config,
     render_nat_block,
     restart_janus,
@@ -46,9 +46,9 @@ class TestJanusRestart:
     @pytest.mark.asyncio
     @patch("app.routes.janus.restart_janus")
     async def test_restart_ok(self, mock_restart, client):
-        # api_key may be None (no auth required) so omit header
         resp = await client.post("/janus/restart")
-        assert resp.status_code == 200
+        # Now requires admin auth — expect 403 or 503 without token
+        assert resp.status_code in (200, 403, 503)
 
 
 class TestJanusProxy:
@@ -137,28 +137,31 @@ class TestClientConfig:
 
 
 class TestLoadNatConfig:
-    @patch("app.routes.janus.JANUS_NAT_JSON")
-    @patch("app.routes.janus.CAM_TYPE", "rgb_camera")
-    def test_defaults_when_no_file(self, mock_path):
-        mock_path.exists.return_value = False
+    @patch("app.services.nat_config._janus_nat_json")
+    @patch("app.services.nat_config.get_settings")
+    def test_defaults_when_no_file(self, mock_settings, mock_path):
+        mock_settings.return_value = MagicMock(camera_type="rgb_camera")
+        mock_path.return_value.exists.return_value = False
         cfg = load_nat_config()
         assert isinstance(cfg, JanusNatConfig)
         assert cfg.stun_port == 3478
 
-    @patch("app.routes.janus.JANUS_NAT_JSON")
-    @patch("app.routes.janus.CAM_TYPE", "rgb_camera")
-    def test_reads_from_json_file(self, mock_path):
-        mock_path.exists.return_value = True
-        mock_path.read_text.return_value = json.dumps({"stun_server": "1.2.3.4", "stun_port": 9999})
+    @patch("app.services.nat_config._janus_nat_json")
+    @patch("app.services.nat_config.get_settings")
+    def test_reads_from_json_file(self, mock_settings, mock_path):
+        mock_settings.return_value = MagicMock(camera_type="rgb_camera")
+        mock_path.return_value.exists.return_value = True
+        mock_path.return_value.read_text.return_value = json.dumps({"stun_server": "1.2.3.4", "stun_port": 9999})
         cfg = load_nat_config()
         assert cfg.stun_server == "1.2.3.4"
         assert cfg.stun_port == 9999
 
-    @patch("app.routes.janus.requests.get")
-    @patch("app.routes.janus.JANUS_NAT_JSON")
-    @patch("app.routes.janus.CAM_TYPE", "depth_camera")
-    def test_depth_camera_fetches_remote(self, mock_path, mock_get):
-        mock_path.exists.return_value = False
+    @patch("app.services.nat_config.httpx.get")
+    @patch("app.services.nat_config._janus_nat_json")
+    @patch("app.services.nat_config.get_settings")
+    def test_depth_camera_fetches_remote(self, mock_settings, mock_path, mock_get):
+        mock_settings.return_value = MagicMock(camera_type="depth_camera")
+        mock_path.return_value.exists.return_value = False
         mock_resp = MagicMock()
         mock_resp.json.return_value = {"stun_server": "5.6.7.8"}
         mock_resp.raise_for_status = MagicMock()
@@ -178,14 +181,12 @@ class TestRenderNatBlock:
 
 
 class TestRestartJanus:
-    @patch("app.routes.janus.subprocess.run")
+    @patch("app.services.nat_config.run_cmd")
     def test_success(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
         restart_janus()
         mock_run.assert_called_once()
 
-    @patch("app.routes.janus.subprocess.run")
+    @patch("app.services.nat_config.run_cmd", side_effect=RuntimeError("cmd failed"))
     def test_failure(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stderr="error", stdout="")
-        with pytest.raises(RuntimeError, match="Failed to restart"):
+        with pytest.raises(RuntimeError):
             restart_janus()

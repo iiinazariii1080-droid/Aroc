@@ -79,52 +79,37 @@ class TestMoveSpeedRequestValidation:
 
 # ─── SSE connection limiter ──────────────────────────────────────────
 
-import routes.aehub as aehub_mod
+from services.event_stream_service import EventStreamService
+from services.event_bus import EventBus
 
 
 class TestSSEConnectionLimiter:
-    """P1-5: SSE endpoints must cap concurrent connections."""
+    """P1-5: SSE endpoints must cap concurrent connections via EventStreamService."""
 
     @pytest.mark.asyncio
     async def test_sse_counter_increments_and_decrements(self):
-        """Verify the counter goes up and back down after gen() finishes."""
-        old = aehub_mod._sse_active
+        """Verify the counter goes up and back down."""
+        mock_bus = MagicMock(spec=EventBus)
+        mock_bus.subscribe = AsyncMock(return_value=asyncio.Queue())
+        mock_bus.unsubscribe = AsyncMock()
+        svc = EventStreamService(mock_bus)
 
-        # Simulate a gen() that immediately disconnects
-        request = MagicMock()
-        request.is_disconnected = AsyncMock(return_value=True)
-
-        mock_q = asyncio.Queue()
-        from routes.aehub import stream_events
-        with patch.object(aehub_mod, "_SSE_MAX_CLIENTS", 1000):
-            with patch("routes.aehub.settings") as s, \
-                 patch("routes.aehub.event_bus") as mock_bus:
-                s.robot_id = "r1"
-                mock_bus.subscribe = AsyncMock(return_value=mock_q)
-                mock_bus.unsubscribe = AsyncMock()
-                resp = await stream_events(request=request, robot_id="r1")
-                chunks = []
-                async for chunk in resp.body_iterator:
-                    chunks.append(chunk)
-
-        # After generator exhausted, counter must be back to original
-        assert aehub_mod._sse_active == old
+        assert svc._sse_active == 0
+        result = await svc.sse_try_increment()
+        assert result is True
+        assert svc._sse_active == 1
+        await svc.sse_decrement()
+        assert svc._sse_active == 0
 
     @pytest.mark.asyncio
     async def test_sse_rejects_when_limit_reached(self):
-        """When _sse_active >= max, gen yields error and returns."""
-        request = MagicMock()
-        request.is_disconnected = AsyncMock(return_value=False)
-
-        with patch.object(aehub_mod, "_SSE_MAX_CLIENTS", 0):
-            with patch("routes.aehub.settings") as s:
-                s.robot_id = "r1"
-                resp = await aehub_mod.stream_events(request=request, robot_id="r1")
-                chunks = []
-                async for chunk in resp.body_iterator:
-                    chunks.append(chunk)
-
-        assert any(b"Too many SSE" in c for c in chunks)
+        """When _sse_active >= max, sse_try_increment returns False."""
+        mock_bus = MagicMock(spec=EventBus)
+        svc = EventStreamService(mock_bus)
+        svc._sse_active = svc.SSE_MAX_CLIENTS  # at limit
+        result = await svc.sse_try_increment()
+        assert result is False
+        assert svc._sse_active == svc.SSE_MAX_CLIENTS  # unchanged
 
 
 # ─── client_id validation ────────────────────────────────────────────
@@ -149,10 +134,17 @@ class TestClientIdValidation:
     @pytest.mark.asyncio
     async def test_poll_rejects_bad_client_id(self):
         """poll_events raises 422 for invalid client_id."""
+        mock_event_stream = MagicMock(spec=EventStreamService)
+        mock_bus = MagicMock(spec=EventBus)
         with patch("routes.aehub.settings") as s:
             s.robot_id = "r1"
             with pytest.raises(HTTPException) as exc_info:
-                await poll_events(robot_id="r1", client_id="a b c!@#")
+                await poll_events(
+                    event_stream=mock_event_stream,
+                    bus=mock_bus,
+                    robot_id="r1",
+                    client_id="a b c!@#",
+                )
             assert exc_info.value.status_code == 422
 
 
@@ -168,12 +160,12 @@ class TestContainerDoubleStop:
     async def test_double_stop_is_safe(self):
         svc = AppServices(
             symovo_client=MagicMock(close=AsyncMock()),
-            transport_orchestrator=MagicMock(),
-            mqtt_adapter=None,
-            command_handler=None,
+            command_handler=MagicMock(),
             status_publisher=MagicMock(stop=AsyncMock()),
             event_dispatcher=MagicMock(stop=AsyncMock()),
-            navigation_facade=MagicMock(),
+            event_stream=MagicMock(stop=AsyncMock()),
+            event_bus=MagicMock(),
+            state_store=MagicMock(),
             bg_tasks=[],
         )
         await svc.stop()
@@ -219,7 +211,7 @@ class TestPersistenceEviction:
 
 from exceptions import (
     RobotBaseError, DeviceBusyError, DeviceConnectionError,
-    TransportMoveError, InputError, Conflict,
+    InputError, Conflict,
 )
 
 
@@ -240,39 +232,11 @@ class TestExceptionErrorCodes:
     def test_device_connection(self):
         assert DeviceConnectionError("x").error_code == "DEVICE_CONNECTION_ERROR"
 
-    def test_transport_move(self):
-        assert TransportMoveError("x").error_code == "TRANSPORT_MOVE_FAILED"
-
     def test_input_error(self):
         assert InputError("x").error_code == "INPUT_ERROR"
 
     def test_conflict(self):
         assert Conflict("x").error_code == "CONFLICT"
-
-
-# ─── MQTT password masking ───────────────────────────────────────────
-
-from services.mqtt_adapter import MqttAdapter
-
-
-class TestMqttPasswordMasking:
-    """P1-8: MQTT password should not appear in repr."""
-
-    def test_repr_no_password(self):
-        a = MqttAdapter.__new__(MqttAdapter)
-        a.broker_host = "10.0.0.1"
-        a.broker_port = 1883
-        a.use_tls = False
-        a.robot_id = "r1"
-        a._password = "s3cr3t"
-        r = repr(a)
-        assert "s3cr3t" not in r
-        assert "10.0.0.1" in r
-
-    def test_password_property(self):
-        a = MqttAdapter.__new__(MqttAdapter)
-        a._password = "hunter2"
-        assert a.password == "hunter2"
 
 
 # ─── Navigate lock timeout ───────────────────────────────────────────

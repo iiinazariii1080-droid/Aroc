@@ -9,7 +9,7 @@ import asyncio
 from datetime import datetime, timezone
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from services.status_publisher import StatusPublisher
 from domain.models import ActiveTransport
@@ -17,21 +17,17 @@ from domain.models import ActiveTransport
 
 @pytest.mark.asyncio
 async def test_transport_manager_creates_watcher_per_command_even_if_transport_id_reused(
-    mock_symovo_client, mock_mqtt_adapter, event_bus_instance
+    mock_symovo_client, event_bus_instance
 ):
-    publisher = StatusPublisher(symovo_client=mock_symovo_client, mqtt_adapter=mock_mqtt_adapter, bus=event_bus_instance)
+    ss = MagicMock()
+    ss.get_last_navigation_status_with_ts = AsyncMock(return_value=(None, 0.0))
+    ss.set_last_navigation_status = AsyncMock()
+    publisher = StatusPublisher(
+        symovo_client=mock_symovo_client,
+        bus=event_bus_instance, state_store=ss,
+    )
 
     seen = []
-
-    async def fake_watch_transport(*, command_id: str, transport_id: str):
-        seen.append((command_id, transport_id))
-        try:
-            while True:
-                await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-            return
-
-    publisher._watch_transport = fake_watch_transport  # type: ignore[method-assign]
 
     shared_transport_id = "transport_SHARED"
     t1 = ActiveTransport(
@@ -53,25 +49,32 @@ async def test_transport_manager_creates_watcher_per_command_even_if_transport_i
 
     call_n = 0
 
-    async def fake_get_active_commands_for_publishing():
+    async def fake_get_active_commands():
         nonlocal call_n
         call_n += 1
         if call_n == 1:
             return {"cmd_A": t1}
         if call_n <= 4:
             return {"cmd_B": t2}
-        # stop loop — give cmd_B several iterations to ensure its watcher starts
-        publisher._running = False
+        publisher._running_flag.clear()
         return {}
 
-    # Avoid idling publishes affecting assertions
-    publisher._publish_navigation_status = AsyncMock()
+    ss.get_active_commands_for_publishing = fake_get_active_commands
 
-    with patch(
-        "services.status_publisher.state_store.get_active_commands_for_publishing",
-        new=fake_get_active_commands_for_publishing,
-    ):
-        publisher._running = True
+    # Patch TransportWatcherTask to record what watchers were created
+    class FakeWatcher:
+        def __init__(self, **kwargs):
+            pass
+        async def run(self, *, command_id, transport_id):
+            seen.append((command_id, transport_id))
+            try:
+                while True:
+                    await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                return
+
+    with patch("services.status_publisher.TransportWatcherTask", FakeWatcher):
+        publisher._running_flag.set()
         tm_task = asyncio.create_task(publisher._transport_manager())
         await tm_task
 
@@ -82,8 +85,12 @@ async def test_transport_manager_creates_watcher_per_command_even_if_transport_i
 
 
 @pytest.mark.asyncio
-async def test_stop_awaits_transport_watchers(mock_symovo_client, mock_mqtt_adapter, event_bus_instance):
-    publisher = StatusPublisher(symovo_client=mock_symovo_client, mqtt_adapter=mock_mqtt_adapter, bus=event_bus_instance)
+async def test_stop_awaits_transport_watchers(mock_symovo_client, event_bus_instance, state_store):
+    publisher = StatusPublisher(
+        symovo_client=mock_symovo_client,
+        bus=event_bus_instance,
+        state_store=state_store,
+    )
 
     # Create a watcher that delays cancellation handling to make the test deterministic.
     async def slow_cancel_watcher():

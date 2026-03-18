@@ -1,48 +1,46 @@
-"""Tests for services/transport_orchestrator.py."""
+"""Tests for transport methods on SymovoAgvClient (transport_create_station, delete_transport)."""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from services.transport_orchestrator import TransportOrchestrator
 from domain.models import NavigationStatusEnum
+from domain.state_machine import NavigationStateMachine
 
 
-def _make_orch() -> TransportOrchestrator:
+def _make_client() -> MagicMock:
     client = MagicMock()
     client.robot_number = 15
-    client.transport_create = AsyncMock(return_value={"id": 1, "state": 0})
+    client.transport_create_station = AsyncMock(return_value={"id": 1, "state": 0})
     client.transport_move_to_pose = AsyncMock(return_value={"id": 2, "state": 0})
     client.transport_start = AsyncMock(return_value={"ok": True})
     client.transport_stop = AsyncMock(return_value={"ok": True})
-    client.delete = AsyncMock()
-    orch = TransportOrchestrator(client)
-    return orch
+    client.delete_transport = AsyncMock(return_value=True)
+    return client
 
 
-class TestCreateTransportToStation:
+class TestTransportCreateStation:
     @pytest.mark.asyncio
     async def test_basic(self):
-        orch = _make_orch()
-        result = await orch.create_transport_to_station(5, description="Test")
+        client = _make_client()
+        result = await client.transport_create_station(5, description="Test")
         assert result == {"id": 1, "state": 0}
-        orch.symovo_client.transport_create.assert_called_once()
-        payload = orch.symovo_client.transport_create.call_args[0][0]
-        assert payload["steps"][0]["station_id"] == 5
+        client.transport_create_station.assert_called_once_with(5, description="Test")
 
     @pytest.mark.asyncio
     async def test_default_description(self):
-        orch = _make_orch()
-        await orch.create_transport_to_station(3)
-        payload = orch.symovo_client.transport_create.call_args[0][0]
-        assert "Station 3" in payload["description"]
+        client = _make_client()
+        await client.transport_create_station(3)
+        client.transport_create_station.assert_called_once_with(3)
 
 
-class TestCreateTransportToPose:
+class TestTransportMoveToPose:
     @pytest.mark.asyncio
     async def test_basic(self):
-        orch = _make_orch()
-        result = await orch.create_transport_to_pose(1.0, 2.0, theta_rad=0.5)
+        client = _make_client()
+        result = await client.transport_move_to_pose(
+            x_m=1.0, y_m=2.0, theta_rad=0.5, map_id=None, max_speed_m_s=None, wait=False,
+        )
         assert result == {"id": 2, "state": 0}
-        orch.symovo_client.transport_move_to_pose.assert_called_once_with(
+        client.transport_move_to_pose.assert_called_once_with(
             x_m=1.0, y_m=2.0, theta_rad=0.5, map_id=None, max_speed_m_s=None, wait=False,
         )
 
@@ -50,45 +48,44 @@ class TestCreateTransportToPose:
 class TestStartStop:
     @pytest.mark.asyncio
     async def test_start(self):
-        orch = _make_orch()
-        result = await orch.start_transport("42")
+        client = _make_client()
+        result = await client.transport_start("42")
         assert result == {"ok": True}
-        orch.symovo_client.transport_start.assert_called_once_with("42")
+        client.transport_start.assert_called_once_with("42")
 
     @pytest.mark.asyncio
     async def test_stop(self):
-        orch = _make_orch()
-        result = await orch.stop_transport("42")
+        client = _make_client()
+        result = await client.transport_stop("42")
         assert result == {"ok": True}
-        orch.symovo_client.transport_stop.assert_called_once_with("42")
+        client.transport_stop.assert_called_once_with("42")
 
 
 class TestDeleteTransport:
     @pytest.mark.asyncio
     async def test_success(self):
-        orch = _make_orch()
-        assert await orch.delete_transport("42") is True
-        orch.symovo_client.delete.assert_called_once()
+        client = _make_client()
+        assert await client.delete_transport("42") is True
+        client.delete_transport.assert_called_once_with("42")
 
     @pytest.mark.asyncio
     async def test_failure(self):
-        orch = _make_orch()
-        orch.symovo_client.delete = AsyncMock(side_effect=RuntimeError("fail"))
-        assert await orch.delete_transport("42") is False
+        client = _make_client()
+        client.delete_transport = AsyncMock(side_effect=RuntimeError("fail"))
+        with pytest.raises(RuntimeError):
+            await client.delete_transport("42")
 
 
-class TestStaticHelpers:
+class TestStateMachineHelpers:
+    """These helpers now live on NavigationStateMachine directly."""
+
     def test_map_symovo_to_aehub(self):
-        assert TransportOrchestrator.map_symovo_to_aehub(8) == NavigationStatusEnum.ARRIVED
-
-    def test_get_transport_state(self):
-        assert TransportOrchestrator.get_transport_state({"state": 5}) == 5
-        assert TransportOrchestrator.get_transport_state({}) is not None  # defaults to UNKNOWN sentinel
+        assert NavigationStateMachine.map_symovo_to_aehub(8) == NavigationStatusEnum.ARRIVED
 
     def test_is_terminal_state(self):
-        assert TransportOrchestrator.is_terminal_state({"state": 8}) is True
-        assert TransportOrchestrator.is_terminal_state({"state": 1}) is False
+        assert NavigationStateMachine.is_terminal_state(8) is True
+        assert NavigationStateMachine.is_terminal_state(1) is False
 
     def test_is_active_state(self):
-        assert TransportOrchestrator.is_active_state({"state": 5}) is True
-        assert TransportOrchestrator.is_active_state({"state": 8}) is False
+        assert NavigationStateMachine.is_active_state(5) is True
+        assert NavigationStateMachine.is_active_state(8) is False

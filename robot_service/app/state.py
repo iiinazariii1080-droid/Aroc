@@ -110,6 +110,10 @@ async def startup(app: FastAPI) -> None:
         app.state.xarm_commands = ManipulatorCommands(app.state.xarm_cm.send, user_id="joystick", version="xarm6", stop_cmd_name="emergency_stop", response_manager=responses)
         app.state.xarm_safety = safety
 
+        # Inject xarm WS commands into robot_scripts for emergency_stop
+        import app.robot_scripts as _rs
+        _rs.set_xarm_commands(app.state.xarm_commands)
+
         # Session state for manual joystick control
         app.state.manual_active_lock = asyncio.Lock()
         app.state.manual_active: bool = False

@@ -4,8 +4,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from shared_config.network import get_service_url
 import aiohttp
 import asyncio
+import logging
 import threading
 from typing import Optional, Dict, Any
+
+_log = logging.getLogger(__name__)
 from app.decorator import*
 from exceptions import DeviceConnectionError, DeviceError
 from models.api_types import SymovoStatusResponse, ErrorStatus
@@ -85,19 +88,11 @@ def _normalize_symovo_status(raw):
 
 class SymovoAgvClient:
     def __init__(self, base_url: Optional[str] = None, timeout_seconds: int = 10, operation_timeout_seconds: Optional[float] = None, motion_timeout_seconds: Optional[float] = None):
-        # Resolve base URL with priority: explicit arg -> env/config -> sensible default
         if base_url is None:
-            try:
-                from core.connection_config import web_server_ip, web_server_port  # type: ignore
-                base_url = f"http://{web_server_ip}:{web_server_port}"
-            except Exception:
-                base_url = get_service_url("symovo")
-
-        # If someone passed the legacy "/v0" base, ignore it and use new gateway
-        if "/v0" in base_url:
             base_url = get_service_url("symovo")
 
         self.base_url = base_url.rstrip("/")
+        _log.info("SymovoAgvClient base_url=%s", self.base_url)
         self._session: Optional[aiohttp.ClientSession] = None
         self._timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -260,6 +255,10 @@ class SymovoAgvClient:
     @guarded_async_call(symovo_lock)
     async def go_to_charging_station(self, station_id: int) -> Dict[str, Any]:
         return await self._post(f"/go_to_charging_station/{station_id}", timeout=self._infinite_timeout, op_timeout=self._operation_timeout_seconds)
+
+    @guarded_async_call(symovo_lock)
+    async def disable_all_charging_stations(self) -> Dict[str, Any]:
+        return await self._post("/charging_stations/disable_all")
 
     @guarded_async_call(symovo_lock)
     async def fault_reset(self) -> Dict[str, Any]:

@@ -1,9 +1,8 @@
 """Integration tests for health endpoints: /livez, /healthz, /readyz."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-from unittest.mock import patch
 
 import pytest
 
@@ -40,7 +39,7 @@ async def test_readyz_ok(client):
 
 @pytest.mark.asyncio
 async def test_readyz_degraded_when_auth_missing_token(client, app):
-    app.state.auth_client.describe = MagicMock(
+    app.state.auth_client.describe = AsyncMock(
         return_value={
             "token_present": False,
             "consecutive_failures": 3,

@@ -10,11 +10,11 @@ from app.core.logging_cfg import setup_logging
 
 setup_logging()
 
-from app.core.http_client import lifespan
+from app.core.lifecycle import lifespan
 from app.core.config import ALLOWED_ORIGINS
 from app.core.openapi_agg import setup_custom_openapi
 
-from app.routers import proxy_http, proxy_ws, services_meta, health, hub
+from app.routers import proxy_http, proxy_ws, favicon, health, hub, metrics_prom
 
 app = FastAPI(title="API Gateway", lifespan=lifespan)
 
@@ -56,22 +56,26 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "Authorization", "X-Admin-Key", "X-Request-ID"],
 )
 
 app.include_router(health.router)
 app.include_router(hub.router)
+app.include_router(metrics_prom.router)
 app.include_router(proxy_ws.router)
 app.include_router(proxy_http.router)  # catch-all — must be last
-app.include_router(services_meta.router)
+app.include_router(favicon.router)
 
 setup_custom_openapi(app)
 
 if __name__ == "__main__":
+    # Single worker only: stateful components (circuit breakers, hub_state,
+    # secret_store, metrics) use in-process memory and are not shared across
+    # OS processes.  Do not increase workers without migrating state to Redis.
     uvicorn.run(
         "main:app",
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8201")),
-        workers=int(os.getenv("UVICORN_WORKERS", "1")),
+        workers=1,
     )
 

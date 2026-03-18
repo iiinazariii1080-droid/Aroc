@@ -68,11 +68,15 @@ async def load_auth_context(
 async def request_robot_token(
     client: httpx.AsyncClient,
     context: AuthContext,
+    *,
+    timeout: httpx.Timeout | None = None,
 ) -> Dict[str, Any]:
+    if timeout is None:
+        timeout = httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=2.0)
     response = await client.post(
         context.auth_url,
         json={"robot_id": context.robot_id, "api_key": context.api_key},
-        timeout=httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=2.0),
+        timeout=timeout,
     )
     if response.status_code >= 400:
         raise httpx.HTTPStatusError(

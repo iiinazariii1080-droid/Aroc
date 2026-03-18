@@ -97,6 +97,11 @@ class AsyncHttpProxy:
             media_type=resp.headers.get("content-type"),
         )
 
+    async def get(self, url: str, **params: str) -> httpx.Response:
+        """Direct GET returning the raw httpx Response."""
+        client = await self._ensure_client()
+        return await client.get(url, params=params if params else None)
+
     async def get_json(self, url: str) -> Dict[str, Any]:
         """Simple GET → JSON for lightweight proxies (relay)."""
         client = await self._ensure_client()

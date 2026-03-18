@@ -63,43 +63,6 @@ async def test_unsubscribe(event_bus_instance):
 
 
 @pytest.mark.asyncio
-async def test_stream_iterator(event_bus_instance):
-    """Test streaming events as async iterator."""
-    bus = event_bus_instance
-    
-    # Start streaming (creates subscription)
-    import asyncio
-    stream_iter = bus.stream()
-    
-    # Publish multiple events in background
-    async def publish_events():
-        await asyncio.sleep(0.1)  # Small delay to ensure subscription is ready
-        for i in range(3):
-            event = AckEvent(type=AckType.RECEIVED.value, command_id=f"cmd_{i}")
-            await bus.publish(event)
-    
-    # Start publishing in background
-    publish_task = asyncio.create_task(publish_events())
-    
-    # Stream events with timeout
-    received = []
-    try:
-        async for event in stream_iter:
-            received.append(event)
-            if len(received) >= 3:
-                break
-    finally:
-        publish_task.cancel()
-        try:
-            await publish_task
-        except asyncio.CancelledError:
-            pass
-    
-    assert len(received) == 3
-    assert all(e.command_id.startswith("cmd_") for e in received)
-
-
-@pytest.mark.asyncio
 async def test_queue_overflow(event_bus_instance):
     """Test that queue overflow drops oldest messages."""
     bus = EventBus(queue_size=2)  # Small queue

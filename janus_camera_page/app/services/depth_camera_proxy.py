@@ -30,3 +30,10 @@ async def forward_request(request: Request, upstream_path: str) -> Response:
     settings = get_settings()
     url = f"{settings.depth_cam_url.rstrip('/')}{upstream_path}"
     return await _proxy.forward(request, url)
+
+
+async def get(path: str, **params: str) -> "httpx.Response":
+    """Direct GET to depth camera (reuses the managed client pool)."""
+    settings = get_settings()
+    url = f"{settings.depth_cam_url.rstrip('/')}{path}"
+    return await _proxy.get(url, **params)

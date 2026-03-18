@@ -3,11 +3,11 @@ Integration tests for API endpoints.
 """
 import pytest
 from fastapi.testclient import TestClient
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 from domain.models import NavigationStatus, PositionStatus, NavigationStatusEnum
 from services.reliability_metrics import reliability_metrics
 from main import app
-from app.dependencies import get_symovo_client
+from app.dependencies import get_symovo_client, get_state_store
 
 
 @pytest.mark.asyncio
@@ -26,65 +26,74 @@ async def test_get_robots(test_client):
 @pytest.mark.asyncio
 async def test_get_navigation_status(test_client):
     """Test GET /api/v1/robots/{robot_id}/status/navigation endpoint."""
-    with patch("routes.aehub.settings") as mock_settings, \
-         patch("routes.aehub.state_store") as mock_store:
-        mock_settings.robot_id = "fahrdummy-01"
-        mock_store.get_last_navigation_status = AsyncMock(
-            return_value=NavigationStatus(
-                status=NavigationStatusEnum.IDLE,
-                goal_id=None,
-                progress_percent=0,
-                eta_seconds=None,
-                error_reason=None,
-            )
+    mock_store = AsyncMock()
+    mock_store.get_last_navigation_status = AsyncMock(
+        return_value=NavigationStatus(
+            status=NavigationStatusEnum.IDLE,
+            goal_id=None,
+            progress_percent=0,
+            eta_seconds=None,
+            error_reason=None,
         )
-        
-        response = test_client.get("/api/v1/robots/fahrdummy-01/status/navigation")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "idle"
-        assert data["goal_id"] is None
+    )
+    app.dependency_overrides[get_state_store] = lambda: mock_store
+    try:
+        with patch("routes.aehub.settings") as mock_settings:
+            mock_settings.robot_id = "fahrdummy-01"
+            response = test_client.get("/api/v1/robots/fahrdummy-01/status/navigation")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "idle"
+            assert data["goal_id"] is None
+    finally:
+        app.dependency_overrides.pop(get_state_store, None)
 
 
 @pytest.mark.asyncio
 async def test_get_position_status(test_client):
     """Test GET /api/v1/robots/{robot_id}/status/position endpoint."""
-    with patch("routes.aehub.settings") as mock_settings, \
-         patch("routes.aehub.state_store") as mock_store:
-        mock_settings.robot_id = "fahrdummy-01"
-        mock_store.get_last_position_status = AsyncMock(
-            return_value=PositionStatus(
-                x=1.0,
-                y=2.0,
-                theta=0.5,
-                frame_id="map",
-            )
+    mock_store = AsyncMock()
+    mock_store.get_last_position_status = AsyncMock(
+        return_value=PositionStatus(
+            x=1.0,
+            y=2.0,
+            theta=0.5,
+            frame_id="map",
         )
-        
-        response = test_client.get("/api/v1/robots/fahrdummy-01/status/position")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["x"] == 1.0
-        assert data["y"] == 2.0
-        assert data["theta"] == 0.5
-        assert data["frame_id"] == "map"
+    )
+    app.dependency_overrides[get_state_store] = lambda: mock_store
+    try:
+        with patch("routes.aehub.settings") as mock_settings:
+            mock_settings.robot_id = "fahrdummy-01"
+            response = test_client.get("/api/v1/robots/fahrdummy-01/status/position")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["x"] == 1.0
+            assert data["y"] == 2.0
+            assert data["theta"] == 0.5
+            assert data["frame_id"] == "map"
+    finally:
+        app.dependency_overrides.pop(get_state_store, None)
 
 
 @pytest.mark.asyncio
 async def test_get_position_status_default(test_client):
     """Test GET /api/v1/robots/{robot_id}/status/position returns default when no position."""
-    with patch("routes.aehub.settings") as mock_settings, \
-         patch("routes.aehub.state_store") as mock_store:
-        mock_settings.robot_id = "fahrdummy-01"
-        mock_store.get_last_position_status = AsyncMock(return_value=None)
-        
-        response = test_client.get("/api/v1/robots/fahrdummy-01/status/position")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["x"] == 0.0
-        assert data["y"] == 0.0
-        assert data["theta"] == 0.0
-        assert data["frame_id"] == "map"
+    mock_store = AsyncMock()
+    mock_store.get_last_position_status = AsyncMock(return_value=None)
+    app.dependency_overrides[get_state_store] = lambda: mock_store
+    try:
+        with patch("routes.aehub.settings") as mock_settings:
+            mock_settings.robot_id = "fahrdummy-01"
+            response = test_client.get("/api/v1/robots/fahrdummy-01/status/position")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["x"] == 0.0
+            assert data["y"] == 0.0
+            assert data["theta"] == 0.0
+            assert data["frame_id"] == "map"
+    finally:
+        app.dependency_overrides.pop(get_state_store, None)
 
 
 @pytest.mark.asyncio
@@ -137,36 +146,11 @@ def test_ops_reliabilityz_endpoint(test_client):
     assert isinstance(reliability.get("top_rates_per_sec"), list)
 
 
-def test_ops_reliabilityz_latency_degraded_reason(test_client):
-    """Latency threshold breach should produce degraded reason in reliability payload."""
+def test_ops_reliabilityz_not_degraded_clean(test_client):
+    """Clean snapshot should not produce degraded flag."""
     fake_snapshot = {
         "uptime_s": 123.0,
         "counters": {},
-        "duration": {
-            "mqtt.publish.event.latency_s": {
-                "count": 20,
-                "sum_s": 40.0,  # avg 2000ms
-                "max_s": 3.0,
-            }
-        },
-    }
-    with patch("routes.health.reliability_metrics.snapshot", return_value=fake_snapshot):
-        response = test_client.get("/ops/reliabilityz")
-        assert response.status_code == 200
-        data = response.json()
-        reliability = data["reliability"]
-        assert reliability["degraded"] is True
-        reasons = reliability.get("reasons", [])
-        assert any("mqtt_event_latency" in reason for reason in reasons)
-
-
-def test_ops_reliabilityz_counter_degraded_reason(test_client):
-    """Counter threshold breach should produce degraded reason in reliability payload."""
-    fake_snapshot = {
-        "uptime_s": 99.0,
-        "counters": {
-            "mqtt.publish.event.failure": 3,
-        },
         "duration": {},
     }
     with patch("routes.health.reliability_metrics.snapshot", return_value=fake_snapshot):
@@ -174,9 +158,7 @@ def test_ops_reliabilityz_counter_degraded_reason(test_client):
         assert response.status_code == 200
         data = response.json()
         reliability = data["reliability"]
-        assert reliability["degraded"] is True
-        reasons = reliability.get("reasons", [])
-        assert any("mqtt_event_publish_failure" in reason for reason in reasons)
+        assert reliability["degraded"] is False
 
 
 def test_ops_reliabilityz_latency_not_degraded_with_low_samples(test_client):
@@ -239,44 +221,13 @@ def test_ops_reliabilityz_uses_runtime_metrics_updates(test_client):
         reliability_metrics.reset()
 
 
-def test_ops_reliabilityz_rate_degraded_reason(test_client):
-    """Rate threshold breach should produce degraded reason in reliability payload."""
-    fake_snapshot = {
-        "uptime_s": 333.0,
-        "counters": {},
-        "duration": {},
-        "rates_60s": {
-            "mqtt.publish.event.failure": 0.5,
-        },
-    }
-    with patch("routes.health.reliability_metrics.snapshot", return_value=fake_snapshot):
-        response = test_client.get("/ops/reliabilityz")
-        assert response.status_code == 200
-        data = response.json()
-        reliability = data["reliability"]
-        assert reliability["degraded"] is True
-        reasons = reliability.get("reasons", [])
-        assert any("mqtt_event_failure_rate" in reason for reason in reasons)
-
-
-def test_ops_reliabilityz_rate_not_degraded_below_threshold(test_client):
-    """Rate reason should not appear when rolling rate is below configured threshold."""
-    fake_snapshot = {
-        "uptime_s": 444.0,
-        "counters": {},
-        "duration": {},
-        "rates_60s": {
-            "mqtt.publish.event.failure": 0.001,
-        },
-    }
-    with patch("routes.health.reliability_metrics.snapshot", return_value=fake_snapshot), \
-         patch("routes.health.HEALTH_MQTT_EVENT_FAILURE_RATE_MAX_PER_S", 0.01):
-        response = test_client.get("/ops/reliabilityz")
-        assert response.status_code == 200
-        data = response.json()
-        reliability = data["reliability"]
-        reasons = reliability.get("reasons", [])
-        assert not any("mqtt_event_failure_rate" in reason for reason in reasons)
+def test_ops_reliabilityz_returns_thresholds(test_client):
+    """Reliability endpoint should include threshold configuration."""
+    response = test_client.get("/ops/reliabilityz")
+    assert response.status_code == 200
+    data = response.json()
+    reliability = data["reliability"]
+    assert "thresholds" in reliability
 
 
 def test_ops_reliability_prom_endpoint(test_client):
@@ -374,9 +325,3 @@ def test_symovo_v1_lidar_scan_png(test_client):
         _clear_symovo_override()
 
 
-def test_symovo_v1_lidar_raw_capability(test_client):
-    response = test_client.get("/api/v1/symovo/lidar/raw")
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["supported"] is False
-    assert payload["formats"] == []

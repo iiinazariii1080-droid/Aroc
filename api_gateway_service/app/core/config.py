@@ -20,8 +20,10 @@ class GatewaySettings(BaseSettings):
     """API Gateway configuration — single source of truth.
 
     All values are loaded from env vars (with ``.env`` fallback).
-    Module-level constants below are derived from an instance for
-    backward compatibility with ``from app.core.config import X``.
+    Import the ``settings`` singleton directly::
+
+        from app.core.config import settings
+        timeout = settings.http_connect_timeout
     """
 
     model_config = SettingsConfigDict(
@@ -79,6 +81,7 @@ class GatewaySettings(BaseSettings):
     cam_pool_timeout: float = Field(default=2.0, alias="CAM_POOL_TIMEOUT")
     cam_max_connections: int = Field(default=20, alias="CAM_MAX_CONNECTIONS")
     cam_max_keepalive: int = Field(default=10, alias="CAM_MAX_KEEPALIVE")
+    cam_keepalive_expiry: float = Field(default=15.0, alias="CAM_KEEPALIVE_EXPIRY")
     camera_services_csv: str = Field(default="color_camera,depth_camera", alias="CAMERA_SERVICES")
 
     # ── Concurrency ──────────────────────────────────────────────
@@ -90,10 +93,14 @@ class GatewaySettings(BaseSettings):
     ws_acquire_timeout: float = Field(default=5.0, alias="WS_ACQUIRE_TIMEOUT")
     ws_connect_timeout: float = Field(default=5.0, alias="WS_CONNECT_TIMEOUT")
     ws_total_timeout: float = Field(default=3600.0, alias="WS_TOTAL_TIMEOUT")
+    ws_max_message_size: int = Field(default=2**20, alias="WS_MAX_MESSAGE_SIZE")
+    ws_ping_interval: float = Field(default=20.0, alias="WS_PING_INTERVAL")
+    ws_ping_timeout: float = Field(default=20.0, alias="WS_PING_TIMEOUT")
 
     # ── Proxy lifecycle ──────────────────────────────────────────
     proxy_connect_timeout: float = Field(default=8.0, alias="PROXY_CONNECT_TIMEOUT")
     proxy_body_timeout: float = Field(default=15.0, alias="PROXY_BODY_TIMEOUT")
+    body_read_timeout: float = Field(default=30.0, alias="BODY_READ_TIMEOUT")
 
     # ── Hub / auth ───────────────────────────────────────────────
     default_hub_base_url: str | None = Field(default=None, alias="DEFAULT_HUB_BASE_URL")
@@ -108,6 +115,11 @@ class GatewaySettings(BaseSettings):
     allow_insecure_tls: bool = Field(default=False, alias="ALLOW_INSECURE_TLS")
     strict_runtime: bool | None = Field(default=None, alias="STRICT_RUNTIME")
     max_request_body_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_REQUEST_BODY_BYTES")
+    gateway_admin_key: str | None = Field(
+        default=None,
+        alias="GATEWAY_ADMIN_KEY",
+        description="If set, all mutating /api/v1/hub/* endpoints require X-Admin-Key header.",
+    )
 
     # ── Readiness ────────────────────────────────────────────────
     readiness_check_services: bool = Field(default=True, alias="READINESS_CHECK_SERVICES")
@@ -115,16 +127,22 @@ class GatewaySettings(BaseSettings):
     readiness_check_timeout: float = Field(default=2.5, alias="READINESS_CHECK_TIMEOUT")
 
 
-# ── Instantiate settings ────────────────────────────────────────────────────
+# ── Settings singleton ──────────────────────────────────────────────────────
 
-_settings = GatewaySettings()
+settings = GatewaySettings()
 
 
 # ── Service map builder ─────────────────────────────────────────────────────
 
 def load_service_map() -> Dict[str, Dict[str, str]]:
-    """Build service map from settings — no hardcoded IPs."""
-    s = _settings
+    """Build service map from settings — no hardcoded IPs.
+
+    URL resolution order (first wins):
+    1. SERVICE_MAP_JSON (full override blob)
+    2. Explicit per-service field in settings (SERVICE_IGUS_URL, etc.)
+    3. Default from shared_config network topology
+    """
+    s = settings
     lip = s.host_lan_ip
     dip = s.depth_camera_ip
     base: Dict[str, Dict[str, str]] = {
@@ -133,17 +151,11 @@ def load_service_map() -> Dict[str, Dict[str, str]]:
         "symovo":       {"url": s.service_symovo_url or f"http://{lip}:{PORTS.SYMOVO}", "prefix": ""},
         "robot":        {"url": s.service_robot_url or f"http://{lip}:{PORTS.ROBOT}", "prefix": ""},
         "color_camera": {"url": s.service_color_camera_url or f"http://{lip}:{PORTS.COLOR_CAMERA}", "prefix": ""},
+        # depth_camera uses COLOR_CAMERA port intentionally: the depth node
+        # runs the same janus_camera_page service on the same port as color,
+        # just on a different IP (depth_camera_ip).
         "depth_camera": {"url": s.service_depth_camera_url or f"http://{dip}:{PORTS.COLOR_CAMERA}", "prefix": ""},
     }
-    # ENV overrides per service (legacy SERVICE_<NAME>_URL pattern)
-    for key, cfg in base.items():
-        env_key = key.replace("-", "_").upper()
-        url_override = os.getenv(f"SERVICE_{env_key}_URL")
-        if url_override:
-            cfg["url"] = url_override
-        prefix_override = os.getenv(f"SERVICE_{env_key}_PREFIX")
-        if prefix_override is not None:
-            cfg["prefix"] = prefix_override
     # SERVICE_MAP_JSON override
     raw = s.service_map_json
     if raw:
@@ -152,57 +164,35 @@ def load_service_map() -> Dict[str, Dict[str, str]]:
             if isinstance(m, dict):
                 for k, v in m.items():
                     if isinstance(v, str):
+                        if not v.startswith(("http://", "https://")):
+                            logger.warning("SERVICE_MAP_JSON: skipping %s — URL must be http(s)", k)
+                            continue
                         base[k] = {"url": v, "prefix": "/api/v1"}
                     elif isinstance(v, dict):
                         url = v.get("url") or v.get("base_url")
                         prefix = v.get("prefix", "/api/v1")
                         if url:
+                            if not url.startswith(("http://", "https://")):
+                                logger.warning("SERVICE_MAP_JSON: skipping %s — URL must be http(s)", k)
+                                continue
                             base[k] = {"url": url, "prefix": prefix}
         except json.JSONDecodeError:
             logger.warning("Failed to parse SERVICE_MAP_JSON: %s", raw[:200])
     return base
 
 
-# ── Module-level constants (backward compat) ────────────────────────────────
+# ── Derived / computed values ───────────────────────────────────────────────
 
 SERVICE_MAP: Dict[str, Dict[str, str]] = load_service_map()
 
-APP_ENV = _settings.app_env.strip().lower()
-STRICT_RUNTIME = _settings.strict_runtime if _settings.strict_runtime is not None else (APP_ENV in {"prod", "production"})
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-VERIFY_TLS = _settings.verify_tls
-
-CONNECT_TIMEOUT_S = _settings.http_connect_timeout
-READ_TIMEOUT_S = _settings.http_read_timeout
-WRITE_TIMEOUT_S = _settings.http_write_timeout
-POOL_TIMEOUT_S = _settings.http_pool_timeout
-
-MAX_CONNECTIONS = _settings.http_max_connections
-MAX_KEEPALIVE_CONNECTIONS = _settings.http_max_keepalive_connections
-KEEPALIVE_EXPIRY_S = _settings.http_keepalive_expiry
-
-WS_XARM_URL = _settings.ws_xarm_url
-WS_COLOR_CAMERA_URL = _settings.ws_color_camera_url
-WS_DEPTH_CAMERA_URL = _settings.ws_depth_camera_url
-
-RETRY_ATTEMPTS = _settings.http_retry_attempts
-RETRY_BACKOFF_S = _settings.http_retry_backoff
-
-# ── Camera-specific HTTP client (isolated pool) ────────────────
-CAM_CONNECT_TIMEOUT_S = _settings.cam_connect_timeout
-CAM_READ_TIMEOUT_S = _settings.cam_read_timeout
-CAM_WRITE_TIMEOUT_S = _settings.cam_write_timeout
-CAM_POOL_TIMEOUT_S = _settings.cam_pool_timeout
-CAM_MAX_CONNECTIONS = _settings.cam_max_connections
-CAM_MAX_KEEPALIVE = _settings.cam_max_keepalive
+APP_ENV = settings.app_env.strip().lower()
+STRICT_RUNTIME = settings.strict_runtime if settings.strict_runtime is not None else (APP_ENV in {"prod", "production"})
 
 CAMERA_SERVICES = frozenset(
-    s.strip() for s in _settings.camera_services_csv.split(",") if s.strip()
+    s.strip() for s in settings.camera_services_csv.split(",") if s.strip()
 )
-
-# ── Per-service concurrency (asyncio.Semaphore) ────────────────
-DEFAULT_SERVICE_CONCURRENCY = _settings.default_service_concurrency
-CAMERA_SERVICE_CONCURRENCY = _settings.camera_service_concurrency
 
 
 def _service_concurrency(name: str) -> int:
@@ -211,89 +201,55 @@ def _service_concurrency(name: str) -> int:
     if val is not None:
         return int(val)
     if name in CAMERA_SERVICES:
-        return CAMERA_SERVICE_CONCURRENCY
-    return DEFAULT_SERVICE_CONCURRENCY
+        return settings.camera_service_concurrency
+    return settings.default_service_concurrency
 
 
 SERVICE_CONCURRENCY: Dict[str, int] = {
     name: _service_concurrency(name) for name in SERVICE_MAP
 }
 
-# ── WebSocket proxy limits ─────────────────────────────────────
-WS_MAX_CONCURRENT = _settings.ws_max_concurrent
-WS_ACQUIRE_TIMEOUT_S = _settings.ws_acquire_timeout
-WS_CONNECT_TIMEOUT_S = _settings.ws_connect_timeout
-WS_TOTAL_TIMEOUT_S = _settings.ws_total_timeout
-
-# ── HTTP proxy request lifecycle ──────────────────────────────
-PROXY_CONNECT_TIMEOUT_S = _settings.proxy_connect_timeout
-PROXY_BODY_TIMEOUT_S = _settings.proxy_body_timeout
-
-HOP_BY_HOP_HEADERS = {
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-}
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-DEFAULT_HUB_BASE_URL = _settings.default_hub_base_url
-DEFAULT_ROBOT_ID = _settings.default_robot_id
-DEFAULT_ROBOT_API_KEY = _settings.default_robot_api_key
-DEFAULT_ROBOT_DISPLAY_NAME = _settings.default_robot_display_name
-ROBOT_API_KEY_FILE = _settings.robot_api_key_file
-
-PUBLIC_HOST = _settings.public_host
-
 ALLOWED_ORIGINS = [
-    _settings.frontend_origin or f"http://{PUBLIC_HOST}:{PORTS.FRONTEND}",
+    settings.frontend_origin or f"http://{settings.public_host}:{PORTS.FRONTEND}",
     f"http://localhost:{PORTS.FRONTEND}",
     f"http://127.0.0.1:{PORTS.FRONTEND}",
 ]
-if _settings.allowed_origins_csv:
-    ALLOWED_ORIGINS.extend([o.strip() for o in _settings.allowed_origins_csv.split(",") if o.strip()])
+if settings.allowed_origins_csv:
+    ALLOWED_ORIGINS.extend([o.strip() for o in settings.allowed_origins_csv.split(",") if o.strip()])
 ALLOWED_ORIGINS = list(dict.fromkeys([o for o in ALLOWED_ORIGINS if o]))
-
-ALLOW_INSECURE_TLS = _settings.allow_insecure_tls
-
-MAX_REQUEST_BODY_BYTES = _settings.max_request_body_bytes
-
-READINESS_CHECK_SERVICES = _settings.readiness_check_services
-READINESS_CHECK_AUTH = _settings.readiness_check_auth
-READINESS_CHECK_TIMEOUT_S = _settings.readiness_check_timeout
 
 
 def validate_runtime_config() -> None:
     if not STRICT_RUNTIME:
         return
 
+    s = settings
     errors: list[str] = []
 
-    if not VERIFY_TLS:
+    if not s.verify_tls:
         errors.append("VERIFY_TLS must be enabled in strict runtime")
-    if ALLOW_INSECURE_TLS:
+    if s.allow_insecure_tls:
         errors.append("ALLOW_INSECURE_TLS must be disabled in strict runtime")
-    if not READINESS_CHECK_SERVICES:
+    if not s.readiness_check_services:
         errors.append("READINESS_CHECK_SERVICES must be enabled in strict runtime")
-    if not READINESS_CHECK_AUTH:
+    if not s.readiness_check_auth:
         errors.append("READINESS_CHECK_AUTH must be enabled in strict runtime")
+    if not s.gateway_admin_key:
+        errors.append("GATEWAY_ADMIN_KEY must be set in strict runtime to protect management endpoints")
 
-    if DEFAULT_ROBOT_API_KEY and DEFAULT_ROBOT_API_KEY.strip() == "api-key-123":
-        errors.append("DEFAULT_ROBOT_API_KEY contains demo value 'api-key-123'")
-    if DEFAULT_HUB_BASE_URL and DEFAULT_HUB_BASE_URL.rstrip("/") == "http://82.165.177.194:8000":
+    _demo_api_key = os.getenv("DEMO_ROBOT_API_KEY", "")
+    if _demo_api_key and s.default_robot_api_key and s.default_robot_api_key.strip() == _demo_api_key:
+        errors.append("DEFAULT_ROBOT_API_KEY contains demo value")
+    _demo_hub_url = os.getenv("DEMO_HUB_BASE_URL", "")
+    if _demo_hub_url and s.default_hub_base_url and s.default_hub_base_url.rstrip("/") == _demo_hub_url.rstrip("/"):
         errors.append("DEFAULT_HUB_BASE_URL contains demo endpoint")
 
-    if not ROBOT_API_KEY_FILE:
+    if not s.robot_api_key_file:
         errors.append("ROBOT_API_KEY_FILE must be configured in strict runtime")
     else:
-        key_file = Path(ROBOT_API_KEY_FILE)
+        key_file = Path(s.robot_api_key_file)
         if not key_file.is_file():
-            errors.append(f"ROBOT_API_KEY_FILE does not exist: {ROBOT_API_KEY_FILE}")
+            errors.append(f"ROBOT_API_KEY_FILE does not exist: {s.robot_api_key_file}")
 
     if errors:
         raise RuntimeError("Invalid strict runtime configuration:\n- " + "\n- ".join(errors))

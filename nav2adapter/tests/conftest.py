@@ -15,7 +15,6 @@ from services.state_store import StateStore
 from services.event_bus import EventBus
 from services.persistence_store import JsonPersistenceStore
 from services.symovo_service import SymovoAgvClient
-from services.mqtt_adapter import MqttAdapter
 from main import app
 
 
@@ -35,7 +34,6 @@ def test_settings() -> Settings:
         position_status_hz=2.0,
         navigation_status_hz=1.0,
         robot_id="test_robot",
-        mqtt_broker_host=None,  # Disable MQTT for unit tests
     )
 
 
@@ -45,7 +43,6 @@ async def state_store(test_settings: Settings) -> AsyncGenerator[StateStore, Non
     with patch("services.state_store.settings", test_settings):
         store = StateStore()
         yield store
-        # Cleanup
         if store._persistence:
             try:
                 os.remove(test_settings.persistence_path)
@@ -58,7 +55,6 @@ async def event_bus_instance() -> AsyncGenerator[EventBus, None]:
     """Create EventBus instance for testing."""
     bus = EventBus(queue_size=100)
     yield bus
-    # Cleanup subscribers
     async with bus._lock:
         bus._subscribers.clear()
 
@@ -69,7 +65,6 @@ async def persistence_store(temp_dir: Path) -> AsyncGenerator[JsonPersistenceSto
     store_path = temp_dir / "test_state.json"
     store = JsonPersistenceStore(str(store_path))
     yield store
-    # Cleanup
     try:
         if store_path.exists():
             os.remove(store_path)
@@ -92,40 +87,44 @@ def mock_symovo_client() -> MagicMock:
 
 
 @pytest.fixture
-def mock_mqtt_adapter() -> MagicMock:
-    """Create mock MqttAdapter."""
-    adapter = MagicMock(spec=MqttAdapter)
-    adapter.publish_navigation_status = AsyncMock()
-    adapter.publish_position_status = AsyncMock()
-    adapter.publish_event = AsyncMock()
-    adapter.connect = AsyncMock()
-    adapter.disconnect = AsyncMock()
-    adapter.is_connected = True
-    return adapter
-
-
-@pytest.fixture
 def test_client() -> Generator[TestClient, None, None]:
-    """Create FastAPI test client.
-
-    IMPORTANT: main.app uses a lifespan() that calls main.startup/main.shutdown.
-    For tests we patch these functions to no-ops so the suite never hits real Symovo hardware or MQTT.
-    """
+    """Create FastAPI test client."""
 
     async def _fake_startup(app):  # noqa: ANN001
-        # Minimal state required by /readyz (called via /healthz).
-        app.state.mqtt_adapter = None
-        app.state.status_publisher = MagicMock()
-        app.state.status_publisher._running = True
-        app.state.event_bus = MagicMock()
-        app.state.symovo_client = MagicMock()
+        from services.event_stream_service import EventStreamService
+        from services.safety_state_tracker import SafetyStateTracker
+
+        mock_status_publisher = MagicMock()
+        mock_status_publisher.is_running = True
+        mock_status_publisher._running = True
+        app.state.status_publisher = mock_status_publisher
+
+        mock_bus = EventBus(queue_size=100)
+        mock_store = StateStore()
+        mock_event_stream = EventStreamService(mock_bus)
+        mock_symovo = MagicMock(spec=SymovoAgvClient)
+        mock_symovo.move_speed = AsyncMock(return_value={"result": None})
+        mock_symovo.close = AsyncMock()
+
+        services = MagicMock()
+        services.event_bus = mock_bus
+        services.state_store = mock_store
+        services.event_stream = mock_event_stream
+        services.command_handler = MagicMock()
+        services.symovo_client = mock_symovo
+        services.status_publisher = mock_status_publisher
+
+        app.state.services = services
+        app.state.symovo_client = mock_symovo
+        app.state.safety_tracker = SafetyStateTracker()
 
     async def _fake_shutdown(app):  # noqa: ANN001
         return None
 
     with patch("main.startup", new=_fake_startup), \
          patch("main.shutdown", new=_fake_shutdown), \
-         patch.object(settings, "teleop_enabled", False):
+         patch.object(settings, "teleop_enabled", False), \
+         patch.object(settings, "command_api_key_disabled", True):
         with TestClient(app) as client:
             yield client
 

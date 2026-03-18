@@ -66,7 +66,7 @@ async def ingest_telemetry(payload: TelemetryPayload, request: Request) -> Respo
 
     # ── Prometheus metrics ──
     try:
-        from app.routes.metrics import (
+        from app.metrics import (
             ice_connects_total,
             ice_connect_duration_seconds,
             ttff_seconds,
@@ -92,6 +92,6 @@ async def ingest_telemetry(payload: TelemetryPayload, request: Request) -> Respo
                     client_packet_loss_ratio.set(payload.packets_lost / total)
 
     except Exception:
-        pass  # metrics not available — non-fatal
+        logger.debug("telemetry metrics update failed", exc_info=True)
 
     return Response(status_code=204)

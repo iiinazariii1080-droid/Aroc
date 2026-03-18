@@ -3,8 +3,15 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from contextlib import contextmanager
 
+from fastapi import HTTPException
 from main import app
-from app.dependencies import get_symovo_client
+from app.dependencies import (
+    get_symovo_client,
+    get_state_store,
+    get_event_bus,
+    get_event_stream,
+    get_command_handler,
+)
 from domain.models import NavigationStatus, NavigationStatusEnum, PositionStatus
 
 
@@ -24,13 +31,17 @@ class TestSymovoAgvRoutes:
     def test_get_pose_from_cache(self, test_client):
         raw = {"pose": {"x": 1.0, "y": 2.0, "theta": 0.0}, "id": 1}
         mock_client = MagicMock()
-        with patch("routes.symovo_agv.state_store") as ss, \
-             patch("routes.symovo_agv.settings") as s, \
-             _override_symovo(mock_client):
-            ss.get_last_raw_pose = AsyncMock(return_value=raw)
-            ss.get_last_raw_pose_age_s = AsyncMock(return_value=0.1)
-            s.cache_max_age_s = 5.0
-            resp = test_client.get("/pose")
+        mock_store = MagicMock()
+        mock_store.get_last_raw_pose = AsyncMock(return_value=raw)
+        mock_store.get_last_raw_pose_age_s = AsyncMock(return_value=0.1)
+        app.dependency_overrides[get_state_store] = lambda: mock_store
+        try:
+            with patch("routes.symovo_agv.settings") as s, \
+                 _override_symovo(mock_client):
+                s.cache_max_age_s = 5.0
+                resp = test_client.get("/pose")
+        finally:
+            app.dependency_overrides.pop(get_state_store, None)
         assert resp.status_code == 200
 
     def test_get_pose_cache_miss_fallback(self, test_client):
@@ -38,14 +49,18 @@ class TestSymovoAgvRoutes:
         raw = {"pose": {"x": 3.0, "y": 4.0, "theta": 0.5}, "id": 1}
         mock_client = MagicMock()
         mock_client.pose = AsyncMock(return_value=raw)
-        with patch("routes.symovo_agv.state_store") as ss, \
-             patch("routes.symovo_agv.settings") as s, \
-             _override_symovo(mock_client):
-            ss.get_last_raw_pose = AsyncMock(return_value=None)
-            ss.get_last_raw_pose_age_s = AsyncMock(return_value=999)
-            ss.set_last_raw_pose = AsyncMock()
-            s.cache_max_age_s = 5.0
-            resp = test_client.get("/pose")
+        mock_store = MagicMock()
+        mock_store.get_last_raw_pose = AsyncMock(return_value=None)
+        mock_store.get_last_raw_pose_age_s = AsyncMock(return_value=999)
+        mock_store.set_last_raw_pose = AsyncMock()
+        app.dependency_overrides[get_state_store] = lambda: mock_store
+        try:
+            with patch("routes.symovo_agv.settings") as s, \
+                 _override_symovo(mock_client):
+                s.cache_max_age_s = 5.0
+                resp = test_client.get("/pose")
+        finally:
+            app.dependency_overrides.pop(get_state_store, None)
         assert resp.status_code == 200
 
     def test_get_status_from_cache(self, test_client):
@@ -55,13 +70,17 @@ class TestSymovoAgvRoutes:
             "state_flags": {"drive_ready": True},
         }
         mock_client = MagicMock()
-        with patch("routes.symovo_agv.state_store") as ss, \
-             patch("routes.symovo_agv.settings") as s, \
-             _override_symovo(mock_client):
-            ss.get_last_raw_status = AsyncMock(return_value=raw)
-            ss.get_last_raw_status_age_s = AsyncMock(return_value=0.1)
-            s.cache_max_age_s = 5.0
-            resp = test_client.get("/status")
+        mock_store = MagicMock()
+        mock_store.get_last_raw_status = AsyncMock(return_value=raw)
+        mock_store.get_last_raw_status_age_s = AsyncMock(return_value=0.1)
+        app.dependency_overrides[get_state_store] = lambda: mock_store
+        try:
+            with patch("routes.symovo_agv.settings") as s, \
+                 _override_symovo(mock_client):
+                s.cache_max_age_s = 5.0
+                resp = test_client.get("/status")
+        finally:
+            app.dependency_overrides.pop(get_state_store, None)
         assert resp.status_code == 200
 
     def test_set_drive_mode(self, test_client):
@@ -86,6 +105,8 @@ class TestSymovoAgvRoutes:
         with _override_symovo(mock_client):
             resp = test_client.get("/charging_stations")
         assert resp.status_code == 200
+        data = resp.json()
+        assert data["stations"][0]["id"] == 1
 
     def test_get_transport(self, test_client):
         mock_client = MagicMock()
@@ -93,6 +114,9 @@ class TestSymovoAgvRoutes:
         with _override_symovo(mock_client):
             resp = test_client.get("/transport/42")
         assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == 42
+        assert data["state"] == 5
 
     def test_get_map(self, test_client):
         mock_client = MagicMock()
@@ -100,6 +124,30 @@ class TestSymovoAgvRoutes:
         with _override_symovo(mock_client):
             resp = test_client.get("/map")
         assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data["maps"], list)
+
+    def test_get_pose_no_state_store_returns_503(self, test_client):
+        """When StateStore DI fails, /pose returns 503, not AttributeError."""
+        def _no_store():
+            raise HTTPException(status_code=503, detail="StateStore not available")
+        app.dependency_overrides[get_state_store] = _no_store
+        try:
+            resp = test_client.get("/pose")
+        finally:
+            app.dependency_overrides.pop(get_state_store, None)
+        assert resp.status_code == 503
+
+    def test_get_status_no_state_store_returns_503(self, test_client):
+        """When StateStore DI fails, /status returns 503, not AttributeError."""
+        def _no_store():
+            raise HTTPException(status_code=503, detail="StateStore not available")
+        app.dependency_overrides[get_state_store] = _no_store
+        try:
+            resp = test_client.get("/status")
+        finally:
+            app.dependency_overrides.pop(get_state_store, None)
+        assert resp.status_code == 503
 
 
 # ── aehub routes (prefix /api/v1) ───────────────────────────────────
@@ -113,41 +161,37 @@ class TestAehubRoutes:
         data = resp.json()
         assert data["robots"][0]["id"] == "test-robot"
 
-    def test_get_positions(self, test_client):
-        import asyncio
-        with patch("routes.aehub.settings") as s, \
-             patch("routes.aehub.get_robot_positions_list", return_value=[
-                 {"id": "p1", "name": "Pos1", "params": {"location": {"x_m": 1}}}
-             ]):
-            s.robot_id = "test-robot"
-            resp = test_client.get("/api/v1/robots/test-robot/positions")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert len(data["positions"]) >= 1
-
     def test_get_navigation_status(self, test_client):
-        with patch("routes.aehub.settings") as s, \
-             patch("routes.aehub.state_store") as ss:
-            s.robot_id = "test-robot"
-            ss.get_last_navigation_status = AsyncMock(
-                return_value=NavigationStatus(
-                    status=NavigationStatusEnum.IDLE,
-                    goal_id=None,
-                    progress_percent=0,
-                )
+        mock_store = AsyncMock()
+        mock_store.get_last_navigation_status = AsyncMock(
+            return_value=NavigationStatus(
+                status=NavigationStatusEnum.IDLE,
+                goal_id=None,
+                progress_percent=0,
             )
-            resp = test_client.get("/api/v1/robots/test-robot/status/navigation")
+        )
+        app.dependency_overrides[get_state_store] = lambda: mock_store
+        try:
+            with patch("routes.aehub.settings") as s:
+                s.robot_id = "test-robot"
+                resp = test_client.get("/api/v1/robots/test-robot/status/navigation")
+        finally:
+            app.dependency_overrides.pop(get_state_store, None)
         assert resp.status_code == 200
         assert resp.json()["status"] == "idle"
 
     def test_get_position_status(self, test_client):
-        with patch("routes.aehub.settings") as s, \
-             patch("routes.aehub.state_store") as ss:
-            s.robot_id = "test-robot"
-            ss.get_last_position_status = AsyncMock(
-                return_value=PositionStatus(x=1.0, y=2.0, theta=0.5, frame_id="map")
-            )
-            resp = test_client.get("/api/v1/robots/test-robot/status/position")
+        mock_store = AsyncMock()
+        mock_store.get_last_position_status = AsyncMock(
+            return_value=PositionStatus(x=1.0, y=2.0, theta=0.5, frame_id="map")
+        )
+        app.dependency_overrides[get_state_store] = lambda: mock_store
+        try:
+            with patch("routes.aehub.settings") as s:
+                s.robot_id = "test-robot"
+                resp = test_client.get("/api/v1/robots/test-robot/status/position")
+        finally:
+            app.dependency_overrides.pop(get_state_store, None)
         assert resp.status_code == 200
         data = resp.json()
         assert data["x"] == 1.0
@@ -167,110 +211,148 @@ class TestAehubRoutes:
         assert "duration" in data
 
     def test_poll_events(self, test_client):
-        with patch("routes.aehub.settings") as s, \
-             patch("routes.aehub._get_poll_queue", new_callable=AsyncMock) as gpq, \
-             patch("routes.aehub.event_bus") as eb:
-            s.robot_id = "test-robot"
-            gpq.return_value = MagicMock()
-            eb.drain = AsyncMock(return_value=[])
-            resp = test_client.get("/api/v1/robots/test-robot/events/poll")
+        import asyncio
+        from services.event_stream_service import EventStreamService
+        from services.event_bus import EventBus
+        mock_event_stream = MagicMock(spec=EventStreamService)
+        mock_event_stream.get_poll_queue = AsyncMock(return_value=asyncio.Queue())
+        mock_bus = MagicMock(spec=EventBus)
+        mock_bus.drain = AsyncMock(return_value=[])
+        app.dependency_overrides[get_event_stream] = lambda: mock_event_stream
+        app.dependency_overrides[get_event_bus] = lambda: mock_bus
+        try:
+            with patch("routes.aehub.settings") as s:
+                s.robot_id = "test-robot"
+                resp = test_client.get("/api/v1/robots/test-robot/events/poll")
+        finally:
+            app.dependency_overrides.pop(get_event_stream, None)
+            app.dependency_overrides.pop(get_event_bus, None)
         assert resp.status_code == 200
         data = resp.json()
         assert "events" in data
 
-    def test_send_drive_to_position_no_facade(self, test_client):
-        """When navigation_facade is absent on app.state, expect 503."""
-        with patch("routes.aehub.settings") as s:
-            s.robot_id = "test-robot"
-            # The fake startup does not set navigation_facade → 503
-            resp = test_client.post(
-                "/api/v1/robots/test-robot/commands/driveToPosition",
-                json={"target_id": "TestPose"},
-            )
-        assert resp.status_code == 503
-
-    def test_send_drive_to_position_success(self, test_client):
-        """With a mocked facade, driveToPosition should return 200."""
-        mock_facade = AsyncMock()
-        mock_facade.send_drive_to_position = AsyncMock(
-            return_value=MagicMock(topic="nav/cmd", payload={"target": "A"})
-        )
-        with patch("routes.aehub.settings") as s:
-            s.robot_id = "test-robot"
-            app.state.navigation_facade = mock_facade
-            try:
+    def test_send_drive_to_position_no_handler(self, test_client):
+        """When command_handler is absent on app.state, expect 503."""
+        def _no_handler():
+            raise HTTPException(status_code=503, detail="CommandHandler not available")
+        app.dependency_overrides[get_command_handler] = _no_handler
+        try:
+            with patch("routes.aehub.settings") as s:
+                s.robot_id = "test-robot"
                 resp = test_client.post(
                     "/api/v1/robots/test-robot/commands/driveToPosition",
                     json={"target_id": "TestPose"},
                 )
-            finally:
-                del app.state.navigation_facade
-        assert resp.status_code == 200
+        finally:
+            app.dependency_overrides.pop(get_command_handler, None)
+        assert resp.status_code == 503
 
-    def test_send_cancel_command_no_facade(self, test_client):
-        with patch("routes.aehub.settings") as s:
-            s.robot_id = "test-robot"
-            resp = test_client.post(
-                "/api/v1/robots/test-robot/commands/cancel",
-                json={"command_id": "cmd-001"},
+    def test_send_drive_to_position_success(self, test_client):
+        """With a mocked handler, driveToPosition should return 200."""
+        mock_handler = AsyncMock()
+        mock_handler.handle_drive_to_position = AsyncMock(
+            return_value=NavigationStatus(
+                status=NavigationStatusEnum.NAVIGATING,
+                goal_id="cmd-1",
+                progress_percent=1,
             )
+        )
+        app.dependency_overrides[get_command_handler] = lambda: mock_handler
+        try:
+            with patch("routes.aehub.settings") as s:
+                s.robot_id = "test-robot"
+                resp = test_client.post(
+                    "/api/v1/robots/test-robot/commands/driveToPosition",
+                    json={"target_id": "TestPose"},
+                )
+        finally:
+            app.dependency_overrides.pop(get_command_handler, None)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "payload" in data
+        assert data["payload"]["navigation_status"]["status"] == "navigating"
+
+    def test_send_cancel_command_no_handler(self, test_client):
+        """When command_handler is absent, expect 503."""
+        def _no_handler():
+            raise HTTPException(status_code=503, detail="CommandHandler not available")
+        app.dependency_overrides[get_command_handler] = _no_handler
+        try:
+            with patch("routes.aehub.settings") as s:
+                s.robot_id = "test-robot"
+                resp = test_client.post(
+                    "/api/v1/robots/test-robot/commands/cancel",
+                    json={"command_id": "cmd-001"},
+                )
+        finally:
+            app.dependency_overrides.pop(get_command_handler, None)
         assert resp.status_code == 503
 
     def test_move_speed(self, test_client):
         mock_symovo = AsyncMock()
         mock_symovo.move_speed = AsyncMock(return_value={"status": "ok"})
-        with patch("routes.aehub.settings") as s, \
-             patch("routes.aehub.teleop_config") as tc:
-            s.robot_id = "test-robot"
-            tc.linear_speed = 0.3
-            tc.angular_speed = 0.5
-            tc.duration = 0.2
-            # move_speed reads from request.app.state.symovo_client
-            old_client = getattr(app.state, "symovo_client", None)
-            app.state.symovo_client = mock_symovo
-            try:
+
+        async def _override():
+            yield mock_symovo
+
+        app.dependency_overrides[get_symovo_client] = _override
+        try:
+            with patch("routes.aehub.settings") as s, \
+                 patch("routes.aehub.teleop_config") as tc:
+                s.robot_id = "test-robot"
+                tc.linear_speed = 0.3
+                tc.angular_speed = 0.5
+                tc.duration = 0.2
                 resp = test_client.put(
                     "/api/v1/robots/test-robot/move/speed",
                     json={"speed": 0.1, "angular_speed": 0.2, "duration": 0.5},
                 )
-            finally:
-                app.state.symovo_client = old_client
+        finally:
+            app.dependency_overrides.pop(get_symovo_client, None)
         assert resp.status_code == 200
 
     def test_move_speed_no_symovo(self, test_client):
-        """When symovo_client is None on app.state, expect 503."""
-        with patch("routes.aehub.settings") as s:
-            s.robot_id = "test-robot"
-            old = getattr(app.state, "symovo_client", None)
-            app.state.symovo_client = None
-            try:
+        """When symovo_client raises an error, expect 503."""
+        mock_symovo = AsyncMock()
+        mock_symovo.move_speed = AsyncMock(side_effect=RuntimeError("no client"))
+
+        async def _override():
+            yield mock_symovo
+
+        app.dependency_overrides[get_symovo_client] = _override
+        try:
+            with patch("routes.aehub.settings") as s:
+                s.robot_id = "test-robot"
                 resp = test_client.put(
                     "/api/v1/robots/test-robot/move/speed",
                     json={"speed": 0.1},
                 )
-            finally:
-                app.state.symovo_client = old
+        finally:
+            app.dependency_overrides.pop(get_symovo_client, None)
         assert resp.status_code == 503
 
     def test_move_speed_direction_only(self, test_client):
         """Direction-only command uses teleop_config defaults."""
         mock_symovo = AsyncMock()
         mock_symovo.move_speed = AsyncMock(return_value={"status": "ok"})
-        with patch("routes.aehub.settings") as s, \
-             patch("routes.aehub.teleop_config") as tc:
-            s.robot_id = "test-robot"
-            tc.linear_speed = 0.3
-            tc.angular_speed = 0.5
-            tc.duration = 0.2
-            old = getattr(app.state, "symovo_client", None)
-            app.state.symovo_client = mock_symovo
-            try:
+
+        async def _override():
+            yield mock_symovo
+
+        app.dependency_overrides[get_symovo_client] = _override
+        try:
+            with patch("routes.aehub.settings") as s, \
+                 patch("routes.aehub.teleop_config") as tc:
+                s.robot_id = "test-robot"
+                tc.linear_speed = 0.3
+                tc.angular_speed = 0.5
+                tc.duration = 0.2
                 resp = test_client.put(
                     "/api/v1/robots/test-robot/move/speed",
                     json={"linear_dir": 1, "angular_dir": -1},
                 )
-            finally:
-                app.state.symovo_client = old
+        finally:
+            app.dependency_overrides.pop(get_symovo_client, None)
         assert resp.status_code == 200
 
     def test_wrong_robot_id_404(self, test_client):
@@ -303,6 +385,9 @@ class TestSymovoAgvRoutesMore:
         with _override_symovo(mock_client):
             resp = test_client.put("/pause/stop")
         assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["result"] == {"ok": True}
 
     def test_pause_start(self, test_client):
         mock_client = MagicMock()
@@ -310,6 +395,9 @@ class TestSymovoAgvRoutesMore:
         with _override_symovo(mock_client):
             resp = test_client.put("/pause/start")
         assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["result"] == {"ok": True}
 
     def test_reset_emergency_stop(self, test_client):
         mock_client = MagicMock()
@@ -317,6 +405,9 @@ class TestSymovoAgvRoutesMore:
         with _override_symovo(mock_client):
             resp = test_client.put("/safety/reset_emergency_stop")
         assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["result"] == {"ok": True}
 
     def test_reset_software_fuse(self, test_client):
         mock_client = MagicMock()
@@ -324,6 +415,9 @@ class TestSymovoAgvRoutesMore:
         with _override_symovo(mock_client):
             resp = test_client.put("/safety/reset_software_fuse")
         assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["result"] == {"ok": True}
 
     def test_go_to_charging_station(self, test_client):
         mock_client = MagicMock()
@@ -331,6 +425,7 @@ class TestSymovoAgvRoutesMore:
         with _override_symovo(mock_client):
             resp = test_client.post("/go_to_charging_station/5")
         assert resp.status_code == 200
+        assert resp.json()["activated"] is True
 
     def test_go_to_pose(self, test_client):
         mock_client = MagicMock()
@@ -340,13 +435,14 @@ class TestSymovoAgvRoutesMore:
                 "x_m": 1.0, "y_m": 2.0, "theta_deg": 90.0,
             })
         assert resp.status_code == 200
+        assert resp.json()["id"] == 99
 
     def test_go_to_pose_with_wait(self, test_client):
         mock_client = MagicMock()
         mock_client.transport_move_to_pose = AsyncMock(return_value={
             "id": 99, "state": 8, "_wait_transport_id": 99,
         })
-        mock_client._poll_transport_completion = AsyncMock(return_value={"id": 99, "state": 8})
+        mock_client.poll_transport_completion = AsyncMock(return_value={"id": 99, "state": 8})
         with _override_symovo(mock_client):
             resp = test_client.post("/go_to_pose", json={
                 "x_m": 1.0, "y_m": 2.0, "theta_deg": 0.0, "wait": True,

@@ -1,39 +1,10 @@
-"""Tests for _normalize_upstream_path and JSONFormatter."""
+"""Tests for JSONFormatter structured logging output."""
 
 import json
 import logging
 import pytest
 
-from app.routers.proxy_http import _normalize_upstream_path
 from app.core.logging_cfg import JSONFormatter
-
-
-# ── _normalize_upstream_path ─────────────────────────────
-
-class TestNormalizeUpstreamPath:
-    def test_empty_path(self):
-        assert _normalize_upstream_path("xarm", "") == ""
-
-    def test_simple_path(self):
-        assert _normalize_upstream_path("xarm", "status") == "status"
-
-    def test_leading_slash(self):
-        assert _normalize_upstream_path("xarm", "/status") == "status"
-
-    def test_strips_duplicate_prefix(self):
-        """When upstream echoes the gateway prefix, it should be removed."""
-        assert _normalize_upstream_path("xarm", "api/v1/xarm/status") == "status"
-
-    def test_strips_duplicate_prefix_with_slash(self):
-        assert _normalize_upstream_path("xarm", "/api/v1/xarm/status") == "status"
-
-    def test_no_strip_for_different_service(self):
-        """Prefix for a different service should NOT be stripped."""
-        result = _normalize_upstream_path("xarm", "api/v1/igus/data")
-        assert result == "api/v1/igus/data"
-
-    def test_nested_path(self):
-        assert _normalize_upstream_path("robot", "tasks/123/steps") == "tasks/123/steps"
 
 
 # ── JSONFormatter ────────────────────────────────────────

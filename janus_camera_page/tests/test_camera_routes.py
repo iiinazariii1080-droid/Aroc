@@ -1,7 +1,6 @@
 """Tests for app/routes/camera.py — camera configuration routes."""
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,6 +29,13 @@ class TestGetCameraModes:
         assert resp.json()["modes"] == []
 
 
+def _mock_settings_with_env_path(env_path):
+    """Return a mock get_settings whose .env_path points to *env_path*."""
+    mock = MagicMock()
+    mock.return_value = MagicMock(env_path=env_path, lock_path=env_path.parent / "lock")
+    return mock
+
+
 class TestGetCameraStreamConfig:
     @pytest.mark.asyncio
     async def test_returns_config(self, client, tmp_path):
@@ -39,7 +45,7 @@ class TestGetCameraStreamConfig:
             'BITRATE_KBPS="1800"\nPRESET="veryfast"\nTUNE="zerolatency"\n'
             'SNAPSHOT_FPS="1"\nPORT="5004"\n'
         )
-        with patch("app.routes.camera.CAM_ENV_PATH", env_file):
+        with patch("app.services.env_store.get_settings", _mock_settings_with_env_path(env_file)):
             resp = await client.get("/config")
         assert resp.status_code == 200
         body = resp.json()
@@ -49,7 +55,7 @@ class TestGetCameraStreamConfig:
     @pytest.mark.asyncio
     async def test_defaults_when_env_missing(self, client, tmp_path):
         missing = tmp_path / "nonexistent.env"
-        with patch("app.routes.camera.CAM_ENV_PATH", missing):
+        with patch("app.services.env_store.get_settings", _mock_settings_with_env_path(missing)):
             resp = await client.get("/config")
         assert resp.status_code == 200
         body = resp.json()
@@ -62,7 +68,7 @@ class TestUpdateCameraStreamConfig:
     async def test_update_success(self, mock_restart, client, tmp_path):
         env_file = tmp_path / "cam-rgb.env"
         env_file.write_text('WIDTH="640"\nHEIGHT="480"\nFPS="30"\n')
-        with patch("app.routes.camera.CAM_ENV_PATH", env_file):
+        with patch("app.services.env_store.get_settings", _mock_settings_with_env_path(env_file)):
             resp = await client.post("/config", json={"width": 640, "height": 480, "fps": 30})
         assert resp.status_code == 200
         body = resp.json()

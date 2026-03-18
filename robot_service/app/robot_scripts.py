@@ -6,7 +6,8 @@ from app.xarm_status import get_velocity_percent as _get_global_velocity
 import math
 import asyncio
 import time
-from app.config import IGUS_CONTAINER_IP, IGUS_CONTAINER_PORT, XARM_CONTAINER_IP, XARM_CONTAINER_PORT, SYMOVO_CONTAINER_IP, DEPTH_CAMERA_CONTAINER_IP, DEPTH_CAMERA_CONTAINER_PORT, XARM_STATUS_CACHE_TTL_SEC, SYMOVO_TELEOP_MOVE_URL, SYMOVO_DRIVE_MODE_URL
+from app.config import IGUS_CONTAINER_IP, IGUS_CONTAINER_PORT, XARM_CONTAINER_IP, XARM_CONTAINER_PORT, DEPTH_CAMERA_CONTAINER_IP, DEPTH_CAMERA_CONTAINER_PORT, XARM_STATUS_CACHE_TTL_SEC, SYMOVO_TELEOP_MOVE_URL, SYMOVO_DRIVE_MODE_URL
+from shared_config.network import get_service_url
 from services.igus_service import IgusMotorClient
 from services.xarm_service import XarmManipulatorClient
 from app import xarm_status
@@ -40,8 +41,7 @@ def _ns_to_dict(obj):
 lift_url = f"http://{IGUS_CONTAINER_IP}:{IGUS_CONTAINER_PORT}"
 lift = IgusMotorClient(lift_url)
 
-symovo_base_url = f"https://{SYMOVO_CONTAINER_IP}/v0"
-symovo = SymovoAgvClient(symovo_base_url)
+symovo = SymovoAgvClient(get_service_url("symovo"))
 
 manipulator_url = f"http://{XARM_CONTAINER_IP}:{XARM_CONTAINER_PORT}"
 manipulator = XarmManipulatorClient(manipulator_url)
@@ -1031,6 +1031,50 @@ async def _is_at_shelf(location) -> bool:
         return False
 
 
+async def _preflight_for_navigation(caller: str) -> float:
+    """Shared preflight: recover devices, arm→JOB_POSE, lift down.
+
+    Used by move_robot_to_product (when not same_shelf) and go_to_charging_station.
+    Returns the global velocity for downstream phases.
+    """
+    v = _get_global_velocity()
+
+    # Deactivate charging stations so AGV doesn't return to dock after navigation
+    try:
+        res = await symovo.disable_all_charging_stations()
+        logger.info("%s: charging stations deactivated: %s", caller, res)
+    except Exception as e:
+        logger.warning("%s: charging station deactivation failed (continuing): %s", caller, e)
+
+    # Auto-recover devices
+    try:
+        await manipulator.fault_reset()
+        await manipulator.enable_motion()
+        logger.info("%s: xArm enabled", caller)
+    except Exception as e:
+        logger.warning("%s: xArm enable failed (continuing): %s", caller, e)
+    try:
+        await lift.fault_reset()
+        logger.info("%s: lift fault_reset ok", caller)
+    except Exception as e:
+        logger.warning("%s: lift fault_reset failed (continuing): %s", caller, e)
+
+    # Arm → JOB_POSE if not already there
+    cur = await manipulator.current_joints_position()
+    if cur.get('name') != 'JOB_POSE':
+        logger.info("%s: PREFLIGHT → JOB_POSE", caller)
+        await _move_to_job_pose(v)
+
+    # Lift down if too high for transport
+    pos_resp = await lift.position()
+    lift_pos = pos_resp.get("position", 0) if isinstance(pos_resp, dict) else float(pos_resp or 0)
+    if lift_pos > LIFT_TRANSPORT_MAX:
+        logger.info("%s: PREFLIGHT lift too high (%s) → %d", caller, lift_pos, LIFT_TRANSPORT_MAX)
+        await igus_move_and_check(LIFT_TRANSPORT_MAX, v)
+
+    return v
+
+
 async def _move_to_job_pose(velocity: float) -> None:
     """Перемещает манипулятор в JOB_POSE.
 
@@ -1237,13 +1281,39 @@ async def _agv_microstep_to(target_x: float, target_y: float) -> None:
                 logger.warning("AGV drive_mode disable failed: %s", _e)
 
 
-async def _stop_agv_safe() -> None:
-    """Best-effort остановка AGV — вызывается при отмене задачи оператором."""
-    try:
+_xarm_commands = None  # set by app.state.startup() for WS emergency_stop
+
+
+def set_xarm_commands(commands) -> None:
+    """Inject xarm WS commands reference from app.state."""
+    global _xarm_commands
+    _xarm_commands = commands
+
+
+async def _stop_all_devices() -> None:
+    """Немедленная остановка ВСЕХ устройств — AGV, рука, лифт параллельно."""
+
+    async def _stop_agv():
         await asyncio.wait_for(symovo.fault_reset(), timeout=3.0)
-        logger.info("AGV stopped after operator cancel")
-    except Exception as e:
-        logger.warning("AGV stop on cancel failed: %s", e)
+
+    async def _stop_arm():
+        if _xarm_commands is not None:
+            await asyncio.wait_for(_xarm_commands.stop(reason="cancel"), timeout=3.0)
+        else:
+            await asyncio.wait_for(manipulator.fault_reset(), timeout=3.0)
+
+    async def _stop_lift():
+        await asyncio.wait_for(lift.fault_reset(), timeout=3.0)
+
+    results = await asyncio.gather(
+        _stop_agv(), _stop_arm(), _stop_lift(),
+        return_exceptions=True,
+    )
+    for name, r in zip(["agv", "arm", "lift"], results):
+        if isinstance(r, Exception):
+            logger.warning("Stop %s failed: %s", name, r)
+        else:
+            logger.info("Stop %s: ok", name)
 
 
 @guarded_async_call(robot_lock)
@@ -1254,35 +1324,12 @@ async def move_robot_to_product(params) -> bool:
     lift_units  = int(lift_cm * 1000)           # cm → encoder units
     xarm_joints = getattr(params, 'xarm_joints', None)
 
-    # ── PREFLIGHT: auto-recover devices ───────────────────────────────────
-    try:
-        await manipulator.fault_reset()
-        await manipulator.enable_motion()
-        logger.info("move_robot_to_product: xArm enabled")
-    except Exception as e:
-        logger.warning("move_robot_to_product: xArm enable failed (continuing): %s", e)
-    try:
-        await lift.fault_reset()
-        logger.info("move_robot_to_product: lift fault_reset ok")
-    except Exception as e:
-        logger.warning("move_robot_to_product: lift fault_reset failed (continuing): %s", e)
-
     same_shelf = await _is_at_shelf(location)
 
     if not same_shelf:
         # ── PHASE 1: PREFLIGHT ────────────────────────────────────────────
         logger.info("move_robot_to_product: phase=PREFLIGHT same_shelf=False")
-
-        cur = await manipulator.current_joints_position()
-        if cur.get('name') != 'JOB_POSE':
-            logger.info("move_robot_to_product: PREFLIGHT → JOB_POSE")
-            await _move_to_job_pose(v)
-
-        pos_resp = await lift.position()
-        lift_pos = pos_resp.get("position", 0) if isinstance(pos_resp, dict) else float(pos_resp or 0)
-        if lift_pos > LIFT_TRANSPORT_MAX:
-            logger.info("move_robot_to_product: PREFLIGHT lift too high (%s) → %d", lift_pos, LIFT_TRANSPORT_MAX)
-            await igus_move_and_check(LIFT_TRANSPORT_MAX, v)
+        v = await _preflight_for_navigation("move_robot_to_product")
 
         # ── PHASE 2: NAVIGATING ───────────────────────────────────────────
         if location:
@@ -1313,7 +1360,8 @@ async def move_robot_to_product(params) -> bool:
                 try:
                     await _agv_microstep_to(target_x, target_y)
                 except asyncio.CancelledError:
-                    logger.warning("move_robot_to_product: NAVIGATING micro-step cancelled")
+                    logger.warning("move_robot_to_product: NAVIGATING micro-step cancelled → stopping all")
+                    await _stop_all_devices()
                     raise
             else:
                 logger.info("move_robot_to_product: phase=NAVIGATING → (%.3f, %.3f)", target_x, target_y)
@@ -1326,7 +1374,7 @@ async def move_robot_to_product(params) -> bool:
                     await _wait_agv_arrival(target_x, target_y)
                 except asyncio.CancelledError:
                     logger.warning("move_robot_to_product: NAVIGATING cancelled → stopping AGV")
-                    await _stop_agv_safe()
+                    await _stop_all_devices()
                     raise          # propagate → _TaskManager → TaskStatus.CANCELLED
     else:
         # Same shelf: сброс в JOB_POSE как базовая точка для offset
@@ -1428,26 +1476,7 @@ async def go_to_charging_station(station_id: int) -> bool:
 
     # ── PREFLIGHT ──────────────────────────────────────────────────────────
     logger.info("go_to_charging: phase=PREFLIGHT station_id=%s", station_id)
-    try:
-        await manipulator.fault_reset()
-        await manipulator.enable_motion()
-    except Exception as e:
-        logger.warning("go_to_charging: xArm enable failed (continuing): %s", e)
-    try:
-        await lift.fault_reset()
-    except Exception as e:
-        logger.warning("go_to_charging: lift fault_reset failed (continuing): %s", e)
-
-    cur = await manipulator.current_joints_position()
-    if cur.get('name') != 'JOB_POSE':
-        logger.info("go_to_charging: PREFLIGHT → JOB_POSE")
-        await _move_to_job_pose(v)
-
-    pos_resp = await lift.position()
-    lift_pos = pos_resp.get("position", 0) if isinstance(pos_resp, dict) else float(pos_resp or 0)
-    if lift_pos > LIFT_TRANSPORT_MAX:
-        logger.info("go_to_charging: PREFLIGHT lift too high (%s) → %d", lift_pos, LIFT_TRANSPORT_MAX)
-        await igus_move_and_check(LIFT_TRANSPORT_MAX, v)
+    await _preflight_for_navigation("go_to_charging")
 
     # ── CLEAR TRANSPORTS ──────────────────────────────────────────────────
     logger.info("go_to_charging: phase=CLEAR_TRANSPORTS")

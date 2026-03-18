@@ -29,7 +29,7 @@ from app.services.recovery_ladder import get_ladder
 from app.services import system_mode
 
 try:
-    from app.routes.metrics import (
+    from app.metrics import (
         watchdog_checks_total,
         watchdog_healthy_total,
         stream_active as stream_active_gauge,
@@ -59,6 +59,9 @@ _ESCALATION_DEDUP_SEC = 5.0
 # Snapshot watchdog task handle — prevents GC from collecting the fire-and-forget task.
 _snapshot_task: Optional[asyncio.Task] = None
 
+# Stop signal for daemon threads — set during shutdown to break infinite loops.
+_stop_event = threading.Event()
+
 
 def _in_grace_period() -> bool:
     """True while within the post-startup grace window."""
@@ -80,7 +83,7 @@ def _watchdog_loop() -> None:
     healthy_streak = 0
     _RETRY_BACKOFF_SEC = 2
 
-    while True:
+    while not _stop_event.is_set():
         try:
             if _HAS_METRICS:
                 watchdog_checks_total.inc()
@@ -131,7 +134,7 @@ def _watchdog_loop() -> None:
                     except Exception:
                         logger.exception("ladder escalation failed")
 
-        time.sleep(settings.watchdog_interval_sec)
+        _stop_event.wait(settings.watchdog_interval_sec)
 
 
 def _try_escalate(ladder, signal: str, domain: Domain) -> bool:
@@ -171,7 +174,7 @@ async def _snapshot_watchdog_loop() -> None:
     interval = max(1, settings.watchdog_interval_sec)
     ladder = get_ladder()
 
-    while True:
+    while not _stop_event.is_set():
         try:
             stat = os.stat(settings.snapshot_path)
             age_ms = int((time.time() - stat.st_mtime) * 1000)
@@ -186,4 +189,11 @@ async def _snapshot_watchdog_loop() -> None:
         except Exception as exc:
             logger.error("snapshot watchdog error: %s", exc)
         await asyncio.sleep(interval)
+
+
+def stop_all() -> None:
+    """Signal all watchdog loops to stop (called on app shutdown)."""
+    _stop_event.set()
+    if _snapshot_task is not None and not _snapshot_task.done():
+        _snapshot_task.cancel()
 

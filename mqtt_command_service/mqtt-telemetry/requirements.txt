@@ -1,0 +1,5 @@
+paho-mqtt~=2.1
+requests~=2.32
+websocket-client~=1.8
+psutil~=6.1
+prometheus_client~=0.20

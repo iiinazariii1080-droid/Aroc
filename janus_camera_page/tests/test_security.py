@@ -93,13 +93,13 @@ class TestAdminAuth:
         assert resp.status_code != 401
 
     async def test_admin_nat_route_no_token_returns_403(self, client_enforced):
-        """GET /admin/janus-nat without token → 403."""
-        resp = await client_enforced.get("/admin/janus-nat")
+        """GET /janus/nat without token → 403."""
+        resp = await client_enforced.get("/janus/nat")
         assert resp.status_code == 403
 
     async def test_admin_camera_config_no_token_returns_403(self, client_enforced):
-        """GET /admin/camera/config without token → 403."""
-        resp = await client_enforced.get("/admin/camera/config")
+        """GET /config without token → 403."""
+        resp = await client_enforced.get("/config")
         assert resp.status_code == 403
 
     async def test_default_token_returns_503(self, client_default_token):

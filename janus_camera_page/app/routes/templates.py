@@ -9,7 +9,7 @@ import json
 import logging
 from pathlib import Path
 
-import requests
+import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
@@ -17,7 +17,8 @@ from app.core.settings import get_settings
 
 router = APIRouter(tags=["templates"])
 
-CAM_TYPE = get_settings().camera_type
+# Boot-time constant — FastAPI route paths must be static at decoration time.
+_CAM_TYPE = get_settings().camera_type
 
 # Fallback CDN for janus.js when templates/janus.js is not present
 JANUS_JS_CDN_URL = "https://cdn.jsdelivr.net/gh/meetecho/janus-gateway@v1.2.4/html/janus.js"
@@ -68,7 +69,7 @@ def _render_color_view_variant(
 
 # ── Janus JS library ──
 
-@router.get(f"/api/v1/{CAM_TYPE}/janus.js", include_in_schema=False, response_model=None)
+@router.get(f"/api/v1/{_CAM_TYPE}/janus.js", include_in_schema=False, response_model=None)
 @router.get("/janus.js", include_in_schema=False, response_model=None)
 def janus_js():
     settings = get_settings()
@@ -76,14 +77,14 @@ def janus_js():
     if janus_path.exists():
         return FileResponse(str(janus_path), media_type="application/javascript")
     try:
-        r = requests.get(JANUS_JS_CDN_URL, timeout=15)
+        r = httpx.get(JANUS_JS_CDN_URL, timeout=15)
         r.raise_for_status()
         return Response(
             content=r.content,
             media_type="application/javascript",
             headers={"Cache-Control": "public, max-age=3600"},
         )
-    except requests.RequestException as e:
+    except httpx.HTTPError as e:
         raise HTTPException(
             status_code=502,
             detail=f"janus.js not found locally and CDN fallback failed: {e}",
@@ -92,31 +93,31 @@ def janus_js():
 
 # ── JS assets ──
 
-@router.get(f"/api/v1/{CAM_TYPE}/streamer.js", include_in_schema=False)
+@router.get(f"/api/v1/{_CAM_TYPE}/streamer.js", include_in_schema=False)
 @router.get("/streamer.js", include_in_schema=False)
 def streaming_js() -> FileResponse:
     return _serve_template_file("streamer.js")
 
 
-@router.get(f"/api/v1/{CAM_TYPE}/depth_features.js", include_in_schema=False)
+@router.get(f"/api/v1/{_CAM_TYPE}/depth_features.js", include_in_schema=False)
 @router.get("/depth_features.js", include_in_schema=False)
 def depth_features_js() -> FileResponse:
     return _serve_template_file("depth_features.js")
 
 
-@router.get(f"/api/v1/{CAM_TYPE}/gripper_reticle.js", include_in_schema=False)
+@router.get(f"/api/v1/{_CAM_TYPE}/gripper_reticle.js", include_in_schema=False)
 @router.get("/gripper_reticle.js", include_in_schema=False)
 def gripper_reticle_js() -> FileResponse:
     return _serve_template_file("gripper_reticle.js")
 
 
-@router.get(f"/api/v1/{CAM_TYPE}/gamepaddriver.js", include_in_schema=False)
+@router.get(f"/api/v1/{_CAM_TYPE}/gamepaddriver.js", include_in_schema=False)
 @router.get("/gamepaddriver.js", include_in_schema=False)
 def gamepad_js() -> FileResponse:
     return _serve_template_file("gamepaddriver.js")
 
 
-@router.get(f"/api/v1/{CAM_TYPE}/gamepad_config.json", include_in_schema=False)
+@router.get(f"/api/v1/{_CAM_TYPE}/gamepad_config.json", include_in_schema=False)
 @router.get("/gamepad_config.json", include_in_schema=False)
 def gamepad_config() -> JSONResponse:
     settings = get_settings()
@@ -144,7 +145,7 @@ def _player_script_response(path: str) -> FileResponse:
     return FileResponse(str(file_path), media_type="application/javascript")
 
 
-@router.get(f"/api/v1/{CAM_TYPE}/player/{{path:path}}", include_in_schema=False)
+@router.get(f"/api/v1/{_CAM_TYPE}/player/{{path:path}}", include_in_schema=False)
 def player_script(path: str) -> FileResponse:
     return _player_script_response(path)
 
@@ -156,14 +157,14 @@ def player_script_no_prefix(path: str) -> FileResponse:
 
 # ── HTML views ──
 
-@router.get(f"/api/v1/{CAM_TYPE}/color_view.html", include_in_schema=False)
+@router.get(f"/api/v1/{_CAM_TYPE}/color_view.html", include_in_schema=False)
 @router.get("/color_view.html", include_in_schema=False)
 def color_view() -> HTMLResponse:
     return _render_template_response("color_view.html")
 
 
-if CAM_TYPE == "depth_camera":
-    @router.get(f"/api/v1/{CAM_TYPE}/depth_view.html", include_in_schema=False)
+if _CAM_TYPE == "depth_camera":
+    @router.get(f"/api/v1/{_CAM_TYPE}/depth_view.html", include_in_schema=False)
     @router.get("/depth_view.html", include_in_schema=False)
     def depth_view() -> HTMLResponse:
         settings = get_settings()
@@ -172,7 +173,7 @@ if CAM_TYPE == "depth_camera":
             return _render_template_response("depth_view.html")
         return _render_color_view_variant(1306, "RealSense Depth", joystick=False, depth_features=True)
 
-    @router.get(f"/api/v1/{CAM_TYPE}/ir_view.html", include_in_schema=False)
+    @router.get(f"/api/v1/{_CAM_TYPE}/ir_view.html", include_in_schema=False)
     @router.get("/ir_view.html", include_in_schema=False)
     def ir_view() -> HTMLResponse:
         settings = get_settings()

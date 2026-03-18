@@ -58,6 +58,7 @@ for svc in "${SERVICES[@]}"; do
 
   if PYTHONPATH="$svc:$ROOT_DIR:${PYTHONPATH:-}" \
      python3 -m pytest "$svc/tests" \
+       -p testing.memory_guard \
        -m "not hardware and not simulator" \
        --timeout=30 \
        $VERBOSE_FLAG --tb=short \

@@ -43,7 +43,7 @@ def _reset_hub_state():
     }
     hub_state_store._loaded = True
     # Neuter disk I/O during tests
-    hub_state_store._flush_locked = AsyncMock()
+    hub_state_store._flush = AsyncMock()
     yield
 
 
@@ -64,6 +64,16 @@ def _reset_service_metrics():
     reset_service_error_metrics()
 
 
+@pytest.fixture(autouse=True)
+def _reset_circuit_breakers():
+    """Clear the global circuit breaker registry between tests to prevent
+    accumulation of CircuitBreaker instances (each holding an asyncio.Lock)."""
+    from app.core.circuit_breaker import _breakers
+    _breakers.clear()
+    yield
+    _breakers.clear()
+
+
 @pytest.fixture()
 def app(mock_http_client):
     """
@@ -72,7 +82,7 @@ def app(mock_http_client):
     """
     from app.core.config import ALLOWED_ORIGINS
     from app.core.openapi_agg import setup_custom_openapi
-    from app.routers import health, hub, proxy_http, proxy_ws, services_meta
+    from app.routers import health, hub, metrics_prom, proxy_http, proxy_ws, favicon
 
     @asynccontextmanager
     async def _noop_lifespan(a: FastAPI):
@@ -81,7 +91,7 @@ def app(mock_http_client):
         auth = MagicMock()
         auth.startup = AsyncMock()
         auth.shutdown = AsyncMock()
-        auth.describe = MagicMock(return_value={"token_present": True, "consecutive_failures": 0, "last_error": None})
+        auth.describe = AsyncMock(return_value={"token_present": True, "consecutive_failures": 0, "last_error": None})
         auth.force_refresh = AsyncMock()
         a.state.auth_client = auth
         # Per-service concurrency semaphores
@@ -101,14 +111,15 @@ def app(mock_http_client):
         allow_origins=ALLOWED_ORIGINS,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"],
-        allow_headers=["*"],
+        allow_headers=["Content-Type", "Authorization", "X-Admin-Key", "X-Request-ID"],
     )
 
     test_app.include_router(health.router)
     test_app.include_router(hub.router)
+    test_app.include_router(metrics_prom.router)
     test_app.include_router(proxy_ws.router)
     test_app.include_router(proxy_http.router)  # catch-all — must be last
-    test_app.include_router(services_meta.router)
+    test_app.include_router(favicon.router)
 
     setup_custom_openapi(test_app)
     return test_app

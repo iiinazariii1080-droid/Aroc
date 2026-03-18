@@ -1,5 +1,5 @@
 from typing import Any, Dict, Optional
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class ErrorStatus(BaseModel):
@@ -72,53 +72,6 @@ class GenericResponse(BaseModel):
     })
 
 
-# ============================================================================
-# POSITION PARAMS (saved positions)
-# ============================================================================
-class PositionLocation(BaseModel):
-    """Location coordinates required for navigation."""
-    x_m: float = Field(..., description="X coordinate in meters")
-    y_m: float = Field(..., description="Y coordinate in meters")
-    theta_deg: float = Field(0.0, description="Heading in degrees")
-    map_id: int = Field(0, description="Map identifier")
-
-
-class PositionParams(BaseModel):
-    """Validated params for a saved robot position.
-
-    Accepts both nested ``{"location": {"x_m": …}}`` and flat
-    ``{"x_m": …}`` formats.  Flat keys are normalised into
-    ``location`` before validation so storage is always consistent.
-    Only navigation-related fields are accepted (coordinates + heading).
-    Lift and manipulator data is managed by robot_service.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    location: PositionLocation
-    description: Optional[str] = Field(default=None, description="Human-readable description")
-    max_speed_m_s: Optional[float] = Field(default=None, description="Max navigation speed, m/s")
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalise_flat_keys(cls, data: Any) -> Any:
-        """Lift flat x_m / y_m / theta_deg / map_id into a location dict."""
-        if not isinstance(data, dict):
-            return data
-        if "location" in data:
-            return data  # already nested
-        # Check for flat coordinate keys
-        loc_keys = {"x_m", "y_m", "theta_deg", "map_id"}
-        found = {k: data[k] for k in loc_keys if k in data}
-        if "x_m" in found and "y_m" in found:
-            data = dict(data)  # copy to avoid mutation
-            loc = {}
-            for k in loc_keys:
-                if k in data:
-                    loc[k] = data.pop(k)
-            data["location"] = loc
-        return data
-
-
 class GoToPoseRequest(BaseModel):
     x_m: float = Field(..., description="Target X coordinate in meters")
     y_m: float = Field(..., description="Target Y coordinate in meters")
@@ -138,17 +91,6 @@ class GoToPoseRequest(BaseModel):
         }
     })
 
-
-
-# ============================================================================
-# КООРДИНИРОВАННЫЕ ОТВЕТЫ
-# ============================================================================
-class RobotActionResponse(BaseModel):
-    success: bool = Field(..., description="True if command was executed successfully")
-    task_id: Optional[str] = Field(None, description="Task id")
-    result: Optional[Any] = Field(None, description="Result data, if available")
-    detail: Optional[str] = Field(None, description="Human-readable description or message")
-    error: Optional[str] = Field(None, description="Error message, if any")
 
 
 class ApiError(BaseModel):

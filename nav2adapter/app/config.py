@@ -1,5 +1,5 @@
 """
-Конфигурация приложения.
+Application configuration.
 """
 import os
 from typing import Optional, Dict, Any
@@ -9,9 +9,9 @@ from shared_config.network import DEVICES
 
 
 class Settings(BaseSettings):
-    """Настройки приложения."""
-    
-    # Symovo AGV настройки
+    """Application settings."""
+
+    # Symovo AGV settings
     symovo_car_ip: str = Field(default=DEVICES.SYMOVO_CAR_IP)
     symovo_robot_number: int = Field(default=15)
     symovo_timeout_seconds: int = Field(default=10)
@@ -35,51 +35,28 @@ class Settings(BaseSettings):
     # Polling interval while waiting for scanner flags to clear.
     laser_timeout_poll_interval_s: float = Field(default=2.0)
 
-    # When an HTTP command arrives but MQTT is temporarily disconnected,
-    # wait up to this many seconds for the background reconnect to succeed
-    # before returning 503.  Set to 0 to fail immediately (old behaviour).
-    mqtt_command_retry_wait_s: float = Field(default=15.0)
-    mqtt_command_retry_poll_s: float = Field(default=0.5)
-
     # If true, backend will consider navigation "arrived" when robot is near goal for a while,
     # even if Symovo transport never transitions to FINISHED (prevents infinite 99%).
     symovo_force_arrival_on_proximity: bool = Field(default=True)
     symovo_arrival_dist_m: float = Field(default=0.25)
     symovo_arrival_dwell_s: float = Field(default=2.5)
 
-    # Charger workflow
-    # If driveToPosition target_id matches charger_target_name, backend will activate (enable) a charging station
-    # with name charger_station_name AFTER navigation arrives (to trigger Symovo internal docking script).
-    charger_activation_enabled: bool = Field(default=True)
-    charger_target_name: str = Field(default="CHARGER")
-    charger_station_name: str = Field(default="charger")
-    
-    # HTTP настройки
+    # HTTP settings
     service_host: str = Field(default="0.0.0.0")
     service_port: int = Field(default=7905)
     uvicorn_workers: int = Field(default=1)
     
-    # Логирование
+    # Logging
     log_level: str = Field(default="INFO")
     
-    # Кеширование
-    cache_ttl_seconds: int = Field(default=300)  # 5 минут
+    # Caching
+    cache_ttl_seconds: int = Field(default=300)  # 5 minutes
     # Background cache: max age (seconds) before route falls back to direct request
     cache_max_age_s: float = Field(default=10.0)
     # Background status polling rate (Hz). 0.5 = once per 2 seconds.
     status_cache_hz: float = Field(default=0.5, gt=0.0, le=10.0)
     
-    # MQTT настройки (AE.HUB)
-    mqtt_broker_host: Optional[str] = Field(default=None)
-    mqtt_broker_port: Optional[int] = Field(default=None)
-    mqtt_username: Optional[str] = Field(default=None)
-    mqtt_password: Optional[str] = Field(default=None)
-    mqtt_use_tls: bool = Field(default=False)
-    mqtt_tls_insecure: bool = Field(default=False)
-    mqtt_ca_cert: Optional[str] = Field(default=None)
-    mqtt_client_id: Optional[str] = Field(default=None)
-    
-    # AE.HUB настройки
+    # AE.HUB settings
     robot_id: str = Field(default="fahrdummy-01")
     
     # Publish rates
@@ -104,11 +81,20 @@ class Settings(BaseSettings):
     # cleanup runs in background to avoid delaying readiness.
     startup_blocking_clear_transports: bool = Field(default=False)
 
-    # HTTP commands delivery
-    # If true, HTTP /commands endpoints may execute commands locally (without MQTT) in dev/test mode.
-    allow_direct_http_commands: bool = Field(default=False)
+    # Maximum cached pose age (seconds) to accept force-arrival when controller is unreachable
+    force_arrival_max_pose_age_s: float = Field(default=10.0)
+    # Timeout for clearing transports on startup
+    clear_transports_timeout_s: float = Field(default=30.0)
+    # Timeout for state recovery on startup
+    state_recovery_timeout_s: float = Field(default=60.0)
 
-    # Teleop (joystick/keyboard): отдельный HTTP‑сервер в потоке для управления по speed/angular_speed.
+    # API key authentication for mutation endpoints (navigateTo, cancel, move_speed).
+    # When command_api_key_disabled=False (default) and command_api_key is not set,
+    # mutation endpoints are open — set COMMAND_API_KEY for production deployments.
+    command_api_key: Optional[str] = Field(default=None)
+    command_api_key_disabled: bool = Field(default=False)
+
+    # Teleop (joystick/keyboard): separate HTTP server in a thread for speed/angular_speed control.
     teleop_enabled: bool = Field(default=True)
     teleop_host: str = Field(default="127.0.0.1")
     teleop_port: int = Field(default=7906)
@@ -116,24 +102,18 @@ class Settings(BaseSettings):
     teleop_default_angular_speed: float = Field(default=0.5)
     teleop_default_duration: float = Field(default=0.25)
 
-    # Event topics (ack/state/result)
-    mqtt_events_prefix: str = Field(default="aroc/robot/{robot_id}/events")
-    
     model_config = {
         "env_file": ".env",
         "case_sensitive": False,
         "env_file_encoding": "utf-8",
+        "extra": "ignore",
     }
 
     @property
     def symovo_base_url(self) -> str:
-        """Базовый URL для Symovo API."""
+        """Base URL for Symovo API."""
         return f"https://{self.symovo_car_ip}/v0"
     
-    def mqtt_events_topic(self, kind: str) -> str:
-        """Resolve events topic using current robot_id."""
-        base = self.mqtt_events_prefix.replace("{robot_id}", self.robot_id)
-        return f"{base}/{kind}"
 
 
 class TeleopConfig:
@@ -191,7 +171,7 @@ class TeleopConfig:
                 "angular_rad_s": self._angular_speed,
             }
 
-# Глобальный экземпляр настроек
+# Global settings instance
 settings = Settings()
 
 # Thread-safe mutable teleop parameters (shared between main loop and teleop thread)
@@ -204,3 +184,10 @@ def log_config_summary() -> None:
     _logger = logging.getLogger(__name__)
     _logger.info("Config loaded - position_status_hz: %s Hz, navigation_status_hz: %s Hz",
                  settings.position_status_hz, settings.navigation_status_hz)
+    if settings.command_api_key_disabled:
+        _logger.warning("COMMAND_API_KEY_DISABLED=true — mutation endpoints accept unauthenticated requests")
+    elif not settings.command_api_key:
+        _logger.warning(
+            "SECURITY: COMMAND_API_KEY is not set — mutation endpoints (navigateTo, cancel, move_speed) "
+            "accept unauthenticated requests. Set COMMAND_API_KEY=<secret> for production."
+        )

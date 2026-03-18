@@ -6,12 +6,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.core.config import (
-    SERVICE_MAP,
-    READINESS_CHECK_AUTH,
-    READINESS_CHECK_SERVICES,
-    READINESS_CHECK_TIMEOUT_S,
-)
+from app.core.config import SERVICE_MAP, settings
 from app.core.auth_client import get_auth_client
 from app.core.circuit_breaker import all_breakers
 from app.core.http_proxy_utils import join_url
@@ -47,7 +42,7 @@ async def healthz(request: Request) -> Dict[str, Any]:
         "status": "ok",
         "services_configured": len(SERVICE_MAP),
         "http_client_ready": bool(client and not client.is_closed),
-        "circuit_breakers": all_breakers(),
+        "circuit_breakers": await all_breakers(),
         "openapi_refresh": get_openapi_refresh_metrics(request.app),
         "service_error_rates": get_service_error_metrics(),
     }
@@ -65,13 +60,13 @@ async def readyz(request: Request):
     }
     failed: List[Dict[str, Any]] = []
 
-    if READINESS_CHECK_SERVICES and SERVICE_MAP:
+    if settings.readiness_check_services and SERVICE_MAP:
         probes = await _probe_services(client)
         payload["probes"] = probes
         failed.extend([p for p in probes if not p["ok"]])
 
-    if READINESS_CHECK_AUTH:
-        auth = _probe_auth(request)
+    if settings.readiness_check_auth:
+        auth = await _probe_auth(request)
         payload["auth"] = auth
         if not auth["ok"]:
             failed.append(auth)
@@ -91,7 +86,7 @@ async def _probe_services(client: httpx.AsyncClient) -> List[Dict[str, Any]]:
         try:
             resp = await client.get(
                 target,
-                timeout=READINESS_CHECK_TIMEOUT_S,
+                timeout=settings.readiness_check_timeout,
                 follow_redirects=True,
             )
             return _probe_result(name, target, resp.is_success, resp.status_code, started)
@@ -122,7 +117,7 @@ def _probe_result(
     return data
 
 
-def _probe_auth(request: Request) -> Dict[str, Any]:
+async def _probe_auth(request: Request) -> Dict[str, Any]:
     auth_client = get_auth_client(request.app)
     if auth_client is None:
         return {
@@ -131,7 +126,7 @@ def _probe_auth(request: Request) -> Dict[str, Any]:
             "error": "auth client not initialized",
         }
 
-    details = auth_client.describe()
+    details = await auth_client.describe()
     token_present = bool(details.get("token_present"))
     result: Dict[str, Any] = {
         "service": "auth",

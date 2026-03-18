@@ -1,0 +1,22 @@
+[ ca ]
+default_ca = CA_default
+
+[ CA_default ]
+dir               = /home/boris/robot/scripts/pki/ca
+database          = $dir/index.txt
+serial            = $dir/serial
+crlnumber         = $dir/crlnumber
+new_certs_dir     = $dir/newcerts
+certificate       = $dir/ca.crt
+private_key       = $dir/ca.key
+default_md        = sha256
+default_days      = 365
+default_crl_days  = 30
+policy            = policy_loose
+unique_subject    = no
+
+[ policy_loose ]
+countryName            = optional
+stateOrProvinceName    = optional
+organizationName       = optional
+commonName             = supplied

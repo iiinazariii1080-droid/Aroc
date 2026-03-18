@@ -88,16 +88,6 @@ class TestNavigationCommand:
             target_id="position_A",
         )
         assert cmd.command_id == "abc-123"
-        assert cmd.priority is None
-
-    def test_with_priority(self):
-        cmd = NavigationCommand(
-            command_id="c1",
-            timestamp="2025-01-01T00:00:00Z",
-            target_id="pos_B",
-            priority=5,
-        )
-        assert cmd.priority == 5
 
 
 class TestNavigationStatus:

@@ -16,7 +16,8 @@ from app.services import relay_proxy
 from app.services.system import service_restart, systemd_brief
 
 router = APIRouter(tags=["system"])
-CAM_TYPE = get_settings().camera_type
+# Boot-time constant — FastAPI route paths must be static at decoration time.
+_CAM_TYPE = get_settings().camera_type
 
 
 # ── Response models ──
@@ -96,9 +97,9 @@ def health_stream() -> JSONResponse:
     # 2. Client telemetry
     client_reporting = False
     try:
-        from app.routes.metrics import client_last_report_age_seconds, client_frames_decoded_total, client_packet_loss_ratio
-        frames = client_frames_decoded_total._value.get()
-        loss = client_packet_loss_ratio._value.get()
+        from prometheus_client import REGISTRY
+        frames = REGISTRY.get_sample_value("camstack_client_frames_decoded_total") or 0
+        loss = REGISTRY.get_sample_value("camstack_client_packet_loss_ratio") or 0
         client_reporting = frames > 0
         checks["client_telemetry"] = {
             "ok": client_reporting,
@@ -106,7 +107,8 @@ def health_stream() -> JSONResponse:
             "packet_loss_ratio": round(loss, 4) if loss else 0,
             "note": "no client connected yet" if not client_reporting else None,
         }
-    except Exception:
+    except Exception as exc:
+        logging.warning("client telemetry metrics unavailable: %s", exc)
         checks["client_telemetry"] = {"ok": False, "note": "metrics unavailable"}
 
     # 3. System mode
@@ -118,9 +120,10 @@ def health_stream() -> JSONResponse:
     try:
         from app.services.recovery_ladder import get_ladder
         ladder = get_ladder()
-        level = ladder.level if ladder else 0
+        level = ladder.status()["current_level"] if ladder else 0
         checks["recovery_ladder"] = {"ok": level <= 2, "level": level}
-    except Exception:
+    except Exception as exc:
+        logging.warning("recovery ladder status unavailable: %s", exc)
         checks["recovery_ladder"] = {"ok": True, "level": 0}
 
     stream_usable = rtp_fresh and mode_ok
@@ -132,7 +135,7 @@ def health_stream() -> JSONResponse:
 
 # ── Full system status ──
 
-@router.get(f"/api/v1/{CAM_TYPE}/status", summary="Full system status snapshot")
+@router.get(f"/api/v1/{_CAM_TYPE}/status", summary="Full system status snapshot")
 @router.get("/status", summary="Full system status snapshot")
 def system_status() -> JSONResponse:
     import time as _time
@@ -153,12 +156,14 @@ def system_status() -> JSONResponse:
         ladder = get_ladder()
         ladder_data = ladder.status() if ladder else {"current_level": 0}
     except Exception:
+        logging.debug("recovery ladder status unavailable", exc_info=True)
         ladder_data = {"current_level": 0}
 
     svc: Dict[str, Any] = {}
     try:
         svc = systemd_brief(settings.service_name)
     except Exception:
+        logging.debug("systemd_brief unavailable", exc_info=True)
         svc = {"active": False, "since": None, "restarts": 0}
 
     cfg = {
@@ -184,7 +189,7 @@ def system_status() -> JSONResponse:
 
 # ── Relay proxy ──
 
-@router.get(f"/api/v1/{CAM_TYPE}/relay/time", include_in_schema=False)
+@router.get(f"/api/v1/{_CAM_TYPE}/relay/time", include_in_schema=False)
 @router.get("/relay/time", summary="Relay server time for clock-sync")
 async def relay_time():
     try:
@@ -193,7 +198,7 @@ async def relay_time():
         raise HTTPException(status_code=502, detail=f"relay unreachable: {e}") from e
 
 
-@router.get(f"/api/v1/{CAM_TYPE}/relay/pong", include_in_schema=False)
+@router.get(f"/api/v1/{_CAM_TYPE}/relay/pong", include_in_schema=False)
 @router.get("/relay/pong", summary="Last joystick ping/pong result")
 async def relay_pong():
     try:
@@ -218,7 +223,7 @@ def restart_service() -> ActionResponse:
 # ── API root + favicon ──
 
 @router.get(
-    f"/api/v1/{CAM_TYPE}",
+    f"/api/v1/{_CAM_TYPE}",
     response_model=HealthResponse,
     summary="Camera API root",
 )
@@ -226,7 +231,7 @@ def camera_api_root() -> HealthResponse:
     return HealthResponse(ok=True)
 
 
-@router.get(f"/api/v1/{CAM_TYPE}/favicon.ico", include_in_schema=False)
+@router.get(f"/api/v1/{_CAM_TYPE}/favicon.ico", include_in_schema=False)
 @router.get("/favicon.ico", include_in_schema=False)
 def favicon() -> Response:
     settings = get_settings()

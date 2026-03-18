@@ -1,7 +1,7 @@
 """
 Health probes and reliability metrics endpoints.
 
-Extracted from main.py (НАР-7) to reduce main module size.
+Extracted from main.py (NAP-7) to reduce main module size.
 """
 import os
 import time
@@ -39,14 +39,11 @@ def _env_int(name: str, default: int) -> int:
 HEARTBEAT_STALE_S = _env_float("HEALTH_HEARTBEAT_STALE_S", 10.0)
 HEALTH_EVENTBUS_DROP_MAX = _env_int("HEALTH_EVENTBUS_DROP_MAX", 0)
 HEALTH_PERSISTENCE_DROP_MAX = _env_int("HEALTH_PERSISTENCE_DROP_MAX", 0)
-HEALTH_MQTT_EVENT_PUBLISH_FAIL_MAX = _env_int("HEALTH_MQTT_EVENT_PUBLISH_FAIL_MAX", 0)
 HEALTH_LATENCY_MIN_SAMPLES = _env_int("HEALTH_LATENCY_MIN_SAMPLES", 10)
-HEALTH_MQTT_EVENT_LATENCY_MAX_MS = _env_float("HEALTH_MQTT_EVENT_LATENCY_MAX_MS", 1500.0)
 HEALTH_SYMOVO_LONGPOLL_LATENCY_MAX_MS = _env_float("HEALTH_SYMOVO_LONGPOLL_LATENCY_MAX_MS", 35000.0)
 HEALTH_PERSISTENCE_WRITE_LATENCY_MAX_MS = _env_float("HEALTH_PERSISTENCE_WRITE_LATENCY_MAX_MS", 250.0)
 HEALTH_EVENTBUS_DROP_RATE_MAX_PER_S = _env_float("HEALTH_EVENTBUS_DROP_RATE_MAX_PER_S", 0.01)
 HEALTH_PERSISTENCE_DROP_RATE_MAX_PER_S = _env_float("HEALTH_PERSISTENCE_DROP_RATE_MAX_PER_S", 0.005)
-HEALTH_MQTT_EVENT_FAILURE_RATE_MAX_PER_S = _env_float("HEALTH_MQTT_EVENT_FAILURE_RATE_MAX_PER_S", 0.01)
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +59,6 @@ def _reliability_health_summary() -> dict:
 
     eventbus_drops = int(counters.get("eventbus.publish.drop_oldest", 0) or 0)
     persistence_drops = int(counters.get("persistence.enqueue.drop_queue_full", 0) or 0)
-    mqtt_event_failures = int(counters.get("mqtt.publish.event.failure", 0) or 0)
 
     if eventbus_drops > HEALTH_EVENTBUS_DROP_MAX:
         degraded_reasons.append(
@@ -72,11 +68,6 @@ def _reliability_health_summary() -> dict:
         degraded_reasons.append(
             f"persistence_queue_drop:{persistence_drops}>{HEALTH_PERSISTENCE_DROP_MAX}"
         )
-    if mqtt_event_failures > HEALTH_MQTT_EVENT_PUBLISH_FAIL_MAX:
-        degraded_reasons.append(
-            f"mqtt_event_publish_failure:{mqtt_event_failures}>{HEALTH_MQTT_EVENT_PUBLISH_FAIL_MAX}"
-        )
-
     def _maybe_add_rate_reason(metric_name: str, threshold_per_s: float, reason_key: str) -> None:
         value = float(rates_60s.get(metric_name, 0.0) or 0.0)
         if value > float(threshold_per_s):
@@ -94,12 +85,6 @@ def _reliability_health_summary() -> dict:
         HEALTH_PERSISTENCE_DROP_RATE_MAX_PER_S,
         "persistence_drop_rate",
     )
-    _maybe_add_rate_reason(
-        "mqtt.publish.event.failure",
-        HEALTH_MQTT_EVENT_FAILURE_RATE_MAX_PER_S,
-        "mqtt_event_failure_rate",
-    )
-
     def _duration_stats(name: str) -> tuple[int, float, float]:
         payload = duration.get(name)
         if not isinstance(payload, dict):
@@ -121,11 +106,6 @@ def _reliability_health_summary() -> dict:
                 f"{reason_key}:avg_ms={avg_ms:.1f}>{threshold_ms:.1f} (n={count},max_ms={max_ms:.1f})"
             )
 
-    _maybe_add_latency_reason(
-        "mqtt.publish.event.latency_s",
-        HEALTH_MQTT_EVENT_LATENCY_MAX_MS,
-        "mqtt_event_latency",
-    )
     _maybe_add_latency_reason(
         "symovo.transport_wait_for_changes.latency_s",
         HEALTH_SYMOVO_LONGPOLL_LATENCY_MAX_MS,
@@ -163,14 +143,11 @@ def _reliability_health_summary() -> dict:
         "thresholds": {
             "eventbus_drop_max": HEALTH_EVENTBUS_DROP_MAX,
             "persistence_drop_max": HEALTH_PERSISTENCE_DROP_MAX,
-            "mqtt_event_publish_fail_max": HEALTH_MQTT_EVENT_PUBLISH_FAIL_MAX,
             "latency_min_samples": HEALTH_LATENCY_MIN_SAMPLES,
-            "mqtt_event_latency_max_ms": HEALTH_MQTT_EVENT_LATENCY_MAX_MS,
             "symovo_longpoll_latency_max_ms": HEALTH_SYMOVO_LONGPOLL_LATENCY_MAX_MS,
             "persistence_write_latency_max_ms": HEALTH_PERSISTENCE_WRITE_LATENCY_MAX_MS,
             "eventbus_drop_rate_max_per_s": HEALTH_EVENTBUS_DROP_RATE_MAX_PER_S,
             "persistence_drop_rate_max_per_s": HEALTH_PERSISTENCE_DROP_RATE_MAX_PER_S,
-            "mqtt_event_failure_rate_max_per_s": HEALTH_MQTT_EVENT_FAILURE_RATE_MAX_PER_S,
         },
         "snapshot": snap,
     }
@@ -329,21 +306,12 @@ async def readyz(request: Request) -> Any:
         _LOGGER.warning("Health check /readyz: not ready (startup_incomplete)")
         raise HTTPException(status_code=503, detail={"error": {"type": "NotReady", "msg": "startup_incomplete"}})
 
-    sp = getattr(app_state, "status_publisher", None)
-    sp_running = bool(getattr(sp, "_running", False)) if sp is not None else False
+    svc = getattr(app_state, "services", None)
+    sp = getattr(svc, "status_publisher", None) if svc is not None else None
+    sp_running = bool(getattr(sp, "is_running", False)) if sp is not None else False
     if not sp_running:
         _LOGGER.warning("Health check /readyz: not ready (status_publisher_not_running)")
         raise HTTPException(status_code=503, detail={"error": {"type": "NotReady", "msg": "status_publisher_not_running"}})
-
-    ma = getattr(app_state, "mqtt_adapter", None)
-    if ma is not None:
-        connected = bool(getattr(ma, "is_connected", False) or getattr(ma, "_connected", False))
-        if not connected:
-            # MQTT disconnect is degraded, not a readiness failure.
-            # HTTP API is fully functional without MQTT. The reconnect loop
-            # will restore MQTT automatically. Failing readiness here would
-            # cause K8s to remove the pod, which is worse than degraded mode.
-            _LOGGER.warning("Health check /readyz: MQTT disconnected (degraded mode)")
 
     _LOGGER.info("Health check /readyz OK")
     return {"status": "ok", "reliability": _reliability_health_summary()}

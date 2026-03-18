@@ -1,11 +1,11 @@
-"""Tests for app/state._recover_state — persistence recovery paths."""
+"""Tests for services/recovery_service.py — persistence recovery paths."""
 
 import asyncio
 import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.state import _recover_state
+from services.recovery_service import RecoveryService
 
 
 def _make_cmd(transport_id="T1", target_id="S1"):
@@ -14,215 +14,168 @@ def _make_cmd(transport_id="T1", target_id="S1"):
 
 @pytest.mark.asyncio
 async def test_recover_no_commands():
-    """No persisted commands → early return, nothing crashes."""
+    """No persisted commands -> early return, nothing crashes."""
     mock_client = AsyncMock()
-    with patch("app.state.state_store") as ss:
-        ss.get_persisted_commands_for_recovery = AsyncMock(return_value={})
-        await _recover_state(mock_client)
+    ss = AsyncMock()
+    ss.get_persisted_commands_for_recovery = AsyncMock(return_value={})
+    recovery = RecoveryService(mock_client, ss)
+    result = await recovery.recover()
     mock_client.transport_get.assert_not_called()
+    assert result.recovered == 0
 
 
 @pytest.mark.asyncio
 async def test_recover_active_command():
-    """Active transport (state in active range) → register_command."""
+    """Active transport (state in active range) -> register_command."""
     mock_client = AsyncMock()
-    mock_client.transport_get = AsyncMock(return_value={"state": 3, "id": "T1"})
+    mock_client.transport_get = AsyncMock(return_value={"state": 5, "id": "T1"})  # RUNNING
 
-    with (
-        patch("app.state.state_store") as ss,
-        patch("app.state.event_bus") as eb,
-        patch("domain.state_machine.NavigationStateMachine") as nsm,
-    ):
-        ss.get_persisted_commands_for_recovery = AsyncMock(
-            return_value={"CMD1": _make_cmd("T1", "S1")}
-        )
-        ss.register_command = AsyncMock()
-        ss.get_current_command_id = AsyncMock(return_value=None)
-        nsm.is_terminal_state.return_value = False
-        nsm.is_active_state.return_value = True
+    ss = AsyncMock()
+    ss.get_persisted_commands_for_recovery = AsyncMock(
+        return_value={"CMD1": _make_cmd("T1", "S1")}
+    )
+    ss.register_command = AsyncMock()
+    ss.get_current_command_id = AsyncMock(return_value=None)
+    ss.clear_transport = AsyncMock()
 
-        await _recover_state(mock_client)
+    recovery = RecoveryService(mock_client, ss)
+    result = await recovery.recover()
 
     ss.register_command.assert_awaited_once()
-    call_kwargs = ss.register_command.call_args
-    assert call_kwargs.kwargs.get("command_id") == "CMD1" or call_kwargs[1].get("command_id") == "CMD1"
+    assert result.recovered == 1
 
 
 @pytest.mark.asyncio
 async def test_recover_terminal_finished():
-    """Terminal state=8 (FINISHED) → publish success, clear transport."""
+    """Terminal state=8 (FINISHED) -> clear transport."""
     mock_client = AsyncMock()
     mock_client.transport_get = AsyncMock(return_value={"state": 8, "id": "T1"})
 
-    with (
-        patch("app.state.state_store") as ss,
-        patch("app.state.event_bus") as eb,
-        patch("domain.state_machine.NavigationStateMachine") as nsm,
-    ):
-        ss.get_persisted_commands_for_recovery = AsyncMock(
-            return_value={"CMD2": _make_cmd("T2")}
-        )
-        ss.clear_transport = AsyncMock()
-        eb.publish = AsyncMock()
-        nsm.is_terminal_state.return_value = True
+    ss = AsyncMock()
+    ss.get_persisted_commands_for_recovery = AsyncMock(
+        return_value={"CMD2": _make_cmd("T2")}
+    )
+    ss.clear_transport = AsyncMock()
 
-        await _recover_state(mock_client)
+    recovery = RecoveryService(mock_client, ss)
+    result = await recovery.recover()
 
     ss.clear_transport.assert_awaited()
-    eb.publish.assert_awaited_once()
+    assert result.terminal == 1
 
 
 @pytest.mark.asyncio
 async def test_recover_terminal_canceled():
-    """Terminal state=6 (CANCELED) → publish canceled event."""
+    """Terminal state=6 (CANCELED) -> clear transport."""
     mock_client = AsyncMock()
     mock_client.transport_get = AsyncMock(return_value={"state": 6, "id": "T1"})
 
-    with (
-        patch("app.state.state_store") as ss,
-        patch("app.state.event_bus") as eb,
-        patch("domain.state_machine.NavigationStateMachine") as nsm,
-    ):
-        ss.get_persisted_commands_for_recovery = AsyncMock(
-            return_value={"CMD3": _make_cmd("T3")}
-        )
-        ss.clear_transport = AsyncMock()
-        eb.publish = AsyncMock()
-        nsm.is_terminal_state.return_value = True
+    ss = AsyncMock()
+    ss.get_persisted_commands_for_recovery = AsyncMock(
+        return_value={"CMD3": _make_cmd("T3")}
+    )
+    ss.clear_transport = AsyncMock()
 
-        await _recover_state(mock_client)
+    recovery = RecoveryService(mock_client, ss)
+    result = await recovery.recover()
 
-    eb.publish.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_recover_terminal_error_state():
-    """Terminal error state → publish error event with reason."""
-    mock_client = AsyncMock()
-    mock_client.transport_get = AsyncMock(return_value={"state": 5, "id": "T1"})
-    mock_client.status = AsyncMock(return_value={"state_flags": {"error": True}})
-
-    with (
-        patch("app.state.state_store") as ss,
-        patch("app.state.event_bus") as eb,
-        patch("app.state.ErrorMapper") as em,
-        patch("domain.state_machine.NavigationStateMachine") as nsm,
-    ):
-        ss.get_persisted_commands_for_recovery = AsyncMock(
-            return_value={"CMD4": _make_cmd("T4")}
-        )
-        ss.clear_transport = AsyncMock()
-        eb.publish = AsyncMock()
-        em.get_error_reason.return_value = "obstacle_detected"
-        nsm.is_terminal_state.return_value = True
-
-        await _recover_state(mock_client)
-
-    em.get_error_reason.assert_called_once()
-    eb.publish.assert_awaited()
+    ss.clear_transport.assert_awaited()
+    assert result.terminal == 1
 
 
 @pytest.mark.asyncio
 async def test_recover_not_found():
-    """transport_get returns non-dict → clear_transport."""
+    """transport_get returns non-dict -> clear_transport."""
     mock_client = AsyncMock()
     mock_client.transport_get = AsyncMock(return_value=None)
 
-    with (
-        patch("app.state.state_store") as ss,
-        patch("app.state.event_bus"),
-    ):
-        ss.get_persisted_commands_for_recovery = AsyncMock(
-            return_value={"CMD5": _make_cmd("T5")}
-        )
-        ss.clear_transport = AsyncMock()
+    ss = AsyncMock()
+    ss.get_persisted_commands_for_recovery = AsyncMock(
+        return_value={"CMD5": _make_cmd("T5")}
+    )
+    ss.clear_transport = AsyncMock()
 
-        await _recover_state(mock_client)
+    recovery = RecoveryService(mock_client, ss)
+    result = await recovery.recover()
 
     ss.clear_transport.assert_awaited_once()
+    assert result.not_found == 1
 
 
 @pytest.mark.asyncio
 async def test_recover_timeout():
-    """transport_get times out → clear_transport."""
+    """transport_get times out -> clear_transport."""
     mock_client = AsyncMock()
     mock_client.transport_get = AsyncMock(side_effect=asyncio.TimeoutError)
 
-    with (
-        patch("app.state.state_store") as ss,
-        patch("app.state.event_bus"),
-    ):
-        ss.get_persisted_commands_for_recovery = AsyncMock(
-            return_value={"CMD6": _make_cmd("T6")}
-        )
-        ss.clear_transport = AsyncMock()
+    ss = AsyncMock()
+    ss.get_persisted_commands_for_recovery = AsyncMock(
+        return_value={"CMD6": _make_cmd("T6")}
+    )
+    ss.clear_transport = AsyncMock()
 
-        await _recover_state(mock_client)
+    recovery = RecoveryService(mock_client, ss)
+    result = await recovery.recover()
 
     ss.clear_transport.assert_awaited_once()
+    assert result.not_found == 1
 
 
 @pytest.mark.asyncio
 async def test_recover_inactive_state():
-    """Non-active, non-terminal state → clear_transport."""
+    """Non-active, non-terminal state -> clear_transport."""
     mock_client = AsyncMock()
     mock_client.transport_get = AsyncMock(return_value={"state": 0})
 
-    with (
-        patch("app.state.state_store") as ss,
-        patch("app.state.event_bus"),
-        patch("domain.state_machine.NavigationStateMachine") as nsm,
-    ):
-        ss.get_persisted_commands_for_recovery = AsyncMock(
-            return_value={"CMD7": _make_cmd("T7")}
-        )
-        ss.clear_transport = AsyncMock()
-        nsm.is_terminal_state.return_value = False
-        nsm.is_active_state.return_value = False
+    ss = AsyncMock()
+    ss.get_persisted_commands_for_recovery = AsyncMock(
+        return_value={"CMD7": _make_cmd("T7")}
+    )
+    ss.clear_transport = AsyncMock()
 
-        await _recover_state(mock_client)
+    recovery = RecoveryService(mock_client, ss)
+    result = await recovery.recover()
 
     ss.clear_transport.assert_awaited_once()
+    assert result.inactive == 1
 
 
 @pytest.mark.asyncio
 async def test_recover_http_404():
-    """HTTP 404 for transport → clear_transport, treated as not_found."""
+    """HTTP 404 for transport -> clear_transport, treated as not_found."""
     mock_client = AsyncMock()
-    mock_client.transport_get = AsyncMock(
-        side_effect=RuntimeError("HTTP 404 on /transport/T8")
+    err = Exception("not found")
+    err.http_status = 404
+    mock_client.transport_get = AsyncMock(side_effect=err)
+
+    ss = AsyncMock()
+    ss.get_persisted_commands_for_recovery = AsyncMock(
+        return_value={"CMD8": _make_cmd("T8")}
     )
+    ss.clear_transport = AsyncMock()
 
-    with (
-        patch("app.state.state_store") as ss,
-        patch("app.state.event_bus"),
-    ):
-        ss.get_persisted_commands_for_recovery = AsyncMock(
-            return_value={"CMD8": _make_cmd("T8")}
-        )
-        ss.clear_transport = AsyncMock()
-
-        await _recover_state(mock_client)
+    recovery = RecoveryService(mock_client, ss)
+    result = await recovery.recover()
 
     ss.clear_transport.assert_awaited_once()
+    assert result.not_found == 1
 
 
 @pytest.mark.asyncio
 async def test_recover_generic_error():
-    """Generic exception → counted as error."""
+    """Generic exception -> counted as error."""
     mock_client = AsyncMock()
     mock_client.transport_get = AsyncMock(side_effect=ValueError("unexpected"))
 
-    with (
-        patch("app.state.state_store") as ss,
-        patch("app.state.event_bus"),
-    ):
-        ss.get_persisted_commands_for_recovery = AsyncMock(
-            return_value={"CMD9": _make_cmd("T9")}
-        )
-        ss.clear_transport = AsyncMock()
+    ss = AsyncMock()
+    ss.get_persisted_commands_for_recovery = AsyncMock(
+        return_value={"CMD9": _make_cmd("T9")}
+    )
+    ss.clear_transport = AsyncMock()
 
-        await _recover_state(mock_client)
+    recovery = RecoveryService(mock_client, ss)
+    result = await recovery.recover()
 
+    assert result.errors == 1
     # clear_transport NOT called for generic errors (not 404)
     ss.clear_transport.assert_not_awaited()

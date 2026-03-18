@@ -104,6 +104,7 @@ jobs:
         run: |
           if [ -d "${{ matrix.service }}/tests" ]; then
             python -m pytest "${{ matrix.service }}/tests" \
+              -p testing.memory_guard \
               -m "not hardware and not simulator" \
               --timeout=30 \
               -q --tb=short \
@@ -193,6 +194,7 @@ jobs:
               fi
               PYTHONPATH="$svc:.:$PYTHONPATH" \
               python -m pytest "$svc/tests" \
+                -p testing.memory_guard \
                 -m "not hardware and not simulator" \
                 --cov="$cov_source" \
                 --cov-report=term-missing:skip-covered \

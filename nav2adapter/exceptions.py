@@ -1,5 +1,5 @@
 class RobotBaseError(Exception):
-    """Базовый класс для всех ошибок робота.
+    """Base class for all robot errors.
 
     Supports an optional machine-readable ``error_code`` for structured error
     handling (e.g. ``"DEVICE_BUSY"``, ``"TRANSPORT_MOVE_FAILED"``).
@@ -19,7 +19,7 @@ class DeviceBusyError(RobotBaseError):
     error_code = "DEVICE_BUSY"
 
 class DeviceConnectionError(RobotBaseError):
-    """Ошибка подключения к устройству."""
+    """Device connection error."""
     error_code = "DEVICE_CONNECTION_ERROR"
 
 class DeviceError(RobotBaseError):
@@ -33,9 +33,6 @@ class InputError(RobotBaseError):
 
 class DeviceReadyError(RobotBaseError):
     error_code = "DEVICE_NOT_READY"
-
-class TransportMoveError(RobotBaseError):
-    error_code = "TRANSPORT_MOVE_FAILED"
 
 
 

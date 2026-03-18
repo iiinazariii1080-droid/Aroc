@@ -28,7 +28,7 @@ _WAITING_FOR_SCANNER = _status_with_flags(waiting_for_scanner=True)
 _EMERGENCY_STOP = _status_with_flags(emergency_stop=True)
 
 
-def _make_handler(event_bus, *, symovo=None, orchestrator=None, mqtt=None):
+def _make_handler(event_bus, *, symovo=None):
     if symovo is None:
         symovo = MagicMock()
         symovo.status = AsyncMock(return_value=_READY)
@@ -38,19 +38,22 @@ def _make_handler(event_bus, *, symovo=None, orchestrator=None, mqtt=None):
         symovo.transport_get = AsyncMock(return_value={"state": 1})
         symovo.set_drive_mode = AsyncMock()
 
-    if orchestrator is None:
-        orchestrator = MagicMock()
-        orchestrator.create_transport_to_pose = AsyncMock(return_value={"id": "t1", "state": 1})
-        orchestrator.create_transport_to_station = AsyncMock(return_value={"id": "t2", "state": 1})
-        orchestrator.start_transport = AsyncMock(return_value={"ok": True})
-        orchestrator.stop_transport = AsyncMock()
-        orchestrator.delete_transport = AsyncMock()
+    # Ensure transport methods are always present (even on user-provided mocks)
+    if not hasattr(symovo, "transport_move_to_pose") or not isinstance(symovo.transport_move_to_pose, AsyncMock):
+        symovo.transport_move_to_pose = AsyncMock(return_value={"id": "t1", "state": 1})
+    if not hasattr(symovo, "transport_create_station") or not isinstance(symovo.transport_create_station, AsyncMock):
+        symovo.transport_create_station = AsyncMock(return_value={"id": "t2", "state": 1})
+    if not hasattr(symovo, "transport_start") or not isinstance(symovo.transport_start, AsyncMock):
+        symovo.transport_start = AsyncMock(return_value={"ok": True})
+    if not hasattr(symovo, "transport_stop") or not isinstance(symovo.transport_stop, AsyncMock):
+        symovo.transport_stop = AsyncMock()
+    if not hasattr(symovo, "delete_transport") or not isinstance(symovo.delete_transport, AsyncMock):
+        symovo.delete_transport = AsyncMock()
 
     return CommandHandler(
         symovo_client=symovo,
-        transport_orchestrator=orchestrator,
-        mqtt_adapter=mqtt,
         event_bus=event_bus,
+        state_store=_make_state_store_mock(),
     )
 
 
@@ -59,18 +62,13 @@ def _cmd(target_id="TestPose", command_id="cmd-001"):
         command_id=command_id,
         timestamp="2026-01-01T00:00:00Z",
         target_id=target_id,
+        x=1.0,
+        y=2.0,
+        theta=1.5708,
     )
 
 
-def _db_record(x=1.0, y=2.0, theta_deg=90.0, map_id=0, station_id=None):
-    loc = {"x_m": x, "y_m": y, "theta_deg": theta_deg, "map_id": map_id}
-    params = {"location": loc}
-    if station_id is not None:
-        params["station_id"] = station_id
-    return {"id": "rec1", "name": "TestPose", "params": params}
-
-
-def _patch_state_store(**overrides):
+def _make_state_store_mock(**overrides):
     defaults = {
         "get_active_transport": AsyncMock(return_value=None),
         "get_last_navigation_status": AsyncMock(return_value=None),
@@ -85,7 +83,8 @@ def _patch_state_store(**overrides):
         "upsert_session": AsyncMock(),
     }
     defaults.update(overrides)
-    return patch("services.command_handler.state_store", **defaults)
+    mock = MagicMock(**defaults)
+    return mock
 
 
 _SETTINGS_PATCH = {
@@ -117,9 +116,7 @@ class TestLaserTimeoutWaitSuccess:
 
         handler = _make_handler(event_bus_instance, symovo=symovo)
 
-        with _patch_state_store(), \
-             _patch_settings(), \
-             patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
+        with _patch_settings():
             status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.NAVIGATING
@@ -137,9 +134,7 @@ class TestLaserTimeoutWaitSuccess:
 
         handler = _make_handler(event_bus_instance, symovo=symovo)
 
-        with _patch_state_store(), \
-             _patch_settings(), \
-             patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
+        with _patch_settings():
             status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.NAVIGATING
@@ -159,9 +154,7 @@ class TestLaserTimeoutWaitExpires:
 
         handler = _make_handler(event_bus_instance, symovo=symovo)
 
-        with _patch_state_store(), \
-             _patch_settings(laser_timeout_wait_s=1.0, laser_timeout_poll_interval_s=0.2), \
-             patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
+        with _patch_settings(laser_timeout_wait_s=1.0, laser_timeout_poll_interval_s=0.2):
             status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.ERROR
@@ -175,9 +168,7 @@ class TestLaserTimeoutWaitExpires:
 
         handler = _make_handler(event_bus_instance, symovo=symovo)
 
-        with _patch_state_store(), \
-             _patch_settings(laser_timeout_wait_s=1.0, laser_timeout_poll_interval_s=0.2), \
-             patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
+        with _patch_settings(laser_timeout_wait_s=1.0, laser_timeout_poll_interval_s=0.2):
             status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.ERROR
@@ -196,9 +187,7 @@ class TestNonScannerErrorNoWait:
 
         handler = _make_handler(event_bus_instance, symovo=symovo)
 
-        with _patch_state_store(), \
-             _patch_settings(), \
-             patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
+        with _patch_settings():
             status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.ERROR
@@ -241,9 +230,7 @@ class TestCommandReplacement:
         results = {}
 
         # Apply patches at the outer scope so both coroutines share them
-        with _patch_state_store(), \
-             _patch_settings(laser_timeout_wait_s=10.0, laser_timeout_poll_interval_s=0.3), \
-             patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
+        with _patch_settings(laser_timeout_wait_s=10.0, laser_timeout_poll_interval_s=0.3):
 
             async def send_cmd1():
                 results["cmd1"] = await handler.handle_drive_to_position(_cmd(command_id="cmd-001"))
@@ -278,9 +265,7 @@ class TestDifferentErrorDuringWait:
 
         handler = _make_handler(event_bus_instance, symovo=symovo)
 
-        with _patch_state_store(), \
-             _patch_settings(), \
-             patch("services.command_handler.get_robot_position_by_name", return_value=_db_record()):
+        with _patch_settings():
             status = await handler.handle_drive_to_position(_cmd())
 
         assert status.status == NavigationStatusEnum.ERROR

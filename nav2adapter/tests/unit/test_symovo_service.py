@@ -4,8 +4,9 @@ import math
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from services.symovo_service import SymovoAgvClient, normalize_symovo_status, symovo_lock
+from services.symovo_service import SymovoAgvClient, normalize_symovo_status
 from models.api_types import SymovoStatusResponse, ErrorStatus
+from exceptions import DeviceError
 
 
 # ── normalize_symovo_status ──────────────────────────────────────────
@@ -128,11 +129,17 @@ class TestClientInit:
 # ── pose / status with agv/amr fallback ─────────────────────────────
 
 class TestPoseAndStatusFallback:
+    @staticmethod
+    def _bind_fallback(client):
+        """Bind the _with_endpoint_fallback helper so mocked methods can use it."""
+        client._with_endpoint_fallback = SymovoAgvClient._with_endpoint_fallback.__get__(client, SymovoAgvClient)
+
     @pytest.mark.asyncio
     async def test_pose_impl_agv_success(self):
         client = MagicMock(spec=SymovoAgvClient)
         client.get = AsyncMock(return_value={"x": 1.0, "y": 2.0, "theta": 0.0})
         client.robot_number = 15
+        self._bind_fallback(client)
         client._pose_impl = SymovoAgvClient._pose_impl.__get__(client, SymovoAgvClient)
         result = await client._pose_impl()
         assert result["x"] == 1.0
@@ -141,8 +148,9 @@ class TestPoseAndStatusFallback:
     @pytest.mark.asyncio
     async def test_pose_impl_fallback_to_amr(self):
         client = MagicMock(spec=SymovoAgvClient)
-        client.get = AsyncMock(side_effect=[RuntimeError("404"), {"x": 3.0, "y": 4.0}])
+        client.get = AsyncMock(side_effect=[DeviceError("404"), {"x": 3.0, "y": 4.0}])
         client.robot_number = 15
+        self._bind_fallback(client)
         client._pose_impl = SymovoAgvClient._pose_impl.__get__(client, SymovoAgvClient)
         result = await client._pose_impl()
         assert result["x"] == 3.0
@@ -152,6 +160,7 @@ class TestPoseAndStatusFallback:
         client = MagicMock(spec=SymovoAgvClient)
         client.get = AsyncMock(return_value={"state": "IDLE"})
         client.robot_number = 15
+        self._bind_fallback(client)
         client._status_impl = SymovoAgvClient._status_impl.__get__(client, SymovoAgvClient)
         result = await client._status_impl()
         assert result["state"] == "IDLE"
@@ -159,8 +168,9 @@ class TestPoseAndStatusFallback:
     @pytest.mark.asyncio
     async def test_status_impl_fallback_to_amr(self):
         client = MagicMock(spec=SymovoAgvClient)
-        client.get = AsyncMock(side_effect=[RuntimeError("fail"), {"state": "RUNNING"}])
+        client.get = AsyncMock(side_effect=[DeviceError("fail"), {"state": "RUNNING"}])
         client.robot_number = 15
+        self._bind_fallback(client)
         client._status_impl = SymovoAgvClient._status_impl.__get__(client, SymovoAgvClient)
         result = await client._status_impl()
         assert result["state"] == "RUNNING"
@@ -169,12 +179,17 @@ class TestPoseAndStatusFallback:
 # ── move_speed (no lock required) ────────────────────────────────────
 
 class TestMoveSpeed:
+    @staticmethod
+    def _bind(client):
+        client._with_endpoint_fallback = SymovoAgvClient._with_endpoint_fallback.__get__(client, SymovoAgvClient)
+        client.move_speed = SymovoAgvClient.move_speed.__get__(client, SymovoAgvClient)
+
     @pytest.mark.asyncio
     async def test_move_speed_success(self):
         client = MagicMock(spec=SymovoAgvClient)
         client.put = AsyncMock(return_value={"ok": True})
         client.robot_number = 15
-        client.move_speed = SymovoAgvClient.move_speed.__get__(client, SymovoAgvClient)
+        self._bind(client)
         with patch("services.symovo_service.settings") as s:
             s.teleop_default_linear_speed = 0.3
             s.teleop_default_angular_speed = 0.5
@@ -187,9 +202,9 @@ class TestMoveSpeed:
     @pytest.mark.asyncio
     async def test_move_speed_fallback_amr(self):
         client = MagicMock(spec=SymovoAgvClient)
-        client.put = AsyncMock(side_effect=[RuntimeError("nope"), {"ok": True}])
+        client.put = AsyncMock(side_effect=[DeviceError("nope"), {"ok": True}])
         client.robot_number = 15
-        client.move_speed = SymovoAgvClient.move_speed.__get__(client, SymovoAgvClient)
+        self._bind(client)
         with patch("services.symovo_service.settings") as s:
             s.teleop_default_linear_speed = 0.3
             s.teleop_default_angular_speed = 0.5
@@ -198,7 +213,7 @@ class TestMoveSpeed:
         assert result == {"ok": True}
 
 
-# ── _poll_transport_completion ────────────────────────────────────────
+# ── poll_transport_completion ────────────────────────────────────────
 
 class TestPollTransportCompletion:
     @pytest.mark.asyncio
@@ -208,8 +223,8 @@ class TestPollTransportCompletion:
         client._motion_timeout_seconds = 60.0
         client._operation_timeout_seconds = 30.0
         client._infinite_timeout = None
-        client._poll_transport_completion = SymovoAgvClient._poll_transport_completion.__get__(client, SymovoAgvClient)
-        await client._poll_transport_completion(123)
+        client.poll_transport_completion = SymovoAgvClient.poll_transport_completion.__get__(client, SymovoAgvClient)
+        await client.poll_transport_completion(123)
         _, kwargs = client.get.call_args
         assert kwargs["op_timeout"] == 60.0
 
@@ -220,8 +235,8 @@ class TestPollTransportCompletion:
         client._motion_timeout_seconds = None
         client._operation_timeout_seconds = 30.0
         client._infinite_timeout = None
-        client._poll_transport_completion = SymovoAgvClient._poll_transport_completion.__get__(client, SymovoAgvClient)
-        await client._poll_transport_completion(123)
+        client.poll_transport_completion = SymovoAgvClient.poll_transport_completion.__get__(client, SymovoAgvClient)
+        await client.poll_transport_completion(123)
         _, kwargs = client.get.call_args
         assert kwargs["op_timeout"] == 30.0
 
@@ -282,7 +297,7 @@ class TestClearAllTransports:
             [{"id": 1}],
             [],
         ])
-        client._make_request = AsyncMock(side_effect=RuntimeError("fail"))
+        client._make_request = AsyncMock(side_effect=DeviceError("fail"))
         client.clear_all_transports = SymovoAgvClient.clear_all_transports.__wrapped__.__wrapped__.__get__(client, SymovoAgvClient)
         result = await client.clear_all_transports()
         assert result == []  # failed deletes not included

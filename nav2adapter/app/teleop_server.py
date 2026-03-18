@@ -1,7 +1,7 @@
 """
-Отдельный HTTP‑сервер для телеуправления (джойстик/клавиатура).
-Запускается в отдельном потоке, отдаёт один маршрут POST /move/speed
-и проксирует запросы на Symovo PUT /v0/agv/{id}/move/speed.
+Separate HTTP server for teleop control (joystick/keyboard).
+Runs in a dedicated thread, exposes a single POST /move/speed route
+and proxies requests to Symovo PUT /v0/agv/{id}/move/speed.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import aiohttp
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-# Локальный импорт конфига (тот же .env, что и основное приложение)
+# Local config import (same .env as the main application)
 from app.config import settings, teleop_config
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ async def _lifespan(app: FastAPI):
 
 teleop_app = FastAPI(
     title="Teleop API",
-    description="Канал управления по скорости (джойстик/клавиатура)",
+    description="Speed control channel (joystick/keyboard)",
     version="1.0.0",
     docs_url=None,
     redoc_url=None,
@@ -47,12 +47,12 @@ teleop_app = FastAPI(
 
 
 class MoveSpeedBody(BaseModel):
-    """Тело запроса по OpenAPI MoveSpeed."""
-    speed: Optional[float] = Field(default=None, ge=-2.0, le=2.0, description="Линейная скорость, м/с (опционально; default из настроек)")
-    angular_speed: Optional[float] = Field(default=None, ge=-3.0, le=3.0, description="Угловая скорость, рад/с (опционально; default из настроек)")
-    linear_dir: Optional[int] = Field(default=None, ge=-1, le=1, description="Направление линейной скорости: -1/0/1 (опционально)")
-    angular_dir: Optional[int] = Field(default=None, ge=-1, le=1, description="Направление угловой скорости: -1/0/1 (опционально)")
-    duration: Optional[float] = Field(default=None, ge=0.01, le=10.0, description="Длительность, с (опционально; default из настроек)")
+    """MoveSpeed OpenAPI request body."""
+    speed: Optional[float] = Field(default=None, ge=-2.0, le=2.0, description="Linear speed, m/s (optional; default from settings)")
+    angular_speed: Optional[float] = Field(default=None, ge=-3.0, le=3.0, description="Angular speed, rad/s (optional; default from settings)")
+    linear_dir: Optional[int] = Field(default=None, ge=-1, le=1, description="Linear speed direction: -1/0/1 (optional)")
+    angular_dir: Optional[int] = Field(default=None, ge=-1, le=1, description="Angular speed direction: -1/0/1 (optional)")
+    duration: Optional[float] = Field(default=None, ge=0.01, le=10.0, description="Duration, s (optional; default from settings)")
 
 
 def _robot_url() -> str:
@@ -86,8 +86,8 @@ def _ssl_context() -> ssl.SSLContext | None:
 @teleop_app.post("/move/speed")
 async def move_speed(body: MoveSpeedBody) -> dict[str, Any]:
     """
-    Отправить команду скорости на машину.
-    Проксирует на Symovo PUT /v0/agv/{id}/move/speed.
+    Send speed command to the robot.
+    Proxies to Symovo PUT /v0/agv/{id}/move/speed.
     """
     url = _robot_url()
     linear_dir = 0 if body.linear_dir is None else int(max(-1, min(1, body.linear_dir)))

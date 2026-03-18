@@ -1,5 +1,5 @@
 """
-Кеширование для API запросов.
+Caching for API requests.
 """
 import asyncio
 import time
@@ -14,7 +14,7 @@ T = TypeVar('T')
 
 
 class SimpleCache:
-    """Простой in-memory кеш с TTL."""
+    """Simple in-memory cache with TTL."""
     
     def __init__(self, default_ttl: int = 300, max_size: int = 10_000):
         self._cache: Dict[str, Dict[str, Any]] = {}
@@ -23,7 +23,7 @@ class SimpleCache:
         self._lock = asyncio.Lock()
     
     async def get(self, key: str) -> Optional[Any]:
-        """Получить значение из кеша."""
+        """Get value from cache."""
         async with self._lock:
             if key in self._cache:
                 entry = self._cache[key]
@@ -34,7 +34,7 @@ class SimpleCache:
             return None
     
     async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
-        """Установить значение в кеш."""
+        """Set value in cache."""
         async with self._lock:
             # Evict oldest entry if at capacity and this is a new key
             if key not in self._cache and len(self._cache) >= self._max_size:
@@ -47,17 +47,17 @@ class SimpleCache:
             }
     
     async def clear(self) -> None:
-        """Очистить весь кеш."""
+        """Clear the entire cache."""
         async with self._lock:
             self._cache.clear()
     
     async def invalidate(self, key: str) -> None:
-        """Удалить конкретный ключ из кеша."""
+        """Delete a specific key from cache."""
         async with self._lock:
             self._cache.pop(key, None)
 
 
-# Глобальный экземпляр кеша
+# Global cache instance
 cache = SimpleCache(default_ttl=settings.cache_ttl_seconds)
 
 # Background eviction task (started lazily on first use)
@@ -103,19 +103,19 @@ def cancel_eviction_task() -> None:
 
 def cached(ttl: Optional[int] = None, key_prefix: str = ""):
     """
-    Декоратор для кеширования результатов функций.
-    
+    Decorator for caching function results.
+
     Args:
-        ttl: Время жизни кеша в секундах
-        key_prefix: Префикс для ключа кеша
+        ttl: Cache time-to-live in seconds
+        key_prefix: Prefix for the cache key
     """
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @wraps(func)
         async def wrapper(*args, **kwargs) -> T:
             ensure_eviction_task()
-            # Создаем устойчивый ключ кеша:
-            # - не используем встроенный hash() (salted per-process)
-            # - не включаем repr(self) (адрес в памяти) как часть ключа
+            # Build a stable cache key:
+            # - do not use built-in hash() (salted per-process)
+            # - do not include repr(self) (memory address) as part of the key
             call_args = args
             client_identity = None
             if call_args and hasattr(call_args[0], "__class__"):
@@ -141,15 +141,15 @@ def cached(ttl: Optional[int] = None, key_prefix: str = ""):
             digest = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
             cache_key = f"{key_prefix}:{digest}"
             
-            # Пытаемся получить из кеша
+            # Try to get from cache
             cached_result = await cache.get(cache_key)
             if cached_result is not None:
                 return cached_result
             
-            # Выполняем функцию
+            # Execute the function
             result = await func(*args, **kwargs)
             
-            # Сохраняем в кеш
+            # Save to cache
             await cache.set(cache_key, result, ttl)
             
             return result
@@ -160,7 +160,7 @@ def cached(ttl: Optional[int] = None, key_prefix: str = ""):
 
 def cache_invalidate(pattern: str):
     """
-    Декоратор для инвалидации кеша при изменении данных.
+    Decorator for invalidating cache on data changes.
 
     Uses **substring match**: any cache key containing *pattern* will be evicted.
     Example: pattern="symovo_station" invalidates both "symovo_stations:…" and
@@ -174,7 +174,7 @@ def cache_invalidate(pattern: str):
         async def wrapper(*args, **kwargs) -> T:
             result = await func(*args, **kwargs)
             
-            # Инвалидируем кеш по паттерну
+            # Invalidate cache by pattern
             async with cache._lock:
                 keys_to_remove = [
                     key for key in cache._cache.keys() 

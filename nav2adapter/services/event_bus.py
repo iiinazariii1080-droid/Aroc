@@ -2,7 +2,7 @@
 In-process event bus for ack/state/result events.
 
 Used to broadcast events to:
-- MQTT publisher
+- Event consumer
 - HTTP SSE subscribers
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import AsyncIterator, Optional, Set
+from typing import Optional, Set
 
 from domain.events import AnyEvent
 from services.reliability_metrics import reliability_metrics
@@ -24,9 +24,11 @@ class EventBus:
 
     def __init__(self, queue_size: int = 1000):
         self._subscribers: Set[asyncio.Queue[AnyEvent]] = set()
+        # Per-subscriber drop-log rate limiter: maps queue id -> last log timestamp.
+        self._last_drop_log_time: dict[int, float] = {}
         self._lock = asyncio.Lock()
         self._queue_size = queue_size
-        self._last_drop_log_time: float = 0.0
+        self._drop_log_interval: float = 10.0
 
     async def publish(self, event: AnyEvent) -> None:
         async with self._lock:
@@ -39,23 +41,24 @@ class EventBus:
                     _ = q.get_nowait()
                     reliability_metrics.inc("eventbus.publish.drop_oldest")
                     now = time.monotonic()
-                    if now - self._last_drop_log_time >= 10.0:
+                    qid = id(q)
+                    if now - self._last_drop_log_time.get(qid, 0.0) >= self._drop_log_interval:
                         _LOGGER.warning(
-                            "EventBus: dropped oldest event (queue full, size=%d). "
+                            "EventBus: dropped oldest event for subscriber %d (queue full, size=%d). "
                             "Event type: %s",
+                            qid,
                             self._queue_size,
                             getattr(event, 'type', type(event).__name__),
                         )
-                        self._last_drop_log_time = now
+                        self._last_drop_log_time[qid] = now
                 except Exception:
-                    pass
+                    reliability_metrics.inc("eventbus.publish.drop_failed")
             try:
                 q.put_nowait(event)
                 reliability_metrics.inc("eventbus.publish.delivered")
             except Exception:
                 # ignore broken subscriber
                 reliability_metrics.inc("eventbus.publish.delivery_failed")
-                pass
 
     async def subscribe(self) -> asyncio.Queue[AnyEvent]:
         q: asyncio.Queue[AnyEvent] = asyncio.Queue(maxsize=self._queue_size)
@@ -66,25 +69,7 @@ class EventBus:
     async def unsubscribe(self, q: asyncio.Queue[AnyEvent]) -> None:
         async with self._lock:
             self._subscribers.discard(q)
-
-    async def stream(self, timeout: float = 30.0) -> AsyncIterator[AnyEvent]:
-        """Async iterator helper for SSE routes.
-
-        *timeout* caps how long we wait for a single event.  When it
-        expires the generator yields nothing (caller can send a keepalive
-        and call again).  This prevents orphaned subscribers when the
-        ASGI framework fails to close the generator on disconnect.
-        """
-        q = await self.subscribe()
-        try:
-            while True:
-                try:
-                    yield await asyncio.wait_for(q.get(), timeout=timeout)
-                except asyncio.TimeoutError:
-                    # Let caller handle keep-alive; we just re-loop
-                    continue
-        finally:
-            await self.unsubscribe(q)
+            self._last_drop_log_time.pop(id(q), None)
 
     async def drain(self, q: asyncio.Queue[AnyEvent], max_items: int = 100) -> list[AnyEvent]:
         """Drain up to *max_items* from a subscriber queue (non-blocking)."""
@@ -95,8 +80,3 @@ class EventBus:
             except asyncio.QueueEmpty:
                 break
         return items
-
-
-# Global bus
-event_bus = EventBus()
-

@@ -1,7 +1,7 @@
 """
 AE.HUB event models: ack/state/result.
 
-These are used for MQTT publication and HTTP SSE streaming.
+These are used for HTTP SSE streaming.
 """
 
 from __future__ import annotations

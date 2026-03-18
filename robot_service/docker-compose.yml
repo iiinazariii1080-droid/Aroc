@@ -23,12 +23,9 @@ services:
       IGUS_CONTAINER_PORT: "${IGUS_PORT:-8101}"
       XARM_CONTAINER_IP: "${HOST_LAN_IP:-192.168.1.10}"
       XARM_CONTAINER_PORT: "${XARM_PORT:-8102}"
-      SYMOVO_CONTAINER_IP: "${HOST_LAN_IP:-192.168.1.10}"
-      SYMOVO_CONTAINER_PORT: "${SYMOVO_PORT:-7905}"
       # Nav2adapter (host:7905): teleop move_speed and drive_mode. robot_id used in /api/v1/robots/<id>/move/speed
       SYMOVO_NAV2ADAPTER_HOST: "${HOST_LAN_IP:-192.168.1.10}"
       SYMOVO_ROBOT_ID: "${ROBOT_ID:-fahrdummy-01}"
-      # Or override: SYMOVO_TELEOP_MOVE_URL, SYMOVO_DRIVE_MODE_URL
       DEPTH_CAMERA_CONTAINER_IP: "${DEPTH_CAMERA_IP:-192.168.1.55}"
       DEPTH_CAMERA_CONTAINER_PORT: "8900"
       XARM_WS_URL: "ws://${XARM_HARDWARE_IP:-192.168.1.220}:${XARM_WS_PORT:-18333}/ws?channel=prod&lang=en&v=1&id=robot"

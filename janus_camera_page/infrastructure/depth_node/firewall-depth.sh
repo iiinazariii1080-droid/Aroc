@@ -22,8 +22,9 @@ $IPT -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 # ── ICMP ──
 $IPT -A INPUT -p icmp -j ACCEPT
 
-# ── SSH (22) ──
-$IPT -A INPUT -p tcp --dport 22 -j ACCEPT
+# ── SSH (22) — LAN + Tailscale only (matches color node policy) ──
+$IPT -A INPUT -p tcp --dport 22 -s 192.168.1.0/24 -j ACCEPT
+$IPT -A INPUT -p tcp --dport 22 -i tailscale0     -j ACCEPT
 
 # ── Camera page FastAPI (8900) — not running on depth but allow from LAN ──
 $IPT -A INPUT -p tcp --dport 8900 -s 192.168.1.0/24 -j ACCEPT

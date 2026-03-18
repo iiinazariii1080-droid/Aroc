@@ -1,6 +1,5 @@
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timezone
 import logging
 from typing import Any, Dict
 
@@ -11,42 +10,12 @@ from fastapi.openapi.utils import get_openapi
 from .config import SERVICE_MAP
 from .http_proxy_utils import join_url
 from .openapi_utils import strip_prefix, rename_component_refs, merge_component_sections
+from .utils import classify_http_error, iso_now
 
 logger = logging.getLogger(__name__)
 
 # How often the background task refreshes the cached OpenAPI schema (seconds).
 _OPENAPI_REFRESH_INTERVAL_S = 120.0
-
-
-class OpenAPIRefreshError(RuntimeError):
-    def __init__(self, reason: str, exc: Exception) -> None:
-        super().__init__(f"{reason}: {exc}")
-        self.reason = reason
-        self.original = exc
-
-
-def _iso_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def _classify_openapi_error(exc: Exception) -> str:
-    if isinstance(exc, httpx.ConnectTimeout):
-        return "upstream_connect_timeout"
-    if isinstance(exc, httpx.ReadTimeout):
-        return "upstream_read_timeout"
-    if isinstance(exc, httpx.ConnectError):
-        return "upstream_connect_error"
-    if isinstance(exc, httpx.HTTPStatusError):
-        return "upstream_http_status"
-    if isinstance(exc, httpx.HTTPError):
-        return "upstream_http_error"
-    if isinstance(exc, ValueError):
-        return "schema_value_error"
-    if isinstance(exc, (TypeError, KeyError)):
-        return "schema_structure_error"
-    if isinstance(exc, (RuntimeError, AttributeError)):
-        return "runtime_state_error"
-    return "unexpected_error"
 
 
 def _ensure_refresh_metrics(app: FastAPI) -> Dict[str, Any]:
@@ -74,14 +43,14 @@ def _mark_refresh_attempt(app: FastAPI) -> None:
 def _mark_refresh_success(app: FastAPI) -> None:
     metrics = _ensure_refresh_metrics(app)
     metrics["successes"] += 1
-    metrics["last_success_at"] = _iso_now()
+    metrics["last_success_at"] = iso_now()
 
 
 def _mark_refresh_failure(app: FastAPI, reason: str, exc: Exception) -> None:
     metrics = _ensure_refresh_metrics(app)
     metrics["failures"] += 1
     metrics["failure_reasons"][reason] += 1
-    metrics["last_failure_at"] = _iso_now()
+    metrics["last_failure_at"] = iso_now()
     metrics["last_failure_reason"] = reason
     metrics["last_failure_error"] = str(exc)
 
@@ -98,20 +67,6 @@ def get_openapi_refresh_metrics(app: FastAPI) -> Dict[str, Any]:
         "last_failure_reason": metrics["last_failure_reason"],
         "last_failure_error": metrics["last_failure_error"],
     }
-
-
-async def _build_aggregated_schema(app: FastAPI) -> Dict[str, Any]:
-    try:
-        return await aggregate_services_openapi(app)
-    except (
-        httpx.HTTPError,
-        ValueError,
-        TypeError,
-        KeyError,
-        RuntimeError,
-        AttributeError,
-    ) as exc:
-        raise OpenAPIRefreshError(_classify_openapi_error(exc), exc) from exc
 
 
 async def _fetch_one_spec(
@@ -191,19 +146,20 @@ async def populate_openapi_cache(app: FastAPI) -> None:
     """Build and store the aggregated OpenAPI schema. Called once during startup."""
     _mark_refresh_attempt(app)
     try:
-        schema = await _build_aggregated_schema(app)
+        schema = await aggregate_services_openapi(app)
         app.state._openapi_cache = schema
         _mark_refresh_success(app)
         logger.info(
             "OpenAPI cache populated (%d paths)",
             len(schema.get("paths", {})),
         )
-    except OpenAPIRefreshError as exc:
-        _mark_refresh_failure(app, exc.reason, exc.original)
+    except Exception as exc:
+        reason = classify_http_error(exc)
+        _mark_refresh_failure(app, reason, exc)
         logger.warning(
             "Failed to populate OpenAPI cache on startup (reason=%s): %s",
-            exc.reason,
-            exc.original,
+            reason,
+            exc,
         )
         app.state._openapi_cache = _gateway_only_schema(app)
 
@@ -214,18 +170,19 @@ async def openapi_refresh_loop(app: FastAPI) -> None:
         await asyncio.sleep(_OPENAPI_REFRESH_INTERVAL_S)
         _mark_refresh_attempt(app)
         try:
-            schema = await _build_aggregated_schema(app)
+            schema = await aggregate_services_openapi(app)
             app.state._openapi_cache = schema
             _mark_refresh_success(app)
             logger.debug("OpenAPI cache refreshed")
         except asyncio.CancelledError:
             raise
-        except OpenAPIRefreshError as exc:
-            _mark_refresh_failure(app, exc.reason, exc.original)
+        except Exception as exc:
+            reason = classify_http_error(exc)
+            _mark_refresh_failure(app, reason, exc)
             logger.warning(
                 "OpenAPI cache refresh failed (reason=%s): %s",
-                exc.reason,
-                exc.original,
+                reason,
+                exc,
             )
 
 

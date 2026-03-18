@@ -35,8 +35,7 @@ ENTRYPOINT ["docker-entrypoint.sh"]
 
 ENV SERVICE_HOST=0.0.0.0 \
     SERVICE_PORT=7905 \
-    LOG_LEVEL=info \
-    ROBOT_POSITIONS_DB_PATH=/app/data/database.db
+    LOG_LEVEL=info
 
 EXPOSE 7905 7906
 

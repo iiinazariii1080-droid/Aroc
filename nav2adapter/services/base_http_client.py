@@ -1,20 +1,19 @@
 """
-Базовый HTTP клиент для работы с внешними API.
-Содержит общую логику для всех HTTP операций.
+Base HTTP client for working with external APIs.
+Contains shared logic for all HTTP operations.
 """
 import aiohttp
 import ssl
 import json
 import asyncio
 from typing import Optional, Dict, Any, Union
-from abc import ABC, abstractmethod
-
 from exceptions import DeviceConnectionError, DeviceError
+from services.circuit_breaker import get_circuit_breaker
 
 
-class BaseHttpClient(ABC):
-    """Базовый класс для HTTP клиентов с общей логикой."""
-    
+class BaseHttpClient:
+    """Base class for HTTP clients with shared logic."""
+
     def __init__(
         self,
         base_url: str,
@@ -30,9 +29,12 @@ class BaseHttpClient(ABC):
         self._retry_delay = retry_delay
         self._session: Optional[aiohttp.ClientSession] = None
         self._session_lock = asyncio.Lock()
+        from urllib.parse import urlparse
+        host_key = urlparse(self.base_url).netloc or self.base_url
+        self._circuit_breaker = get_circuit_breaker(name=f"{self.__class__.__name__}:{host_key}")
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
-        """Создает сессию если она не существует."""
+        """Create session if it does not exist."""
         async with self._session_lock:
             if self._session is None or self._session.closed:
                 connector = self._create_connector()
@@ -43,7 +45,7 @@ class BaseHttpClient(ABC):
             return self._session
 
     def _create_connector(self) -> aiohttp.TCPConnector:
-        """Создает коннектор с нужными SSL настройками."""
+        """Create connector with the required SSL settings."""
         kwargs = dict(limit=30, limit_per_host=20, enable_cleanup_closed=True)
         if self._allow_invalid_certs:
             ssl_ctx = ssl.create_default_context()
@@ -53,7 +55,7 @@ class BaseHttpClient(ABC):
         return aiohttp.TCPConnector(**kwargs)
 
     async def _read_payload(self, resp: aiohttp.ClientResponse) -> Any:
-        """Читает payload из ответа с обработкой ошибок."""
+        """Read payload from response with error handling."""
         try:
             return await resp.json(content_type=None)
         except Exception:
@@ -67,7 +69,7 @@ class BaseHttpClient(ABC):
                 return {"text": text}
 
     def _extract_error_message(self, data: Any) -> str:
-        """Извлекает сообщение об ошибке из ответа."""
+        """Extract error message from response."""
         if isinstance(data, dict):
             if "detail" in data:
                 detail = data.get("detail")
@@ -100,13 +102,14 @@ class BaseHttpClient(ABC):
         op_timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Базовый метод для выполнения HTTP запросов с retry логикой.
+        """Base method for executing HTTP requests with retry logic.
 
         Args:
             max_retries: Override instance-level ``_max_retries``.  Pass ``0``
                          for long-poll / one-shot calls that should not be
                          retried internally (the caller handles retries).
         """
+        self._circuit_breaker.guard()
         session = await self._ensure_session()
         url = path if path.startswith("http") else f"{self.base_url}{path}"
         effective_max_retries = self._max_retries if max_retries is None else max_retries
@@ -139,9 +142,10 @@ class BaseHttpClient(ABC):
                     data = await self._read_payload(resp)
                     
                     if 200 <= resp.status < 300:
+                        self._circuit_breaker.record_success()
                         return data if isinstance(data, dict) else {"result": data}
-                    
-                    # Обработка ошибок
+
+                    # Error handling
                     error_msg = self._extract_error_message(data)
                     # Include status/method/url for easier debugging of controllers with empty bodies.
                     text = f"{self.__class__.__name__}: HTTP {resp.status} {method} {url}: {error_msg}"
@@ -151,6 +155,7 @@ class BaseHttpClient(ABC):
                     raise DeviceError(text)
                     
             except DeviceConnectionError as e:
+                self._circuit_breaker.record_failure()
                 last_exception = e
                 if attempt < effective_max_retries:
                     await asyncio.sleep(self._retry_delay * (2 ** attempt))
@@ -158,6 +163,7 @@ class BaseHttpClient(ABC):
                 raise
             except (asyncio.TimeoutError, aiohttp.ClientError) as e:
                 # Transport-level failures are transient.
+                self._circuit_breaker.record_failure()
                 last_exception = e
                 if attempt < effective_max_retries:
                     await asyncio.sleep(self._retry_delay * (2 ** attempt))
@@ -184,7 +190,7 @@ class BaseHttpClient(ABC):
         op_timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """GET запрос."""
+        """GET request."""
         return await self._make_request(
             "GET", path, params=params, timeout=timeout, op_timeout=op_timeout,
             max_retries=max_retries,
@@ -197,7 +203,7 @@ class BaseHttpClient(ABC):
         timeout: Optional[aiohttp.ClientTimeout] = None,
         op_timeout: Optional[float] = None
     ) -> Dict[str, Any]:
-        """POST запрос."""
+        """POST request."""
         return await self._make_request(
             "POST", path, json_data=json_data, timeout=timeout, op_timeout=op_timeout
         )
@@ -210,7 +216,7 @@ class BaseHttpClient(ABC):
         op_timeout: Optional[float] = None,
         max_retries: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """PUT запрос."""
+        """PUT request."""
         return await self._make_request(
             "PUT", path, json_data=json_data, timeout=timeout, op_timeout=op_timeout,
             max_retries=max_retries,
@@ -222,7 +228,7 @@ class BaseHttpClient(ABC):
         timeout: Optional[aiohttp.ClientTimeout] = None,
         op_timeout: Optional[float] = None
     ) -> Dict[str, Any]:
-        """DELETE запрос."""
+        """DELETE request."""
         return await self._make_request(
             "DELETE", path, timeout=timeout, op_timeout=op_timeout
         )
@@ -233,8 +239,10 @@ class BaseHttpClient(ABC):
         *,
         params: Optional[Dict[str, Any]] = None,
         op_timeout: Optional[float] = None,
+        max_retries: int = 2,
     ) -> bytes:
-        """GET запрос, возвращающий сырые байты (для изображений, бинарных файлов и т.д.)."""
+        """GET request returning raw bytes (for images, binary files, etc.)."""
+        self._circuit_breaker.guard()
         session = await self._ensure_session()
         url = path if path.startswith("http") else f"{self.base_url}{path}"
 
@@ -242,24 +250,44 @@ class BaseHttpClient(ABC):
         if op_timeout is not None:
             effective_timeout = aiohttp.ClientTimeout(total=float(op_timeout))
 
-        try:
-            async with session.request(
-                method="GET",
-                url=url,
-                params=params,
-                timeout=effective_timeout,
-            ) as resp:
-                if 200 <= resp.status < 300:
-                    return await resp.read()
-                error_msg = f"{self.__class__.__name__}: HTTP {resp.status} GET {url}"
-                raise DeviceError(error_msg)
-        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+        last_exception: Optional[BaseException] = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                async with session.request(
+                    method="GET",
+                    url=url,
+                    params=params,
+                    timeout=effective_timeout,
+                ) as resp:
+                    if 200 <= resp.status < 300:
+                        data = await resp.read()
+                        self._circuit_breaker.record_success()
+                        return data
+                    error_msg = f"{self.__class__.__name__}: HTTP {resp.status} GET {url}"
+                    raise DeviceError(error_msg)
+            except DeviceError:
+                # Non-retryable (4xx/5xx business errors) — raise immediately.
+                raise
+            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                self._circuit_breaker.record_failure()
+                last_exception = e
+                if attempt < max_retries:
+                    await asyncio.sleep(self._retry_delay * (2 ** attempt))
+                    continue
+                raise DeviceConnectionError(
+                    f"{self.__class__.__name__}: request timeout/connection error GET {url}: {e}"
+                ) from e
+
+        # Unreachable, but defensive fallback.
+        if last_exception:
             raise DeviceConnectionError(
-                f"{self.__class__.__name__}: request timeout/connection error GET {url}: {e}"
-            ) from e
+                f"{self.__class__.__name__}: get_raw failed after {max_retries + 1} attempts"
+            ) from last_exception
+        raise DeviceConnectionError(f"{self.__class__.__name__}: get_raw failed: unknown error")
 
     async def close(self):
-        """Закрывает HTTP сессию."""
+        """Close the HTTP session."""
         async with self._session_lock:
             if self._session and not self._session.closed:
                 await self._session.close()

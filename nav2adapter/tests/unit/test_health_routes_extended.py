@@ -62,19 +62,9 @@ class TestReadyz:
             app.state.startup_ok = old
         assert resp.status_code == 503
 
-    def test_readyz_mqtt_disconnected_degraded(self, test_client):
-        """MQTT disconnect should NOT fail readyz — it's degraded, not broken."""
-        from main import app
-        mqtt = MagicMock()
-        mqtt.is_connected = False
-        mqtt._connected = False
-        old_ma = getattr(app.state, "mqtt_adapter", None)
-        app.state.mqtt_adapter = mqtt
-        try:
-            resp = test_client.get("/readyz")
-        finally:
-            app.state.mqtt_adapter = old_ma
-        # Should still be 200 (degraded but functional)
+    def test_readyz_always_200_when_started(self, test_client):
+        """readyz should be 200 when app started successfully."""
+        resp = test_client.get("/readyz")
         assert resp.status_code == 200
 
 

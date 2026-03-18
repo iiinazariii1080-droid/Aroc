@@ -8,13 +8,16 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.core.events import register_event_handlers
 from app.core.settings import get_settings
 from app.routes import register_routes
+from shared_config.network import DEVICES, PORTS
 
-_settings = get_settings()
 # frame-ancestors requires exact origin-s, not CIDR notation.
 # Default: the two LAN nodes that may embed the player.
+# Override via CSP_FRAME_ANCESTORS_LAN env var for different deployments.
 _FRAME_ANCESTORS_LAN = os.environ.get(
     "CSP_FRAME_ANCESTORS_LAN",
-    "http://192.168.1.10:8900 http://192.168.1.55:8900 https://blupassionsystem.de:8443",
+    f"http://{DEVICES.HOST_LAN_IP}:{PORTS.COLOR_CAMERA} "
+    f"http://{DEVICES.DEPTH_CAMERA_IP}:{PORTS.COLOR_CAMERA} "
+    f"https://blupassionsystem.de:8443",
 )
 
 

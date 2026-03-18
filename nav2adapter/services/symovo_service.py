@@ -1,5 +1,5 @@
 """
-Оптимизированный сервис для работы с Symovo AGV.
+Optimized client for Symovo AGV.
 """
 import asyncio
 import logging
@@ -16,9 +16,10 @@ from exceptions import DeviceConnectionError, DeviceError
 from models.api_types import SymovoStatusResponse, ErrorStatus
 from app.config import settings
 
-# Глобальный lock для синхронизации операций
-symovo_lock = asyncio.Lock()
 _LOGGER = logging.getLogger(__name__)
+
+# Exception tuple for agv/amr endpoint fallback.
+_FALLBACK_EXCEPTIONS = (DeviceError, DeviceConnectionError, aiohttp.ClientError, asyncio.TimeoutError)
 
 
 def normalize_symovo_status(raw):
@@ -45,13 +46,13 @@ def normalize_symovo_status(raw):
         if not isinstance(velocity, dict):
             velocity = {}
         
-        # Конвертируем радианы в градусы для theta
+        # Convert radians to degrees for theta
         theta_rad = pose.get("theta")
         theta_deg = None
         if theta_rad is not None and isinstance(theta_rad, (int, float)):
             theta_deg = math.degrees(theta_rad)
         
-        # Конвертируем угловую скорость из рад/с в град/с
+        # Convert angular velocity from rad/s to deg/s
         omega_rad_s = velocity.get("theta")
         omega_deg_s = None
         if omega_rad_s is not None and isinstance(omega_rad_s, (int, float)):
@@ -65,13 +66,13 @@ def normalize_symovo_status(raw):
             "pose": {
                 "x_m": pose.get("x"),
                 "y_m": pose.get("y"),
-                "theta_deg": theta_deg,  # Теперь возвращаем градусы
+                "theta_deg": theta_deg,  # Now returning degrees
                 "map_id": pose.get("map_id"),
             },
             "velocity": {
                 "vx_m_s": velocity.get("x"),
                 "vy_m_s": velocity.get("y"),
-                "omega_deg_s": omega_deg_s,  # Теперь возвращаем градусы в секунду
+                "omega_deg_s": omega_deg_s,  # Now returning degrees per second
             },
             "state": raw.get("state"),
             "battery_level_percent": (raw.get("battery_level") * 100.0) if isinstance(raw.get("battery_level"), (int, float)) else None,
@@ -87,13 +88,13 @@ def normalize_symovo_status(raw):
             "planned_path_edges": raw.get("planned_path_edges"),
         }
         return SymovoStatusResponse(**normalized)
-    except Exception as e:
+    except Exception as e:  # catch-all: normalisation must never crash the status pipeline
         _LOGGER.warning("Failed to normalize Symovo status: %s (raw keys: %s)", e, list(raw.keys()) if isinstance(raw, dict) else type(raw).__name__)
         return ErrorStatus(error={"type": "InvalidSymovoStatus", "msg": "Failed to parse controller status"})
 
 
 class SymovoAgvClient(BaseHttpClient):
-    """Оптимизированный клиент для работы с Symovo AGV."""
+    """Optimized client for Symovo AGV."""
     
     def __init__(
         self,
@@ -104,7 +105,7 @@ class SymovoAgvClient(BaseHttpClient):
         motion_timeout_seconds: Optional[float] = None,
         allow_invalid_certs: Optional[bool] = None
     ):
-        # Используем настройки из конфига по умолчанию
+        # Use settings from config as defaults
         base_url = base_url or settings.symovo_base_url
         robot_number = robot_number if robot_number is not None else settings.symovo_robot_number
         timeout_seconds = timeout_seconds if timeout_seconds is not None else settings.symovo_timeout_seconds
@@ -121,73 +122,82 @@ class SymovoAgvClient(BaseHttpClient):
         self._motion_timeout_seconds = motion_timeout_seconds if motion_timeout_seconds is not None else settings.symovo_motion_timeout_seconds
         self._infinite_timeout = aiohttp.ClientTimeout(total=None)
 
-    # Удаляем старые методы управления сессией - теперь используем BaseHttpClient
+        # Fine-grained locks: safety ops never block navigation, admin never blocks e-stop.
+        self._safety_lock = asyncio.Lock()       # e-stop, fuse, pause
+        self._navigation_lock = asyncio.Lock()   # transport create/start/stop/move
+        self._admin_lock = asyncio.Lock()         # clear_all, set_drive_mode, create_new_job
 
-    # HTTP методы теперь наследуются от BaseHttpClient
+    async def _with_endpoint_fallback(
+        self,
+        method: str,
+        primary_path: str,
+        fallback_path: str,
+        *,
+        exceptions: tuple = _FALLBACK_EXCEPTIONS,
+        **kwargs,
+    ) -> Any:
+        """Try primary endpoint; on transient/device error, retry with fallback."""
+        caller = getattr(self, method)
+        try:
+            return await caller(primary_path, **kwargs)
+        except exceptions:
+            return await caller(fallback_path, **kwargs)
 
     @safe_call
     @cached(ttl=1, key_prefix="symovo_pose")
     async def pose(self) -> Dict[str, Any]:
-        """Получить текущую позицию AGV (с кешем 1с для UI/маршрутов)."""
+        """Get current AGV pose (cached 1s for UI/routes)."""
         return await self._pose_impl()
 
     @safe_call
     async def pose_uncached(self) -> Dict[str, Any]:
-        """Получить текущую позицию AGV (без кеша) для фоновых циклов."""
+        """Get current AGV pose (uncached) for background loops."""
         return await self._pose_impl()
 
     async def _pose_impl(self) -> Dict[str, Any]:
         """Internal: fetch pose with agv/amr fallback."""
-        try:
-            return await self.get(f"/agv/{self.robot_number}/pose")
-        except Exception:
-            return await self.get(f"/amr/{self.robot_number}/pose")
+        return await self._with_endpoint_fallback(
+            "get",
+            f"/agv/{self.robot_number}/pose",
+            f"/amr/{self.robot_number}/pose",
+        )
 
     @safe_call
     @cached(ttl=1, key_prefix="symovo_status")
     async def status(self) -> Dict[str, Any]:
-        """Получить статус AGV (с кешем 1с для UI/маршрутов)."""
+        """Get AGV status (cached 1s for UI/routes)."""
         return await self._status_impl()
 
     @safe_call
     async def status_uncached(self) -> Dict[str, Any]:
-        """Получить статус AGV (без кеша), чтобы сразу увидеть изменения флагов."""
+        """Get AGV status (uncached) to immediately see flag changes."""
         return await self._status_impl()
 
     async def _status_impl(self) -> Dict[str, Any]:
         """Internal: fetch status with agv/amr fallback."""
-        try:
-            return await self.get(f"/agv/{self.robot_number}")
-        except Exception:
-            return await self.get(f"/amr/{self.robot_number}")
+        return await self._with_endpoint_fallback(
+            "get",
+            f"/agv/{self.robot_number}",
+            f"/amr/{self.robot_number}",
+        )
 
-    @guarded_async_call(symovo_lock, timeout_s=5.0)
+    @guarded_async_call("_admin_lock", timeout_s=5.0)
     @cache_invalidate("symovo_status")
     async def set_drive_mode(self, *, enable: bool = True) -> Dict[str, Any]:
-        """
-        Switch AMR into drive mode (enable/disable motors).
+        """Switch AMR into drive mode (enable/disable motors).
 
-        Some Symovo controllers require a JSON payload: {"enable": true}.
-        Observed working request:
-          PUT /v0/agv/{id}/move/drive_mode  body={"enable": true}  -> 202 Accepted
-
-        When enable=True, the charging station (CHARGER_STATION_NAME) is deactivated
-        if charger workflow is enabled — mirror of "activate charger when navigating to CHARGER".
+        max_retries=0: controller 503 means "robot not ready" (physical state),
+        retrying won't help and causes gateway timeout (504).
         """
         payload: Dict[str, Any] = {"enable": bool(enable)}
-
-        if enable:
-            from services import charger_workflow
-            await charger_workflow.maybe_deactivate_on_drive_mode(self)
-
-        # Prefer 'agv' path first (matches observed controller behavior); fallback to 'amr'.
-        # max_retries=0: controller 503 means "robot not ready" (physical state),
-        # retrying won't help and causes gateway timeout (504).
-        try:
-            return await self.put(f"/agv/{self.robot_number}/move/drive_mode", json_data=payload, max_retries=0)
-        except DeviceError:
-            # 404 / other non-connection error on /agv/ path — try /amr/ fallback
-            return await self.put(f"/amr/{self.robot_number}/move/drive_mode", json_data=payload, max_retries=0)
+        return await self._with_endpoint_fallback(
+            "put",
+            f"/agv/{self.robot_number}/move/drive_mode",
+            f"/amr/{self.robot_number}/move/drive_mode",
+            exceptions=(DeviceError,),
+            json_data=payload,
+            max_retries=0,
+        )
 
     async def move_speed(
         self,
@@ -195,11 +205,9 @@ class SymovoAgvClient(BaseHttpClient):
         angular_speed: Optional[float] = None,
         duration: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """
-        Отправка скорости для телеуправления (джойстик/клавиатура).
-        OpenAPI: PUT /v0/agv/{id}/move/speed — body MoveSpeed.
-        Запрос блокируется до окончания движения (ответ 202).
-        Не использует symovo_lock, чтобы не блокировать навигацию.
+        """Send speed command for teleop (joystick/keyboard).
+
+        Does not acquire any lock so navigation is never blocked.
         """
         effective_speed = float(speed) if speed is not None else float(settings.teleop_default_linear_speed)
         effective_angular = float(angular_speed) if angular_speed is not None else float(settings.teleop_default_angular_speed)
@@ -209,49 +217,46 @@ class SymovoAgvClient(BaseHttpClient):
             "angular_speed": effective_angular,
             "duration": effective_duration,
         }
-        # Таймаут чуть больше длительности команды
         op_timeout = max(1.0, effective_duration + 2.0)
-        try:
-            return await self.put(
-                f"/agv/{self.robot_number}/move/speed",
-                json_data=payload,
-                op_timeout=op_timeout,
-            )
-        except Exception:
-            return await self.put(
-                f"/amr/{self.robot_number}/move/speed",
-                json_data=payload,
-                op_timeout=op_timeout,
-            )
+        return await self._with_endpoint_fallback(
+            "put",
+            f"/agv/{self.robot_number}/move/speed",
+            f"/amr/{self.robot_number}/move/speed",
+            json_data=payload,
+            op_timeout=op_timeout,
+        )
 
-    @guarded_async_call(symovo_lock, timeout_s=5.0)
+    @guarded_async_call("_safety_lock", timeout_s=5.0)
     @cache_invalidate("symovo_status")
     async def pause_stop(self) -> Dict[str, Any]:
         """OpenAPI: PUT /v0/amr/{id}/pause/stop"""
-        try:
-            return await self.put(f"/amr/{self.robot_number}/pause/stop")
-        except Exception:
-            return await self.put(f"/agv/{self.robot_number}/pause/stop")
+        return await self._with_endpoint_fallback(
+            "put",
+            f"/amr/{self.robot_number}/pause/stop",
+            f"/agv/{self.robot_number}/pause/stop",
+        )
 
-    @guarded_async_call(symovo_lock, timeout_s=5.0)
+    @guarded_async_call("_safety_lock", timeout_s=5.0)
     @cache_invalidate("symovo_status")
     async def pause_start(self) -> Dict[str, Any]:
         """OpenAPI: PUT /v0/amr/{id}/pause/start"""
-        try:
-            return await self.put(f"/amr/{self.robot_number}/pause/start")
-        except Exception:
-            return await self.put(f"/agv/{self.robot_number}/pause/start")
+        return await self._with_endpoint_fallback(
+            "put",
+            f"/amr/{self.robot_number}/pause/start",
+            f"/agv/{self.robot_number}/pause/start",
+        )
 
-    @guarded_async_call(symovo_lock, timeout_s=5.0)
+    @guarded_async_call("_safety_lock", timeout_s=5.0)
     @cache_invalidate("symovo_status")
     async def reset_emergency_stop(self) -> Dict[str, Any]:
         """OpenAPI: PUT /v0/amr/{id}/safety/reset_emergency_stop"""
-        try:
-            return await self.put(f"/amr/{self.robot_number}/safety/reset_emergency_stop")
-        except Exception:
-            return await self.put(f"/agv/{self.robot_number}/safety/reset_emergency_stop")
+        return await self._with_endpoint_fallback(
+            "put",
+            f"/amr/{self.robot_number}/safety/reset_emergency_stop",
+            f"/agv/{self.robot_number}/safety/reset_emergency_stop",
+        )
 
-    @guarded_async_call(symovo_lock, timeout_s=5.0)
+    @guarded_async_call("_safety_lock", timeout_s=5.0)
     @cache_invalidate("symovo_status")
     async def reset_software_fuse(self) -> Dict[str, Any]:
         """OpenAPI: PUT /v0/agv/{id}/software_fuse/reset
@@ -259,21 +264,22 @@ class SymovoAgvClient(BaseHttpClient):
         Resets the software fuse (sfuse_blown flag) after a high motor
         current event.  The controller returns 202 on success.
         """
-        try:
-            return await self.put(f"/agv/{self.robot_number}/software_fuse/reset")
-        except Exception:
-            return await self.put(f"/amr/{self.robot_number}/software_fuse/reset")
+        return await self._with_endpoint_fallback(
+            "put",
+            f"/agv/{self.robot_number}/software_fuse/reset",
+            f"/amr/{self.robot_number}/software_fuse/reset",
+        )
 
     @safe_call
-    @cached(ttl=30, key_prefix="symovo_job")  # Кешируем на 30 секунд
+    @cached(ttl=30, key_prefix="symovo_job")  # Cache for 30 seconds
     async def job(self) -> Dict[str, Any]:
-        """Получить информацию о текущей задаче."""
+        """Get current job info."""
         return await self.get("/job")
 
-    @guarded_async_call(symovo_lock)
-    @cache_invalidate("symovo_job")  # Инвалидируем кеш задач
+    @guarded_async_call("_admin_lock")
+    @cache_invalidate("symovo_job")
     async def create_new_job(self, name: str) -> Dict[str, Any]:
-        """Создать новую задачу."""
+        """Create a new job."""
         return await self.get(
             "/new_job", 
             params={"name": name}, 
@@ -282,14 +288,14 @@ class SymovoAgvClient(BaseHttpClient):
         )
 
     @safe_call
-    @cached(ttl=300, key_prefix="symovo_map")  # Кешируем на 5 минут
+    @cached(ttl=300, key_prefix="symovo_map")  # Cache for 5 minutes
     async def map(self) -> Dict[str, Any]:
-        """Получить список карт."""
+        """Get list of maps."""
         return await self.get("/map")
 
     @safe_call
     async def map_get(self, map_id: int | str) -> Dict[str, Any]:
-        """Получить метаданные карты по ID."""
+        """Get map metadata by ID."""
         return await self.get(f"/map/{map_id}")
 
     @safe_call
@@ -300,7 +306,7 @@ class SymovoAgvClient(BaseHttpClient):
         since: str = "now",
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Ожидать изменения карты по ID (long-poll)."""
+        """Wait for map changes by ID (long-poll)."""
         params: Dict[str, Any] = {"since": since}
         if timeout is not None:
             params["timeout"] = timeout
@@ -315,7 +321,7 @@ class SymovoAgvClient(BaseHttpClient):
 
     @safe_call
     async def map_tile_png(self, map_id: int | str, zoom: int, x: int, y: int) -> bytes:
-        """Получить map tile PNG (256x256)."""
+        """Get map tile PNG (256x256)."""
         return await self.get_raw(
             f"/map/{zoom}/{x}/{y}.png",
             params={"id": map_id},
@@ -324,7 +330,7 @@ class SymovoAgvClient(BaseHttpClient):
 
     @safe_call
     async def map_slam_png(self) -> bytes:
-        """Получить live preview карты во время SLAM (PNG)."""
+        """Get live map preview during SLAM (PNG)."""
         return await self.get_raw(
             "/map/slam/slam.png",
             op_timeout=max(5.0, float(settings.symovo_timeout_seconds)),
@@ -332,7 +338,7 @@ class SymovoAgvClient(BaseHttpClient):
 
     @safe_call
     async def map_png(self, map_id: int) -> bytes:
-        """Получить карту в формате PNG (сырые байты)."""
+        """Get map as PNG (raw bytes)."""
         return await self.get_raw(
             f"/map/{map_id}/full.png",
             op_timeout=max(5.0, float(settings.symovo_timeout_seconds)),
@@ -340,46 +346,45 @@ class SymovoAgvClient(BaseHttpClient):
 
     @safe_call
     async def scan_png(self) -> bytes:
-        """Получить текущий laser scan как PNG."""
-        try:
-            return await self.get_raw(
-                f"/amr/{self.robot_number}/scan.png",
-                op_timeout=max(5.0, float(settings.symovo_timeout_seconds)),
-            )
-        except Exception:
-            return await self.get_raw(
-                f"/agv/{self.robot_number}/scan.png",
-                op_timeout=max(5.0, float(settings.symovo_timeout_seconds)),
-            )
+        """Get current laser scan as PNG."""
+        return await self._with_endpoint_fallback(
+            "get_raw",
+            f"/amr/{self.robot_number}/scan.png",
+            f"/agv/{self.robot_number}/scan.png",
+            op_timeout=max(5.0, float(settings.symovo_timeout_seconds)),
+        )
 
     @safe_call
     async def slam_state(self) -> Dict[str, Any]:
-        """Получить состояние SLAM."""
-        try:
-            return await self.get(f"/amr/{self.robot_number}/slam/state")
-        except Exception:
-            return await self.get(f"/agv/{self.robot_number}/slam/state")
+        """Get SLAM state."""
+        return await self._with_endpoint_fallback(
+            "get",
+            f"/amr/{self.robot_number}/slam/state",
+            f"/agv/{self.robot_number}/slam/state",
+        )
 
     @safe_call
     async def slam_pose_station(self) -> Dict[str, Any]:
-        """Получить station-based SLAM pose."""
-        try:
-            return await self.get(f"/amr/{self.robot_number}/slam/pose/station")
-        except Exception:
-            return await self.get(f"/agv/{self.robot_number}/slam/pose/station")
+        """Get station-based SLAM pose."""
+        return await self._with_endpoint_fallback(
+            "get",
+            f"/amr/{self.robot_number}/slam/pose/station",
+            f"/agv/{self.robot_number}/slam/pose/station",
+        )
 
     @safe_call
     async def slam_pose_reflector(self) -> Dict[str, Any]:
-        """Получить reflector-based SLAM poses."""
-        try:
-            return await self.get(f"/amr/{self.robot_number}/slam/pose/reflector")
-        except Exception:
-            return await self.get(f"/agv/{self.robot_number}/slam/pose/reflector")
+        """Get reflector-based SLAM poses."""
+        return await self._with_endpoint_fallback(
+            "get",
+            f"/amr/{self.robot_number}/slam/pose/reflector",
+            f"/agv/{self.robot_number}/slam/pose/reflector",
+        )
 
     @safe_call
-    @cached(ttl=60, key_prefix="symovo_check_pose")  # Кешируем на 1 минуту
+    @cached(ttl=60, key_prefix="symovo_check_pose")  # Cache for 1 minute
     async def check_pose(self, *, x_m: float, y_m: float, theta_rad: float = 0.0, map_id: Optional[str] = None) -> Dict[str, Any]:
-        """Проверить доступность позиции."""
+        """Check pose reachability."""
         # Try v0 cost endpoint first; fallback to legacy path and then v1 reachable if available
         pose: Dict[str, Any] = {"x": x_m, "y": y_m, "theta": theta_rad, "map_id": map_id or 0}
         step: Dict[str, Any] = {"poses": [pose], "_type_id": 7}
@@ -418,14 +423,72 @@ class SymovoAgvClient(BaseHttpClient):
             op_timeout=self._operation_timeout_seconds
         )
 
-    @guarded_async_call(symovo_lock, timeout_s=15.0)  # Increased timeout - clear_all_transports may take time
-    @cache_invalidate("symovo_transport")  # Инвалидируем кеш транспортов
+    @guarded_async_call("_navigation_lock", timeout_s=15.0)
+    @cache_invalidate("symovo_transport")
     async def transport_create(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Create a transport (guarded, serialized)."""
         return await self._transport_create_unlocked(payload)
 
-    @guarded_async_call(symovo_lock, timeout_s=15.0)  # Increased timeout for lock acquisition
-    @cache_invalidate("symovo_transport")  # Инвалидируем кеш транспортов
+    def _build_transport_payload(self, steps: list, description: str) -> Dict[str, Any]:
+        """Build a Symovo transport payload with common boilerplate."""
+        return {
+            "timestamp": time.time(),
+            "id": 0,
+            "agv": {"id": int(self.robot_number)},
+            "job": None,
+            "steps": steps,
+            "state_log": [{
+                "timestamp": time.time(),
+                "step_idx": 0,
+                "status_code": 0,
+                "status_detail": 1,
+                "level": None,
+            }],
+            "needed_agv_attributes": {
+                "full_eurobox": False,
+                "half_eurobox_front": False,
+                "half_eurobox_back": False,
+                "gap_charge": False,
+                "charging_contacts": False,
+            },
+            "description": description,
+            "cancelable": True,
+        }
+
+    async def transport_create_station(
+        self,
+        station_id: int,
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a transport to a station using GoToStationStep."""
+        step: Dict[str, Any] = {
+            "station_id": station_id,
+            "_type_id": 1,  # GoToStationStep
+            "finished": False,
+            "isNext": False,
+        }
+        payload = self._build_transport_payload(
+            [step], description or f"GoTo Station {station_id}",
+        )
+        return await self.transport_create(payload)
+
+    async def delete_transport(self, transport_id: str) -> bool:
+        """Delete a transport from the controller (best-effort cleanup).
+
+        Used to remove orphaned transports that were created but never
+        successfully started. Swallows all exceptions so callers in
+        error-handling paths are never disrupted.
+        """
+        try:
+            await self.delete(f"/transport/{transport_id}", op_timeout=5.0)
+            _LOGGER.warning("Cleaned up orphaned transport %s", transport_id)
+            return True
+        except Exception as exc:
+            _LOGGER.warning("Failed to cleanup orphaned transport %s: %s", transport_id, exc)
+            return False
+
+    @guarded_async_call("_navigation_lock", timeout_s=15.0)
+    @cache_invalidate("symovo_transport")
     async def transport_start(self, transport_id: str) -> Dict[str, Any]:
         """Start a transport (guarded, serialized)."""
         return await self.put(
@@ -434,8 +497,8 @@ class SymovoAgvClient(BaseHttpClient):
             op_timeout=self._operation_timeout_seconds
         )
 
-    @guarded_async_call(symovo_lock, timeout_s=15.0)  # Increased timeout for lock acquisition
-    @cache_invalidate("symovo_transport")  # Инвалидируем кеш транспортов
+    @guarded_async_call("_navigation_lock", timeout_s=15.0)
+    @cache_invalidate("symovo_transport")
     async def transport_stop(self, transport_id: str) -> Dict[str, Any]:
         """Stop a transport (guarded, serialized)."""
         return await self.put(
@@ -447,25 +510,21 @@ class SymovoAgvClient(BaseHttpClient):
     async def transport_move_to_pose(self, *, x_m: float, y_m: float, theta_rad: float = 0.0, map_id: Optional[Any] = None, max_speed_m_s: Optional[float] = None, wait: bool = True) -> Dict[str, Any]:
         """Create a transport task to move the robot to the specified pose.
 
-        Phase 1 (charger disable) runs WITHOUT holding symovo_lock so safety
+        Phase 1 (charger disable) runs WITHOUT holding _navigation_lock so safety
         operations (e-stop, pause, cancel) are never blocked.
         Phase 2 (transport create) acquires the lock.
         Polling for completion (wait=True) happens outside the lock.
         """
-        from services import charger_workflow
-        # Phase 1: charger disable — NO lock held
-        await charger_workflow.disable_all_before_move(self)
-        # Phase 2: transport create — guarded
+        # Transport create — guarded
         return await self._transport_move_to_pose_guarded(
             x_m=x_m, y_m=y_m, theta_rad=theta_rad,
             map_id=map_id, max_speed_m_s=max_speed_m_s, wait=wait,
         )
 
-    @guarded_async_call(symovo_lock, timeout_s=15.0)
+    @guarded_async_call("_navigation_lock", timeout_s=15.0)
     @cache_invalidate("symovo_pose")
     async def _transport_move_to_pose_guarded(self, *, x_m: float, y_m: float, theta_rad: float = 0.0, map_id: Optional[Any] = None, max_speed_m_s: Optional[float] = None, wait: bool = True) -> Dict[str, Any]:
-        """Guarded inner method — creates transport under symovo_lock."""
-        
+        """Guarded inner method — creates transport under _navigation_lock."""
         pose: Dict[str, Any] = {
             "x": x_m,
             "y": y_m,
@@ -481,30 +540,7 @@ class SymovoAgvClient(BaseHttpClient):
             "finished": False,
             "isNext": False,
         }
-        state_log_item: Dict[str, Any] = {
-            "timestamp": time.time(),
-            "step_idx": 0,
-            "status_code": 0,
-            "status_detail": 1,
-            "level": None,
-        }
-        payload: Dict[str, Any] = {
-            "timestamp": time.time(),
-            "id": 0,
-            "agv": {"id": int(self.robot_number)},
-            "job": None,
-            "steps": [step],
-            "state_log": [state_log_item],
-            "needed_agv_attributes": {
-                "full_eurobox": False,
-                "half_eurobox_front": False,
-                "half_eurobox_back": False,
-                "gap_charge": False,
-                "charging_contacts": False,
-            },
-            "description": "GoTo Pose",
-            "cancelable": True,
-        }
+        payload = self._build_transport_payload([step], "GoTo Pose")
 
         # Use unlocked version since we're already inside a guarded method (transport_move_to_pose)
         # This prevents nested locking deadlock
@@ -515,12 +551,12 @@ class SymovoAgvClient(BaseHttpClient):
         if transport_id is None:
             return result
         # Return only the transport_id; the caller will poll outside the lock.
-        # Store it so _poll_transport_completion can use it.
+        # Store it so poll_transport_completion can use it.
         result["_wait_transport_id"] = transport_id
         return result
 
-    async def _poll_transport_completion(self, transport_id: Any) -> Dict[str, Any]:
-        """Poll for transport completion WITHOUT holding symovo_lock.
+    async def poll_transport_completion(self, transport_id: Any) -> Dict[str, Any]:
+        """Poll for transport completion WITHOUT holding _navigation_lock.
 
         Called by the route/facade layer after ``transport_move_to_pose`` returns.
         """
@@ -531,14 +567,14 @@ class SymovoAgvClient(BaseHttpClient):
         )
 
     @safe_call
-    @cached(ttl=10, key_prefix="symovo_transport")  # Кешируем на 10 секунд
+    @cached(ttl=10, key_prefix="symovo_transport")  # Cache for 10 seconds
     async def transport_get(self, transport_id: int | str) -> Dict[str, Any]:
-        """Получить информацию о транспортной задаче."""
+        """Get transport task info."""
         return await self.get(f"/transport/{transport_id}")
 
     @safe_call
     async def transport_get_uncached(self, transport_id: int | str) -> Dict[str, Any]:
-        """Получить информацию о транспортной задаче (без кеша)."""
+        """Get transport task info (uncached)."""
         return await self.get(f"/transport/{transport_id}")
 
     @safe_call
@@ -549,7 +585,7 @@ class SymovoAgvClient(BaseHttpClient):
         since: str = "now",
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Ожидать изменения в транспортной задаче (long-poll).
+        """Wait for transport task changes (long-poll).
 
         Retries are disabled (max_retries=0) because the caller
         (_watch_transport) manages its own retry/backoff loop.  Internal
@@ -575,15 +611,15 @@ class SymovoAgvClient(BaseHttpClient):
                 time.perf_counter() - started,
             )
             return result
-        except Exception as e:
+        except (DeviceError, DeviceConnectionError, aiohttp.ClientError, asyncio.TimeoutError) as e:
             reliability_metrics.inc("symovo.transport_wait_for_changes.error")
-            if "timeout" in str(e).lower():
+            if isinstance(e, asyncio.TimeoutError) or "timeout" in str(e).lower():
                 reliability_metrics.inc("symovo.transport_wait_for_changes.timeout")
             raise
 
     @safe_call
     async def transports_wait_for_changes(self) -> Dict[str, Any]:
-        """Ожидать изменения в любых транспортных задачах."""
+        """Wait for changes in any transport tasks."""
         return await self.get(
             "/transport/wait_for_changes",
             op_timeout=settings.transport_watch_timeout + 5.0,
@@ -596,7 +632,7 @@ class SymovoAgvClient(BaseHttpClient):
         since: str = "now",
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Ожидать изменения по AMR (long-poll)."""
+        """Wait for AMR changes (long-poll)."""
         params: Dict[str, Any] = {"since": since}
         if timeout is not None:
             params["timeout"] = timeout
@@ -615,7 +651,7 @@ class SymovoAgvClient(BaseHttpClient):
                 time.perf_counter() - started,
             )
             return result
-        except Exception:
+        except (DeviceError, DeviceConnectionError, aiohttp.ClientError, asyncio.TimeoutError):
             try:
                 result = await self.get(
                     f"/agv/{self.robot_number}/wait_for_changes",
@@ -628,22 +664,22 @@ class SymovoAgvClient(BaseHttpClient):
                     time.perf_counter() - started,
                 )
                 return result
-            except Exception as e:
+            except (DeviceError, DeviceConnectionError, aiohttp.ClientError, asyncio.TimeoutError) as e:
                 reliability_metrics.inc("symovo.amr_wait_for_changes.error")
-                if "timeout" in str(e).lower():
+                if isinstance(e, asyncio.TimeoutError) or "timeout" in str(e).lower():
                     reliability_metrics.inc("symovo.amr_wait_for_changes.timeout")
                 raise
 
     @safe_call
-    @cached(ttl=60, key_prefix="symovo_stations")  # Кешируем на 1 минуту
+    @cached(ttl=60, key_prefix="symovo_stations")  # Cache for 1 minute
     async def get_stations(self) -> List[Dict[str, Any]]:
-        """Получить список всех станций."""
+        """Get list of all stations."""
         result = await self.get("/station")
-        # Если сервер вернул словарь с ключом "result" или строку — разворачиваем
+        # If server returned a dict with "result" key or a string, unwrap it
         if isinstance(result, dict):
             if "result" in result and isinstance(result["result"], list):
                 return result["result"]
-            # иногда может быть объект одной станции
+            # sometimes it may be a single station object
             return [result]
         elif isinstance(result, list):
             return result
@@ -651,16 +687,16 @@ class SymovoAgvClient(BaseHttpClient):
             return []
 
     @safe_call
-    @cached(ttl=60, key_prefix="symovo_charging_stations")  # Кешируем на 1 минуту
+    @cached(ttl=60, key_prefix="symovo_charging_stations")  # Cache for 1 minute
     async def get_charging_stations(self) -> List[Dict[str, Any]]:
-        """Получить только зарядные станции."""
+        """Get only charging stations."""
         stations = await self.get_stations()
         return [s for s in stations if isinstance(s, dict) and s.get("_type_id") == 4]
 
     @safe_call
-    @cache_invalidate("symovo_station")  # Инвалидируем кеш станций и зарядных станций (covers both symovo_stations and symovo_charging_stations)
+    @cache_invalidate("symovo_station")  # Invalidate stations and charging stations cache (covers both symovo_stations and symovo_charging_stations)
     async def set_charging_station_enabled(self, station_id: str, active: bool) -> Dict[str, Any]:
-        """Активировать/деактивировать зарядную станцию."""
+        """Enable/disable a charging station."""
         station = await self.get(f"/station/{station_id}")
         payload = {
             "id": station["id"],
@@ -670,7 +706,7 @@ class SymovoAgvClient(BaseHttpClient):
             "state": "OK" if active else "INACTIVE",
             "parking_allowed": station.get("parking_allowed", True),
             "has_charger": station.get("has_charger", True),
-            "agv": None,   # при update явно указываем null
+            "agv": None,   # explicitly set null on update
             "container_id": None,
             "barcode": None,
             "pos_tolerance": None,
@@ -681,9 +717,9 @@ class SymovoAgvClient(BaseHttpClient):
         return await self.put(f"/station/{station_id}", json_data=payload)
 
     @safe_call
-    @cache_invalidate("symovo_charging_stations")  # Инвалидируем кеш зарядных станций
+    @cache_invalidate("symovo_charging_stations")  # Invalidate charging stations cache
     async def disable_all_charging_stations(self) -> List[Dict[str, Any]]:
-        """Деактивировать все зарядные станции."""
+        """Deactivate all charging stations."""
         stations = await self.get_charging_stations()
         results = []
         for st in stations:
@@ -693,9 +729,9 @@ class SymovoAgvClient(BaseHttpClient):
         return results
 
     @safe_call
-    @cache_invalidate("symovo_charging_stations")  # Инвалидируем кеш зарядных станций
+    @cache_invalidate("symovo_charging_stations")  # Invalidate charging stations cache
     async def enable_all_charging_stations(self) -> List[Dict[str, Any]]:
-        """Активировать все зарядные станции."""
+        """Activate all charging stations."""
         stations = await self.get_charging_stations()
         results = []
         for st in stations:
@@ -747,7 +783,7 @@ class SymovoAgvClient(BaseHttpClient):
         return None
 
     async def wait_until_charging_stations_inactive(self, timeout: float = 5.0, interval: float = 0.5) -> bool:
-        """Ждём, пока все зарядные станции не станут INACTIVE.
+        """Wait until all charging stations become INACTIVE.
 
         Bypasses the @cached get_charging_stations() to see real-time state.
         """
@@ -767,21 +803,20 @@ class SymovoAgvClient(BaseHttpClient):
             await asyncio.sleep(interval)
         return False
     
-    @guarded_async_call(symovo_lock, timeout_s=15.0)  # Increased timeout - multiple HTTP requests may take time
-    @cache_invalidate("symovo_transport")  # Инвалидируем кеш транспортов
+    @guarded_async_call("_admin_lock", timeout_s=15.0)
+    @cache_invalidate("symovo_transport")
     async def clear_all_transports(self) -> List[Dict[str, Any]]:
-        """Удалить все транспортные задачи (guarded, serialized)."""
-        # Use shorter timeout per request (5 seconds) to avoid hanging on individual requests
+        """Delete all transport tasks (guarded, serialized)."""
         request_timeout = 5.0
-        
+        total_timeout = float(settings.clear_transports_timeout_s)
+
         _LOGGER.info("Fetching transport list...")
         try:
             result = await self.get("/transport", op_timeout=request_timeout)
-        except Exception as e:
+        except _FALLBACK_EXCEPTIONS as e:
             _LOGGER.warning("Failed to fetch transport list: %s", e)
             return []
 
-        # Нормализуем список
         transports: List[Dict[str, Any]]
         if isinstance(result, dict) and "result" in result:
             transports = result["result"]
@@ -793,13 +828,13 @@ class SymovoAgvClient(BaseHttpClient):
 
         transport_count = len(transports)
         _LOGGER.info("Found %d transport(s) to delete", transport_count)
-        
+
         if transport_count == 0:
             return []
 
-        deleted = []
-        # Delete transports with bounded concurrency to avoid overwhelming the controller
+        deleted: List[Dict[str, Any]] = []
         _sem = asyncio.Semaphore(5)
+
         async def _delete_one(tid: int, idx: int) -> Optional[Dict[str, Any]]:
             async with _sem:
                 try:
@@ -807,30 +842,38 @@ class SymovoAgvClient(BaseHttpClient):
                         _LOGGER.info("Deleting transport %s (%d/%d)...", tid, idx, transport_count)
                     resp = await self._make_request("DELETE", f"/transport/{tid}", op_timeout=request_timeout, max_retries=0)
                     return {"id": tid, "status": resp}
-                except Exception as e:
+                except _FALLBACK_EXCEPTIONS as e:
                     _LOGGER.warning("Failed to delete transport %s: %s", tid, e)
                     return None
 
-        results = await asyncio.gather(
-            *[_delete_one(t.get("id"), idx) for idx, t in enumerate(transports, 1) if t.get("id") is not None],
-            return_exceptions=True,
-        )
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[_delete_one(t.get("id"), idx) for idx, t in enumerate(transports, 1) if t.get("id") is not None],
+                    return_exceptions=True,
+                ),
+                timeout=total_timeout,
+            )
+        except asyncio.TimeoutError:
+            _LOGGER.warning(
+                "clear_all_transports: total timeout (%.0fs) exceeded with %d transports",
+                total_timeout, transport_count,
+            )
+            return deleted
+
         for r in results:
             if isinstance(r, dict):
                 deleted.append(r)
-        
+
         _LOGGER.info("Verifying deletion by fetching transport list again...")
         try:
             result = await self.get("/transport", op_timeout=request_timeout)
             remaining = result.get("result", []) if isinstance(result, dict) else (result if isinstance(result, list) else [])
             _LOGGER.info("Deletion complete. Deleted %d transport(s), remaining: %d", len(deleted), len(remaining))
-            # P1-5 fix: Return *deleted* transports (what we removed), not *remaining*.
-            # Callers log the result as "cleared N transports" — 0 should mean "nothing to clear",
-            # not "all deletions succeeded".
             return deleted
-        except Exception as e:
+        except _FALLBACK_EXCEPTIONS as e:
             _LOGGER.warning("Failed to verify deletion: %s", e)
             return deleted
 
 
-# Удален старый main - теперь используется dependency injection
+# Old main removed - now using dependency injection

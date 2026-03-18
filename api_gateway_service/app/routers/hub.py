@@ -1,10 +1,16 @@
+import hmac
+import logging
 from typing import Any, Dict
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.security import APIKeyHeader
 from pydantic import AnyHttpUrl, BaseModel, Field
 
+logger = logging.getLogger(__name__)
+
 from app.core.auth_client import get_auth_client
+from app.core.config import settings
 from app.core.hub_state import hub_state_store
 from app.core.hub_service import (
     build_credentials_payload,
@@ -19,6 +25,22 @@ from app.core.http_proxy_utils import join_url
 
 
 router = APIRouter(prefix="/api/v1/hub", tags=["Hub Config"])
+
+_admin_key_header = APIKeyHeader(name="X-Admin-Key", auto_error=False)
+
+
+async def _require_admin(key: str | None = Depends(_admin_key_header)) -> None:
+    """Enforce settings.gateway_admin_key on mutating hub endpoints.
+
+    If settings.gateway_admin_key is not configured the check is skipped (dev/local mode).
+    When configured, requests without a matching X-Admin-Key header are rejected
+    with 401 to prevent unauthenticated credential/config manipulation over the
+    network.
+    """
+    if not settings.gateway_admin_key:
+        return
+    if not key or not hmac.compare_digest(key, settings.gateway_admin_key):
+        raise HTTPException(status_code=401, detail="Missing or invalid admin key")
 
 
 class HubConfigPayload(BaseModel):
@@ -109,7 +131,7 @@ async def get_hub_config() -> dict:
     }
 
 
-@router.put("/config", summary="Update hub configuration")
+@router.put("/config", summary="Update hub configuration", dependencies=[Depends(_require_admin)])
 async def update_hub_config(payload: HubConfigPayload, request: Request) -> dict:
     record = await hub_state_store.set_hub_config(payload.model_dump(exclude_none=True))
     await trigger_auth_refresh(request.app)
@@ -128,7 +150,7 @@ async def get_robot_identity() -> dict:
     }
 
 
-@router.put("/robot", summary="Set robot identity")
+@router.put("/robot", summary="Set robot identity", dependencies=[Depends(_require_admin)])
 async def update_robot_identity(payload: RobotIdentityPayload, request: Request) -> dict:
     record = await hub_state_store.set_robot_identity(payload.model_dump(exclude_none=True))
     await trigger_auth_refresh(request.app)
@@ -147,11 +169,25 @@ async def get_robot_credentials() -> dict:
     }
 
 
-@router.put("/credentials", summary="Update robot credentials")
+@router.put("/credentials", summary="Update robot credentials", dependencies=[Depends(_require_admin)])
 async def update_robot_credentials(payload: RobotCredentialsPayload, request: Request) -> dict:
     meta_input = payload.model_dump(exclude={"api_key"})
+    old_meta = await hub_state_store.get_robot_credentials_meta()
+    old_api_key = await robot_secret_store.get_api_key()
     record = await hub_state_store.set_robot_credentials_meta(meta_input)
-    await robot_secret_store.set_api_key(payload.api_key)
+    try:
+        await robot_secret_store.set_api_key(payload.api_key)
+    except Exception:
+        # Rollback meta to previous state on api_key update failure
+        try:
+            if old_meta is not None:
+                await hub_state_store.set_robot_credentials_meta(old_meta)
+            else:
+                await hub_state_store.clear_robot_credentials_meta()
+            await robot_secret_store.set_api_key(old_api_key)
+        except Exception as rollback_exc:
+            logger.error("Credential rollback failed: %s", rollback_exc)
+        raise
     await trigger_auth_refresh(request.app)
     credentials = await build_credentials_payload(record)
     return {
@@ -165,10 +201,10 @@ async def get_auth_status(request: Request) -> dict:
     client = get_auth_client(request.app)
     if not client:
         return {"status": "disabled"}
-    return {"status": "ok", "details": client.describe()}
+    return {"status": "ok", "details": await client.describe()}
 
 
-@router.post("/connection-test", summary="Trigger hub connectivity test")
+@router.post("/connection-test", summary="Trigger hub connectivity test", dependencies=[Depends(_require_admin)])
 async def trigger_connection_test(
     request: Request,
     payload: ConnectionTestPayload | None = None,
@@ -188,7 +224,7 @@ async def trigger_connection_test(
     return await run_connection_test(request.app, target_url)
 
 
-@router.post("/auth", summary="Request robot JWT from hub")
+@router.post("/auth", summary="Request robot JWT from hub", dependencies=[Depends(_require_admin)])
 async def request_robot_token_route(
     request: Request,
     credentials_override: RobotCredentialsPayload | None = None,
@@ -201,7 +237,7 @@ async def request_robot_token_route(
     }
 
 
-@router.post("/demo-auth", summary="End-to-end auth + robot ping demo")
+@router.post("/demo-auth", summary="End-to-end auth + robot ping demo", dependencies=[Depends(_require_admin)])
 async def demo_robot_auth(
     request: Request,
     payload: DemoAuthPayload | None = None,

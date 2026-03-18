@@ -111,7 +111,7 @@ async def test_get_auth_header():
 async def test_describe_fields():
     """describe() returns expected structure."""
     client = AuthClient()
-    info = client.describe()
+    info = await client.describe()
     assert info["token_present"] is False
     assert info["last_error"] is None
     assert "context" in info

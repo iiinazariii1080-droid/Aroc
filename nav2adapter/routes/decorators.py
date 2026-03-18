@@ -16,7 +16,7 @@ def _err(msg: str, *, err_type: str = "Error") -> dict:
 
 def safe_getter(response_model: Type[Any]):
     """
-    Декоратор для геттер-эндпоинтов: ловит любые ошибки, всегда возвращает response_model или ErrorStatus.
+    Decorator for getter endpoints: catches all errors, always returns response_model or ErrorStatus.
     """
     def decorator(fn: Callable[..., Awaitable[Any]]):
         @wraps(fn)

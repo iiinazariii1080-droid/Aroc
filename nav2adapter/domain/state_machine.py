@@ -53,6 +53,19 @@ class NavigationStateMachine:
         )
     
     @staticmethod
+    def is_pre_run_state(symovo_state: int) -> bool:
+        """Check if transport is in pre-run state (UNASSIGNED, ASSIGNED, RECEIVED).
+
+        Pre-run transports are not yet actively executing; during recovery
+        the controller will resolve them without our intervention.
+        """
+        return symovo_state in (
+            NavigationStateMachine.UNASSIGNED,
+            NavigationStateMachine.ASSIGNED,
+            NavigationStateMachine.RECEIVED,
+        )
+
+    @staticmethod
     def is_active_state(symovo_state: int) -> bool:
         """Check if transport is actively executing (STARTING, RUNNING, CANCELING)."""
         return symovo_state in (

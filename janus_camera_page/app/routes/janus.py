@@ -1,41 +1,38 @@
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import hmac
-import json
-import logging
 import os
-import ssl
-import subprocess
-import tempfile
-import time
-from contextlib import suppress
-from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response as _Response, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-import requests
-from starlette.websockets import WebSocketDisconnect
-from websockets.client import connect as ws_connect
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from app.core.admin import require_admin
 from app.core.settings import get_settings
 from app.services import janus, janus_proxy
-from shared_config.network import DEVICES, PORTS
+from app.services.nat_config import (
+    JanusNatConfig,
+    generate_turn_credentials,
+    load_nat_config,
+    patch_janus_cfg_with_nat,
+    restart_depth_camera_janus,
+    restart_janus,
+    save_nat_config,
+)
+from shared_config.network import PORTS
 
 router = APIRouter(tags=["janus"])
 ADMIN_DEPENDENCY = Depends(require_admin)
-CAM_TYPE = get_settings().camera_type
+# Boot-time constant — FastAPI route paths must be static at decoration time.
+_CAM_TYPE = get_settings().camera_type
+
 
 class IceServer(BaseModel):
     urls: List[str]
     username: Optional[str] = None
     credential: Optional[str] = None
     credentialType: Literal["password"] = "password"
+
 
 class ClientRtcConfig(BaseModel):
     iceServers: List[IceServer]
@@ -44,9 +41,13 @@ class ClientRtcConfig(BaseModel):
     bundlePolicy: Literal["balanced", "max-bundle", "max-compat"] = "balanced"
     rtcpMuxPolicy: Literal["require"] = "require"
 
+
 class JanusHealthResponse(BaseModel):
     ok: bool
     mount_id: int
+
+
+# ── Janus health ──
 
 
 @router.get(
@@ -62,201 +63,11 @@ def janus_healthz() -> JanusHealthResponse:
     return JanusHealthResponse(ok=mount.get("enabled") is not None, mount_id=settings.janus_mount_id)
 
 
-JANUS_CFG_PATH = Path("/opt/janus/etc/janus/janus.jcfg")
-JANUS_NAT_JSON = Path("/etc/robot/janus-nat.json")
-
-NAT_BEGIN_MARKER = "# BEGIN NAT AUTO"
-NAT_END_MARKER = "# END NAT AUTO"
+# ── Client WebRTC config ──
 
 
-def _env(key: str, fallback: str = "") -> str:
-    """Read TURN/STUN defaults from env vars (same source as Settings)."""
-    return os.environ.get(key, fallback)
-
-
-class JanusNatConfig(BaseModel):
-    stun_server: str = Field(default_factory=lambda: _env("TURN_HOST", "82.165.177.194"))
-    stun_port: int = Field(default=3478)
-
-    turn_server: str = Field(default_factory=lambda: _env("TURN_HOST", "82.165.177.194"))
-    turn_port: int = Field(default=3478)
-    turn_type: Literal["udp", "tcp", "tls"] = Field(default="tcp")
-    turn_user: str = Field(default_factory=lambda: _env("TURN_USER", "webrtc"))
-    turn_pwd: str = Field(default_factory=lambda: _env("TURN_PASS", ""))
-
-    nat_1_1_mapping: str = Field(default="")
-
-    ice_tcp: bool = Field(default=False)
-    full_trickle: bool = Field(default=True)
-    keep_private_host: bool = Field(default=True)
-
-    min_port: int = Field(default=40000)
-    max_port: int = Field(default=41000)
-
-
-def generate_turn_credentials(
-    shared_secret: str,
-    user: str = "webrtc",
-    ttl: int = 86400,
-) -> Tuple[str, str]:
-    """Generate coturn TURN REST API ephemeral credentials.
-
-    Uses the same algorithm as coturn ``use-auth-secret`` /
-    ``static-auth-secret``:
-      username = "<unix-expiry>:<user>"
-      credential = Base64(HMAC-SHA1(username, shared_secret))
-
-    Returns (username, credential).
-    """
-    import base64
-
-    expiry = int(time.time()) + ttl
-    username = f"{expiry}:{user}"
-    mac = hmac.new(shared_secret.encode(), username.encode(), hashlib.sha1)
-    credential = base64.b64encode(mac.digest()).decode()
-    return username, credential
-
-def load_nat_config() -> JanusNatConfig:
-    """
-    Returns NAT settings shared between cameras.
-
-    Depth camera instances do not manage their own NAT config; they reuse the
-    primary (color) camera's settings. If the primary camera is temporarily
-    unreachable we gracefully fall back to the locally stored config (if any)
-    or to the baked-in defaults so that /client-config keeps working instead
-    of returning HTTP 5xx.
-    """
-
-    data: Optional[Dict[str, str]] = None
-
-    if CAM_TYPE == "depth_camera":
-        try:
-            response = requests.get(
-                f"http://{DEVICES.HOST_LAN_IP}:{PORTS.COLOR_CAMERA}/janus/nat", timeout=3
-            )
-            response.raise_for_status()
-            data = response.json()
-        except requests.RequestException as exc:
-            print(f"[janus-nat] depth_camera fallback to local config: {exc}")
-
-    if data is None and JANUS_NAT_JSON.exists():
-        try:
-            data = json.loads(JANUS_NAT_JSON.read_text())
-        except Exception as exc:  # pragma: no cover - defensive
-            print(f"[janus-nat] Failed to load {JANUS_NAT_JSON}: {exc}")
-
-    if data:
-        try:
-            return JanusNatConfig.model_validate(data)
-        except Exception as exc:  # pragma: no cover - defensive
-            print(f"[janus-nat] Invalid data, using defaults: {exc}")
-
-    return JanusNatConfig()
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Write content to *path* atomically via tempfile + rename."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        os.write(fd, content.encode())
-        os.fsync(fd)
-        os.close(fd)
-        fd = -1
-        os.rename(tmp, str(path))
-    except BaseException:
-        if fd >= 0:
-            os.close(fd)
-        with suppress(OSError):
-            os.unlink(tmp)
-        raise
-
-
-def save_nat_config(cfg: JanusNatConfig) -> None:
-    JANUS_NAT_JSON.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(JANUS_NAT_JSON, cfg.model_dump_json(indent=2))
-
-def render_nat_block(cfg: JanusNatConfig) -> str:
-    def b(value: bool) -> str:
-        return "true" if value else "false"
-
-    return f"""nat: {{
-  ice_tcp = {b(cfg.ice_tcp)}
-  full_trickle = {b(cfg.full_trickle)}
-  ignore_mdns = true
-  ice_ignore_list = [ "docker", "veth", "lo", "vmnet" ]
-  keep_private_host = {b(cfg.keep_private_host)}
-
-  stun_server = "{cfg.stun_server}"
-  stun_port   = {cfg.stun_port}
-
-  turn_server = "{cfg.turn_server}"
-  turn_port   = {cfg.turn_port}
-  turn_type   = "{cfg.turn_type}"
-  turn_user   = "{cfg.turn_user}"
-  turn_pwd    = "{cfg.turn_pwd}"
-
-  nat_1_1_mapping = "{cfg.nat_1_1_mapping}"
-  min_port = {cfg.min_port}
-  max_port = {cfg.max_port}
-}}"""
-
-def restart_janus() -> None:
-    res = subprocess.run(
-        ["sudo", "systemctl", "restart", "janus.service"],
-        capture_output=True,
-        text=True,
-    )
-    if res.returncode != 0:
-        raise RuntimeError(f"Failed to restart janus: {res.stderr or res.stdout}")
-
-def restart_depth_camera_janus() -> None:
-    try:
-        url = f"http://{DEVICES.DEPTH_CAMERA_IP}:{PORTS.COLOR_CAMERA}/janus/restart"
-        response = requests.post(url, timeout=10)
-        if response.status_code != 200:
-            raise RuntimeError(f"Failed to restart janus: {response.text}")
-    except requests.RequestException as exc:
-        raise RuntimeError(f"Failed to restart janus: {exc}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"Unknown error: {exc}") from exc
-
-@router.post("/janus/restart", summary="Restart Janus service", description="Restarts the Janus service.")
-def _restart_janus() -> None:
-    try:
-        restart_janus()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-
-def patch_janus_cfg_with_nat(cfg: JanusNatConfig) -> None:
-    if not JANUS_CFG_PATH.exists():
-        raise RuntimeError(f"{JANUS_CFG_PATH} not found")
-
-    text = JANUS_CFG_PATH.read_text()
-
-    try:
-        start = text.index(NAT_BEGIN_MARKER)
-        end = text.index(NAT_END_MARKER, start)
-    except ValueError as exc:  # pragma: no cover - config guard rails
-        raise RuntimeError("Markers '# BEGIN NAT AUTO' / '# END NAT AUTO' not found in janus.jcfg") from exc
-
-    before = text[:start].rstrip()
-    after = text[end + len(NAT_END_MARKER) :].lstrip()
-
-    nat_block = render_nat_block(cfg)
-
-    new_text = (
-        f"{before}\n"
-        f"{NAT_BEGIN_MARKER}\n"
-        f"{nat_block}\n"
-        f"{NAT_END_MARKER}\n"
-        f"{after}"
-    )
-
-    _atomic_write_text(JANUS_CFG_PATH, new_text)
 @router.get(
-    f"/api/v1/{CAM_TYPE}/client-config",
+    f"/api/v1/{_CAM_TYPE}/client-config",
     response_model=ClientRtcConfig,
     summary="WebRTC ICE configuration for browser clients",
     description=(
@@ -274,14 +85,6 @@ def patch_janus_cfg_with_nat(cfg: JanusNatConfig) -> None:
     ),
 )
 def get_client_rtc_config() -> ClientRtcConfig:
-    """
-    Lightweight endpoint consumed by `color_view.html` to configure ICE.
-
-    Path expectations:
-    - When the service listens directly on :8900, the page calls `/client-config`.
-    - When it's reverse‑proxied under `/api/v1/{CAM_TYPE}`, the proxy typically
-    rewrites `/api/v1/{CAM_TYPE}/client-config` -> `/client-config` on FastAPI.
-    """
     settings = get_settings()
     nat_cfg = load_nat_config()
 
@@ -292,22 +95,19 @@ def get_client_rtc_config() -> ClientRtcConfig:
     ice_servers.append(IceServer(urls=[stun_url]))
 
     # ── TURN (multi-transport failover) ──
-    # Provide UDP, TCP and TLS variants so the browser can fall back
-    # through progressively more firewall-friendly transports.
     turn_host = nat_cfg.turn_server
     turn_port = nat_cfg.turn_port
-    turn_tls_port = int(os.environ.get("TURN_TLS_PORT", "443"))
+    turn_tls_port_env = os.environ.get("TURN_TLS_PORT")
 
     turn_urls_all: List[str] = []
-    # Primary transport configured in Janus nat block
     if nat_cfg.turn_type in {"udp", "tcp"}:
         turn_urls_all.append(f"turn:{turn_host}:{turn_port}?transport=udp")
         turn_urls_all.append(f"turn:{turn_host}:{turn_port}?transport=tcp")
-    if nat_cfg.turn_type == "tls" or turn_tls_port:
-        turn_urls_all.append(f"turns:{turn_host}:{turn_tls_port}?transport=tcp")
+    if nat_cfg.turn_type == "tls" or turn_tls_port_env:
+        tls_port = int(turn_tls_port_env) if turn_tls_port_env else 443
+        turn_urls_all.append(f"turns:{turn_host}:{tls_port}?transport=tcp")
 
     if turn_urls_all:
-        # Prefer ephemeral TURN REST API credentials when shared secret is configured
         turn_shared_secret = settings.turn_shared_secret
         if turn_shared_secret:
             eph_user, eph_cred = generate_turn_credentials(
@@ -316,40 +116,25 @@ def get_client_rtc_config() -> ClientRtcConfig:
                 ttl=settings.turn_cred_ttl,
             )
             ice_servers.append(
-                IceServer(
-                    urls=turn_urls_all,
-                    username=eph_user,
-                    credential=eph_cred,
-                )
+                IceServer(urls=turn_urls_all, username=eph_user, credential=eph_cred)
             )
         else:
             ice_servers.append(
-                IceServer(
-                    urls=turn_urls_all,
-                    username=nat_cfg.turn_user,
-                    credential=nat_cfg.turn_pwd,
-                )
+                IceServer(urls=turn_urls_all, username=nat_cfg.turn_user, credential=nat_cfg.turn_pwd)
             )
 
-    policy: Literal["all", "relay"]
-    policy_env = settings.ice_policy
-
-    # Depth camera sits behind a double NAT (isolated router → color-camera
-    # host → corporate router → internet).  Direct host/srflx candidates
-    # advertised via nat_1_1_mapping will never reach it, so we force
-    # relay-only ICE to skip the fruitless connectivity checks and connect
-    # via TURN immediately.
+    # Depth camera behind double NAT → force relay-only ICE
     if settings.camera_type == "depth_camera":
-        policy = "relay"
-    elif policy_env == "relay":
+        policy: Literal["all", "relay"] = "relay"
+    elif settings.ice_policy == "relay":
         policy = "relay"
     else:
         policy = "all"
 
-    return ClientRtcConfig(
-        iceServers=ice_servers,
-        iceTransportPolicy=policy,
-    )
+    return ClientRtcConfig(iceServers=ice_servers, iceTransportPolicy=policy)
+
+
+# ── NAT config CRUD ──
 
 
 @router.get(
@@ -362,7 +147,8 @@ def get_client_rtc_config() -> ClientRtcConfig:
 def get_janus_nat_config():
     return load_nat_config()
 
-if CAM_TYPE == "color_camera":
+
+if _CAM_TYPE == "color_camera":
     @router.post(
         "/janus/nat",
         response_model=JanusNatConfig,
@@ -386,50 +172,20 @@ if CAM_TYPE == "color_camera":
 
             return new_cfg
 
-def _ssl_ctx_for(url: str) -> ssl.SSLContext | None:
-    settings = get_settings()
-    if url.startswith("wss://"):
-        ctx = ssl.create_default_context()
-        if settings.allow_insecure_tls:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-        return ctx
-    return None
 
-async def _pump_client_to_upstream(client_ws: WebSocket, upstream_ws) -> None:
-    try:
-        while True:
-            message = await client_ws.receive()
-            msg_type = message.get("type")
-            if msg_type == "websocket.receive":
-                if "text" in message and message["text"] is not None:
-                    await upstream_ws.send(message["text"])
-                elif "bytes" in message and message["bytes"] is not None:
-                    await upstream_ws.send(message["bytes"])
-            elif msg_type == "websocket.disconnect":
-                try:
-                    await upstream_ws.close()
-                except Exception:
-                    pass
-                break
-    except WebSocketDisconnect:
-        try:
-            await upstream_ws.close()
-        except Exception:
-            pass
+# ── Janus restart ──
 
-async def _pump_upstream_to_client(client_ws: WebSocket, upstream_ws) -> None:
+
+@router.post("/janus/restart", summary="Restart Janus service", description="Restarts the Janus service.", dependencies=[ADMIN_DEPENDENCY])
+def _restart_janus() -> None:
     try:
-        async for message in upstream_ws:
-            if isinstance(message, (bytes, bytearray)):
-                await client_ws.send_bytes(message)
-            else:
-                await client_ws.send_text(message)
-    except (ConnectionClosedOK, ConnectionClosedError):
-        try:
-            await client_ws.close()
-        except Exception:
-            pass
+        restart_janus()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ── Proxies ──
+
 
 @router.api_route(
     "/janus",
@@ -440,62 +196,11 @@ async def _pump_upstream_to_client(client_ws: WebSocket, upstream_ws) -> None:
 async def proxy_janus_root(request: Request) -> Response:
     return await janus_proxy.forward_request(request)
 
+
 @router.websocket("/janus/ws")
 async def janus_ws_proxy(client_ws: WebSocket) -> None:
+    from app.services.ws_proxy import proxy_websocket
+
     settings = get_settings()
-    upstream_url = settings.janus_ws_backends.get("1", "ws://127.0.0.1:8188/janus-ws")
-
-    req_header = client_ws.headers.get("sec-websocket-protocol", "")
-    offered = [item.strip() for item in req_header.split(",") if item.strip()]
-    subprotocol = "janus-protocol" if "janus-protocol" in offered else None
-
-    await client_ws.accept(subprotocol=subprotocol)
-
-    kwargs: Dict[str, object] = {
-        "open_timeout": 5,
-        "ping_interval": 10,
-        "ping_timeout": 10,
-        "close_timeout": 3,
-        "max_size": 2**20,
-        "compression": None,
-        "ssl": _ssl_ctx_for(upstream_url),
-    }
-    # Do NOT pass subprotocols= to ws_connect — Janus doesn't echo
-    # Sec-WebSocket-Protocol in its 101 response, and websockets ≥15 treats
-    # that as a NegotiationError.  The client-facing accept() already sent the
-    # subprotocol header to the browser; the upstream leg doesn't need it.
-
-    logging.info("WS proxy upstream: %s sub=%s", upstream_url, subprotocol)
-    try:
-        async with ws_connect(upstream_url, **kwargs) as upstream_ws:
-            await asyncio.gather(
-                _pump_client_to_upstream(client_ws, upstream_ws),
-                _pump_upstream_to_client(client_ws, upstream_ws),
-            )
-    except Exception as exc:
-        logging.error("WS proxy error [url=%s]: %s", upstream_url, exc, exc_info=True)
-        await client_ws.close()
-
-@router.get("/janus_healthz", include_in_schema=False, deprecated=True)
-def legacy_janus_healthz(response: _Response) -> Dict[str, object]:
-    response.headers["Deprecation"] = "true"
-    response.headers["Link"] = '</janus/healthz>; rel="successor-version"'
-    return janus_healthz()
-
-@router.get("/admin/janus-nat", include_in_schema=False, deprecated=True, response_model=JanusNatConfig, dependencies=[ADMIN_DEPENDENCY])
-async def legacy_get_janus_nat_config(response: _Response):
-    response.headers["Deprecation"] = "true"
-    response.headers["Link"] = '</janus/nat>; rel="successor-version"'
-    return await get_janus_nat_config()
-
-@router.post("/admin/janus-nat", include_in_schema=False, deprecated=True, response_model=JanusNatConfig, dependencies=[ADMIN_DEPENDENCY])
-async def legacy_update_janus_nat_config(new_cfg: JanusNatConfig, response: _Response):
-    response.headers["Deprecation"] = "true"
-    response.headers["Link"] = '</janus/nat>; rel="successor-version"'
-    return await update_janus_nat_config(new_cfg)
-
-@router.get(f"/api/v1/{CAM_TYPE}/janus-ws", include_in_schema=False)
-@router.websocket("/janus-ws")
-async def legacy_janus_ws_proxy(client_ws: WebSocket) -> None:
-    await janus_ws_proxy(client_ws)
-
+    upstream_url = settings.janus_ws_backends.get("1", f"ws://127.0.0.1:{PORTS.JANUS_WS}/janus-ws")
+    await proxy_websocket(client_ws, upstream_url, pass_subprotocol=False, label="janus-ws")

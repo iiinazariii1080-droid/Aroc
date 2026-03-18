@@ -148,7 +148,6 @@ services:
     container_name: symovo-service
     env_file: .env
     environment:
-      ROBOT_POSITIONS_DB_PATH: /app/data/database.db
       PERSISTENCE_PATH: /app/data/state.json
     volumes:
       - robot-service-data:/app/data
@@ -170,32 +169,149 @@ services:
     networks:
       - robot-net
 
-  # ---------- MQTT Command Service (bridge to AE.HUB) ----------
-  mqtt-service:
+  # ---------- MQTT: Config API (internal broker config store) ----------
+  mqtt-config-api:
     build:
-      context: .
-      dockerfile: mqtt_command_service/Dockerfile
-    container_name: mqtt-service
-    env_file: .env
-    environment:
-      CONFIG_DB_PATH: /app/data/config.db
-      API_ENABLED: ${API_ENABLED:-true}
-      API_PORT: ${MQTT_API_PORT:-7900}
-      API_HOST: "0.0.0.0"
-      CERT_STORAGE_DIR: /app/certs
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      JSON_LOGS: ${JSON_LOGS:-false}
+      context: ./mqtt_command_service
+      dockerfile: config-api/Dockerfile
+    container_name: mqtt-config-api
     volumes:
-      - mqtt-data:/app/data
-      - mqtt-certs:/app/certs
-    ports:
-      - "${MQTT_API_PORT:-7900}:${MQTT_API_PORT:-7900}"
+      - mqtt-config-data:/data
+      - mqtt-certs:/certs
+    environment:
+      API_PORT: "8100"
+      CONFIG_FILE_PATH: /data/config.json
+      CERT_DIR: /certs
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Seed broker config from root .env on first start
+      MQTT_BROKER: ${MQTT_BROKER:-82.165.177.194}
+      MQTT_PORT: ${MQTT_PORT:-8883}
+      MQTT_USER: ${MQTT_USER:-bridge_user}
+      MQTT_PASS: ${MQTT_PASS}
+      MQTT_USE_TLS: ${MQTT_USE_TLS:-true}
     restart: unless-stopped
     healthcheck:
       <<: *hc-defaults
-      test: ["CMD", "python3", "healthcheck.py"]
-      timeout: 10s
-      start_period: 40s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health')"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging: *default-logging
+    networks:
+      - robot-net
+
+  # ---------- MQTT: Hub Auth (JWT token management) ----------
+  mqtt-hub-auth:
+    build:
+      context: ./mqtt_command_service
+      dockerfile: hub-auth/Dockerfile
+    container_name: mqtt-hub-auth
+    depends_on:
+      mqtt-config-api:
+        condition: service_healthy
+    environment:
+      API_PORT: "8101"
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY}
+      HUB_BASE_URL: ${HUB_BASE_URL:-}
+      HUB_ROBOT_ID: ${HUB_ROBOT_ID:-}
+      HUB_API_KEY: ${HUB_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8101/health')"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging: *default-logging
+    networks:
+      - robot-net
+
+  # ---------- MQTT: Bridge (command relay) ----------
+  mqtt-bridge:
+    build:
+      context: ./mqtt_command_service
+      dockerfile: mqtt-bridge/Dockerfile
+    container_name: mqtt-bridge
+    depends_on:
+      mqtt-config-api:
+        condition: service_healthy
+      mqtt-hub-auth:
+        condition: service_healthy
+    volumes:
+      - mqtt-certs:/certs:ro
+    environment:
+      CONFIG_API_URL: http://mqtt-config-api:8100
+      HUB_AUTH_URL: http://mqtt-hub-auth:8101
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY}
+      ROBOT_ID: ${ROBOT_ID:-robot-01}
+      ROBOT_SERVICE_URL: http://${HOST_LAN_IP:-192.168.1.10}:${ROBOT_PORT:-8110}
+      IGUS_SERVICE_URL: http://${HOST_LAN_IP:-192.168.1.10}:${IGUS_PORT:-8101}
+      XARM_SERVICE_URL: http://${HOST_LAN_IP:-192.168.1.10}:${XARM_PORT:-8102}
+      SYMOVO_SERVICE_URL: http://${HOST_LAN_IP:-192.168.1.10}:${SYMOVO_PORT:-7905}
+      MQTT_PUBLISH_QOS: "1"
+      STATUS_HEARTBEAT_INTERVAL: "15.0"
+      ALLOW_MQTT_TLS_INSECURE: "true"  # Temporary: until 8883 switches to AROC CA
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    restart: unless-stopped
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "python", "-c", "import os, time; st = os.stat('/tmp/healthy'); exit(0 if time.time() - st.st_mtime < 30 else 1)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    stop_grace_period: 30s
+    logging: *default-logging
+    networks:
+      - robot-net
+
+  # ---------- MQTT: Telemetry (status publisher) ----------
+  mqtt-telemetry:
+    build:
+      context: ./mqtt_command_service
+      dockerfile: mqtt-telemetry/Dockerfile
+    container_name: mqtt-telemetry
+    depends_on:
+      mqtt-config-api:
+        condition: service_healthy
+    volumes:
+      - mqtt-certs:/certs:ro
+    environment:
+      CONFIG_API_URL: http://mqtt-config-api:8100
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY}
+      ROBOT_ID: ${ROBOT_ID:-robot-01}
+      LOCAL_IP: ${HOST_LAN_IP:-192.168.1.10}
+      POLL_INTERVAL_SECONDS: "5"
+      DEPTH_CAMERA_IP: ${DEPTH_CAMERA_IP:-192.168.1.55}
+      ALLOW_MQTT_TLS_INSECURE: "true"  # Temporary: until 8883 switches to AROC CA
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    restart: unless-stopped
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "python", "-c", "import os, time; st = os.stat('/tmp/healthy'); exit(0 if time.time() - st.st_mtime < 30 else 1)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
     logging: *default-logging
     networks:
       - robot-net
@@ -223,7 +339,7 @@ services:
 # ── Volumes ─────────────────────────────────────────────────────────────────
 volumes:
   robot-service-data:
-  mqtt-data:
+  mqtt-config-data:
   mqtt-certs:
 
 # ── Network ─────────────────────────────────────────────────────────────────

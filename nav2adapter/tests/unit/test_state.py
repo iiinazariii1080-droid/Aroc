@@ -73,14 +73,17 @@ async def test_shutdown_with_services():
     """When app.state.services exists, delegates to container stop."""
     from app.container import AppServices
 
+    mock_store = MagicMock()
+    mock_store.stop_persistence = AsyncMock()
+
     mock_services = MagicMock(spec=AppServices)
     mock_services.stop = AsyncMock()
+    mock_services.state_store = mock_store
 
     app = FastAPI()
     app.state.services = mock_services
 
-    with patch("app.state.state_store") as mock_store:
-        mock_store.stop_persistence = AsyncMock()
+    with patch("app.cache.cancel_eviction_task", MagicMock()):
         await shutdown(app)
 
     mock_services.stop.assert_awaited_once()
@@ -93,16 +96,13 @@ async def test_shutdown_legacy_no_services():
     app = FastAPI()
     app.state.status_publisher = MagicMock(stop=AsyncMock())
     app.state.event_dispatcher = MagicMock(stop=AsyncMock())
-    app.state.mqtt_adapter = MagicMock(disconnect=AsyncMock())
     app.state.symovo_client = MagicMock(close=AsyncMock())
 
-    with patch("app.state.state_store") as mock_store:
-        mock_store.stop_persistence = AsyncMock()
+    with patch("app.cache.cancel_eviction_task", MagicMock()):
         await shutdown(app)
 
     app.state.status_publisher.stop.assert_awaited_once()
     app.state.event_dispatcher.stop.assert_awaited_once()
-    app.state.mqtt_adapter.disconnect.assert_awaited_once()
     app.state.symovo_client.close.assert_awaited_once()
 
 
@@ -110,10 +110,13 @@ async def test_shutdown_legacy_no_services():
 async def test_shutdown_persistence_error():
     """Persistence error during shutdown doesn't propagate."""
     app = FastAPI()
-    app.state.services = MagicMock(stop=AsyncMock())
+    mock_store = MagicMock()
+    mock_store.stop_persistence = AsyncMock(side_effect=RuntimeError("db fail"))
+    mock_services = MagicMock(stop=AsyncMock())
+    mock_services.state_store = mock_store
+    app.state.services = mock_services
 
-    with patch("app.state.state_store") as mock_store:
-        mock_store.stop_persistence = AsyncMock(side_effect=RuntimeError("db fail"))
+    with patch("app.cache.cancel_eviction_task", MagicMock()):
         await shutdown(app)  # should not raise
 
 
@@ -122,8 +125,6 @@ async def test_shutdown_empty_state():
     """When state has nothing, just runs persistence stop."""
     app = FastAPI()
 
-    with patch("app.state.state_store") as mock_store:
-        mock_store.stop_persistence = AsyncMock()
+    with patch("app.cache.cancel_eviction_task", MagicMock()):
         await shutdown(app)
-
-    mock_store.stop_persistence.assert_awaited_once()
+    # No services → no persistence stop needed

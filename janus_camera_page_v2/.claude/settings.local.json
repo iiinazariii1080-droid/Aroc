@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(grep -r 'import janus' c:UsersUserDownloadsAroc-mainjanus_camera_page --include=*.py)",
-      "Bash(python -c \":*)"
-    ]
-  }
-}

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from contextlib import contextmanager
 
 from main import app
-from app.dependencies import get_symovo_client
+from app.dependencies import get_symovo_client, get_state_store
 from models.api_types import ErrorStatus
 
 
@@ -15,6 +15,15 @@ def _override_symovo(mock_client):
         yield
     finally:
         app.dependency_overrides.pop(get_symovo_client, None)
+
+
+@contextmanager
+def _override_store(mock_store):
+    app.dependency_overrides[get_state_store] = lambda: mock_store
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(get_state_store, None)
 
 
 # ── /fault_reset — non-list result branch (line 52) ─────────────────
@@ -32,28 +41,30 @@ class TestFaultResetNonList:
 
 class TestGetPoseGaps:
     def test_pose_cache_miss_non_dict_from_client(self, test_client):
-        """When cache is stale and client.pose() returns non-dict → 500."""
+        """When cache is stale and client.pose() returns non-dict -> 500."""
         mock_client = MagicMock()
         mock_client.pose = AsyncMock(return_value="not-a-dict")
-        with patch("routes.symovo_agv.state_store") as ss, \
+        mock_store = MagicMock()
+        mock_store.get_last_raw_pose = AsyncMock(return_value=None)
+        mock_store.get_last_raw_pose_age_s = AsyncMock(return_value=999)
+        with _override_store(mock_store), \
              patch("routes.symovo_agv.settings") as s, \
              _override_symovo(mock_client):
-            ss.get_last_raw_pose = AsyncMock(return_value=None)
-            ss.get_last_raw_pose_age_s = AsyncMock(return_value=999)
             s.cache_max_age_s = 5.0
             resp = test_client.get("/pose")
         assert resp.status_code == 500
 
     def test_pose_error_status_returns_502(self, test_client):
-        """When normalize returns ErrorStatus → 502."""
+        """When normalize returns ErrorStatus -> 502."""
         raw = {"some": "data"}
         mock_client = MagicMock()
-        with patch("routes.symovo_agv.state_store") as ss, \
+        mock_store = MagicMock()
+        mock_store.get_last_raw_pose = AsyncMock(return_value=raw)
+        mock_store.get_last_raw_pose_age_s = AsyncMock(return_value=0.1)
+        with _override_store(mock_store), \
              patch("routes.symovo_agv.settings") as s, \
              patch("routes.symovo_agv.normalize_symovo_status") as norm, \
              _override_symovo(mock_client):
-            ss.get_last_raw_pose = AsyncMock(return_value=raw)
-            ss.get_last_raw_pose_age_s = AsyncMock(return_value=0.1)
             s.cache_max_age_s = 5.0
             norm.return_value = ErrorStatus(error={"type": "test", "msg": "bad data"})
             resp = test_client.get("/pose")
@@ -65,12 +76,13 @@ class TestGetPoseGaps:
         result_obj = MagicMock(spec=[])
         result_obj.model_dump = MagicMock(return_value={"x": 0, "y": 0})
         mock_client = MagicMock()
-        with patch("routes.symovo_agv.state_store") as ss, \
+        mock_store = MagicMock()
+        mock_store.get_last_raw_pose = AsyncMock(return_value=raw)
+        mock_store.get_last_raw_pose_age_s = AsyncMock(return_value=0.1)
+        with _override_store(mock_store), \
              patch("routes.symovo_agv.settings") as s, \
              patch("routes.symovo_agv.normalize_symovo_status") as norm, \
              _override_symovo(mock_client):
-            ss.get_last_raw_pose = AsyncMock(return_value=raw)
-            ss.get_last_raw_pose_age_s = AsyncMock(return_value=0.1)
             s.cache_max_age_s = 5.0
             norm.return_value = result_obj
             resp = test_client.get("/pose")
@@ -83,11 +95,12 @@ class TestGetStatusGaps:
     def test_status_cache_miss_non_dict_from_client(self, test_client):
         mock_client = MagicMock()
         mock_client.status = AsyncMock(return_value="not-dict")
-        with patch("routes.symovo_agv.state_store") as ss, \
+        mock_store = MagicMock()
+        mock_store.get_last_raw_status = AsyncMock(return_value=None)
+        mock_store.get_last_raw_status_age_s = AsyncMock(return_value=999)
+        with _override_store(mock_store), \
              patch("routes.symovo_agv.settings") as s, \
              _override_symovo(mock_client):
-            ss.get_last_raw_status = AsyncMock(return_value=None)
-            ss.get_last_raw_status_age_s = AsyncMock(return_value=999)
             s.cache_max_age_s = 5.0
             resp = test_client.get("/status")
         assert resp.status_code == 500
@@ -95,12 +108,13 @@ class TestGetStatusGaps:
     def test_status_error_status_returns_502(self, test_client):
         raw = {"id": 1}
         mock_client = MagicMock()
-        with patch("routes.symovo_agv.state_store") as ss, \
+        mock_store = MagicMock()
+        mock_store.get_last_raw_status = AsyncMock(return_value=raw)
+        mock_store.get_last_raw_status_age_s = AsyncMock(return_value=0.1)
+        with _override_store(mock_store), \
              patch("routes.symovo_agv.settings") as s, \
              patch("routes.symovo_agv.normalize_symovo_status") as norm, \
              _override_symovo(mock_client):
-            ss.get_last_raw_status = AsyncMock(return_value=raw)
-            ss.get_last_raw_status_age_s = AsyncMock(return_value=0.1)
             s.cache_max_age_s = 5.0
             norm.return_value = ErrorStatus(error={"type": "test", "msg": "device error"})
             resp = test_client.get("/status")
@@ -111,12 +125,13 @@ class TestGetStatusGaps:
         result_obj = MagicMock(spec=[])
         result_obj.model_dump = MagicMock(return_value={"state": "ok"})
         mock_client = MagicMock()
-        with patch("routes.symovo_agv.state_store") as ss, \
+        mock_store = MagicMock()
+        mock_store.get_last_raw_status = AsyncMock(return_value=raw)
+        mock_store.get_last_raw_status_age_s = AsyncMock(return_value=0.1)
+        with _override_store(mock_store), \
              patch("routes.symovo_agv.settings") as s, \
              patch("routes.symovo_agv.normalize_symovo_status") as norm, \
              _override_symovo(mock_client):
-            ss.get_last_raw_status = AsyncMock(return_value=raw)
-            ss.get_last_raw_status_age_s = AsyncMock(return_value=0.1)
             s.cache_max_age_s = 5.0
             norm.return_value = result_obj
             resp = test_client.get("/status")
@@ -127,7 +142,7 @@ class TestGetStatusGaps:
 
 class TestNonDictBranches:
     def test_charging_stations_returns_dict(self, test_client):
-        """When get_charging_stations returns dict → pass through."""
+        """When get_charging_stations returns dict -> pass through."""
         mock_client = MagicMock()
         mock_client.get_charging_stations = AsyncMock(return_value={"stations": [{"id": 1}]})
         with _override_symovo(mock_client):
@@ -174,12 +189,12 @@ class TestNonDictBranches:
 
 class TestGoToPoseWait:
     def test_go_to_pose_wait_transport_id(self, test_client):
-        """When transport returns _wait_transport_id, _poll_transport_completion is called."""
+        """When transport returns _wait_transport_id, poll_transport_completion is called."""
         mock_client = MagicMock()
         mock_client.transport_move_to_pose = AsyncMock(
             return_value={"_wait_transport_id": 42, "state": 0}
         )
-        mock_client._poll_transport_completion = AsyncMock(
+        mock_client.poll_transport_completion = AsyncMock(
             return_value={"id": 42, "state": 5, "completed": True}
         )
         with _override_symovo(mock_client):
@@ -187,7 +202,7 @@ class TestGoToPoseWait:
                 "x_m": 1.0, "y_m": 2.0, "theta_deg": 90.0
             })
         assert resp.status_code == 200
-        mock_client._poll_transport_completion.assert_awaited_once_with(42)
+        mock_client.poll_transport_completion.assert_awaited_once_with(42)
 
     def test_go_to_pose_non_dict_result(self, test_client):
         mock_client = MagicMock()

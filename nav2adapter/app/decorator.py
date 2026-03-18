@@ -1,6 +1,6 @@
 import asyncio
 from functools import wraps
-from typing import Callable
+from typing import Callable, Union
 from fastapi.concurrency import run_in_threadpool
 import inspect
 from exceptions import DeviceBusyError,RobotBaseError
@@ -26,11 +26,22 @@ def safe_call(func):
     return wrapper
 
 
-def guarded_async_call(lock: asyncio.Lock, *, timeout_s: float = 0.3):
+def guarded_async_call(lock_or_attr: Union[asyncio.Lock, str], *, timeout_s: float = 0.3):
+    """Serialize access to a robot command behind an asyncio.Lock.
+
+    ``lock_or_attr`` may be:
+    * an ``asyncio.Lock`` instance (legacy — resolved at decoration time), or
+    * a ``str`` attribute name (resolved at call time via ``getattr(self, attr)``).
+    """
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             import time
+            # Resolve lock: string → instance attribute, Lock → use directly
+            if isinstance(lock_or_attr, str):
+                lock = getattr(args[0], lock_or_attr)
+            else:
+                lock = lock_or_attr
             start_wait = time.time()
             try:
                 await asyncio.wait_for(lock.acquire(), timeout=float(timeout_s))

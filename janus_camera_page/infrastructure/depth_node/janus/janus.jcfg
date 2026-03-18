@@ -23,7 +23,7 @@ nat: {
   full_trickle = true
   ignore_mdns = true
   keep_private_host = true
-  ice_ignore_list = [ "docker", "veth", "lo", "vmnet", "tailscale" ]
+  ice_enforce_list = "eth0"
 
   stun_server = "82.165.177.194"
   stun_port   = 3478
@@ -33,5 +33,9 @@ nat: {
   turn_type   = "tcp"
   turn_user   = "webrtc"
   turn_pwd    = "__TURN_PWD__"
+
+  nat_1_1_mapping = ""
+  min_port = 40000
+  max_port = 41000
 }
 # END NAT AUTO

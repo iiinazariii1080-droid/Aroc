@@ -1,4 +1,4 @@
-"""Safety state tracker — detects E-Stop / safety relay transitions and publishes to MQTT.
+"""Safety state tracker — detects E-Stop / safety relay transitions and monitors safety state.
 
 Monitors Symovo ``state_flags`` on each status poll and emits structured
 safety state when a transition occurs or as a periodic heartbeat.
