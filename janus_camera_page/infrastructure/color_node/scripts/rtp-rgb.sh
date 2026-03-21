@@ -7,7 +7,7 @@ ENV_FILE="/etc/robot/cam-rgb.env"
 
 WIDTH="${WIDTH:-640}"
 HEIGHT="${HEIGHT:-480}"
-FPS="${FPS:-30}"
+FPS="${FPS:-15}"
 BITRATE_KBPS="${BITRATE_KBPS:-1800}"
 GOP="${GOP:-$FPS}"
 PRESET="${PRESET:-veryfast}"

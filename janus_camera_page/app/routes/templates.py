@@ -2,6 +2,9 @@
 
 Serves Janus JS library, streamer, gamepad driver, player framework scripts,
 and rendered HTML views (color_view, depth_view, ir_view).
+
+Uses Jinja2 directly (not Starlette TemplateResponse) for version-proof
+rendering with autoescape enabled.
 """
 from __future__ import annotations
 
@@ -10,7 +13,8 @@ import logging
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from app.core.settings import get_settings
@@ -19,6 +23,13 @@ router = APIRouter(tags=["templates"])
 
 # Boot-time constant — FastAPI route paths must be static at decoration time.
 _CAM_TYPE = get_settings().camera_type
+
+# Jinja2 env with autoescape — used directly, bypasses Starlette wrapper
+# to avoid TemplateResponse API differences across Starlette versions.
+_jinja_env = Environment(
+    loader=FileSystemLoader(str(get_settings().templates_dir)),
+    autoescape=select_autoescape(["html", "htm"]),
+)
 
 # Fallback CDN for janus.js when templates/janus.js is not present
 JANUS_JS_CDN_URL = "https://cdn.jsdelivr.net/gh/meetecho/janus-gateway@v1.2.4/html/janus.js"
@@ -33,21 +44,34 @@ def _serve_template_file(filename: str, media_type: str = "application/javascrip
     return FileResponse(str(path), media_type=media_type)
 
 
-def _render_template_response(filename: str) -> HTMLResponse:
+def _render_jinja(template_name: str, **ctx) -> HTMLResponse:
+    """Render a Jinja2 template and return an HTMLResponse."""
+    tmpl = _jinja_env.get_template(template_name)
+    return HTMLResponse(tmpl.render(**ctx))
+
+
+def _render_template_response(filename: str, request: Request) -> HTMLResponse:
     settings = get_settings()
     html_path = Path(settings.templates_dir) / filename
     if not html_path.exists():
         raise HTTPException(status_code=404, detail=f"{filename} not found")
-    raw = html_path.read_text(encoding="utf-8")
-    rendered = raw.replace("__CAM_TYPE__", settings.camera_type)
-    if settings.camera_type == "depth_camera":
-        rendered = rendered.replace('data-joystick-mode="always"', 'data-joystick-mode="off"')
-    return HTMLResponse(rendered)
+    joystick_mode = "off" if settings.camera_type == "depth_camera" else "always"
+    style_nonce = getattr(request.state, "style_nonce", "")
+    return _render_jinja(
+        filename,
+        cam_type=settings.camera_type,
+        joystick_mode=joystick_mode,
+        stream_id=settings.janus_color_stream_id,
+        stream_name="RealSense RGB",
+        depth_features_script=False,
+        style_nonce=style_nonce,
+    )
 
 
 def _render_color_view_variant(
     stream_id: int,
     stream_name: str,
+    request: Request,
     joystick: bool = True,
     depth_features: bool = False,
 ) -> HTMLResponse:
@@ -55,16 +79,16 @@ def _render_color_view_variant(
     html_path = Path(settings.templates_dir) / "color_view.html"
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="color_view.html not found")
-    raw = html_path.read_text(encoding="utf-8")
-    rendered = raw.replace("__CAM_TYPE__", settings.camera_type)
-    rendered = rendered.replace('data-prefer-stream-id="1305"', f'data-prefer-stream-id="{stream_id}"')
-    rendered = rendered.replace('data-stream-name="RealSense RGB"', f'data-stream-name="{stream_name}"')
-    if not joystick:
-        rendered = rendered.replace('data-joystick-mode="always"', 'data-joystick-mode="off"')
-    if depth_features:
-        depth_script = f'<script src="/api/v1/{settings.camera_type}/depth_features.js"></script>'
-        rendered = rendered.replace('</body>', f'{depth_script}\n</body>')
-    return HTMLResponse(rendered)
+    style_nonce = getattr(request.state, "style_nonce", "")
+    return _render_jinja(
+        "color_view.html",
+        cam_type=settings.camera_type,
+        stream_id=stream_id,
+        stream_name=stream_name,
+        joystick_mode="always" if joystick else "off",
+        depth_features_script=depth_features,
+        style_nonce=style_nonce,
+    )
 
 
 # ── Janus JS library ──
@@ -132,6 +156,23 @@ def gamepad_config() -> JSONResponse:
         raise HTTPException(status_code=500, detail=f"Invalid JSON in gamepad_config.json: {e}")
 
 
+# ── Static assets via API prefix (for reverse proxy compatibility) ──
+
+@router.get(f"/api/v1/{_CAM_TYPE}/static/{{path:path}}", include_in_schema=False)
+def static_via_api(path: str) -> FileResponse:
+    """Serve static files via API prefix so they route through the reverse proxy."""
+    if ".." in path or path.startswith("/"):
+        raise HTTPException(status_code=404, detail="Invalid path")
+    settings = get_settings()
+    file_path = (Path(settings.static_dir) / path).resolve()
+    if not file_path.is_file() or not file_path.is_relative_to(Path(settings.static_dir).resolve()):
+        raise HTTPException(status_code=404, detail=f"Static file not found: {path}")
+    suffix = file_path.suffix.lower()
+    media_types = {".css": "text/css", ".js": "application/javascript", ".png": "image/png",
+                   ".jpg": "image/jpeg", ".svg": "image/svg+xml", ".ico": "image/x-icon"}
+    return FileResponse(str(file_path), media_type=media_types.get(suffix, "application/octet-stream"))
+
+
 # ── Player framework scripts ──
 
 def _player_script_response(path: str) -> FileResponse:
@@ -142,7 +183,11 @@ def _player_script_response(path: str) -> FileResponse:
     file_path = (base / path).resolve()
     if not file_path.is_file() or not file_path.is_relative_to(base):
         raise HTTPException(status_code=404, detail=f"Player script not found: {path}")
-    return FileResponse(str(file_path), media_type="application/javascript")
+    return FileResponse(
+        str(file_path),
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @router.get(f"/api/v1/{_CAM_TYPE}/player/{{path:path}}", include_in_schema=False)
@@ -159,25 +204,27 @@ def player_script_no_prefix(path: str) -> FileResponse:
 
 @router.get(f"/api/v1/{_CAM_TYPE}/color_view.html", include_in_schema=False)
 @router.get("/color_view.html", include_in_schema=False)
-def color_view() -> HTMLResponse:
-    return _render_template_response("color_view.html")
+def color_view(request: Request) -> HTMLResponse:
+    return _render_template_response("color_view.html", request)
 
 
 if _CAM_TYPE == "depth_camera":
     @router.get(f"/api/v1/{_CAM_TYPE}/depth_view.html", include_in_schema=False)
     @router.get("/depth_view.html", include_in_schema=False)
-    def depth_view() -> HTMLResponse:
+    def depth_view(request: Request) -> HTMLResponse:
         settings = get_settings()
+        style_nonce = getattr(request.state, "style_nonce", "")
         depth_template = Path(settings.templates_dir) / "depth_view.html"
         if depth_template.exists():
-            return _render_template_response("depth_view.html")
-        return _render_color_view_variant(1306, "RealSense Depth", joystick=False, depth_features=True)
+            return _render_jinja("depth_view.html", cam_type=settings.camera_type, style_nonce=style_nonce, stream_id=settings.janus_depth_stream_id)
+        return _render_color_view_variant(settings.janus_depth_stream_id, "RealSense Depth", request, joystick=False, depth_features=True)
 
     @router.get(f"/api/v1/{_CAM_TYPE}/ir_view.html", include_in_schema=False)
     @router.get("/ir_view.html", include_in_schema=False)
-    def ir_view() -> HTMLResponse:
+    def ir_view(request: Request) -> HTMLResponse:
         settings = get_settings()
+        style_nonce = getattr(request.state, "style_nonce", "")
         ir_template = Path(settings.templates_dir) / "ir_view.html"
         if ir_template.exists():
-            return _render_template_response("ir_view.html")
-        return _render_color_view_variant(1307, "RealSense IR", joystick=False)
+            return _render_jinja("ir_view.html", cam_type=settings.camera_type, style_nonce=style_nonce, stream_id=settings.janus_ir_stream_id)
+        return _render_color_view_variant(settings.janus_ir_stream_id, "RealSense IR", request, joystick=False)

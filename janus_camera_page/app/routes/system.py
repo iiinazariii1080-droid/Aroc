@@ -9,8 +9,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from app.core.admin import require_admin
 from app.core.dependencies import require_api_key
 from app.core.settings import get_settings
+from app.middleware.rate_limit import require_admin_rate_limit
 from app.services import janus
 from app.services import relay_proxy
 from app.services.system import service_restart, systemd_brief
@@ -126,6 +128,26 @@ def health_stream() -> JSONResponse:
         logging.warning("recovery ladder status unavailable: %s", exc)
         checks["recovery_ladder"] = {"ok": True, "level": 0}
 
+    # 5. TURN server reachability (TCP connect probe)
+    try:
+        import socket
+        turn_host = settings.turn_host if hasattr(settings, "turn_host") else None
+        turn_port = settings.turn_port if hasattr(settings, "turn_port") else 3478
+        if turn_host:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            try:
+                sock.connect((turn_host, int(turn_port)))
+                checks["turn_server"] = {"ok": True, "host": turn_host, "port": turn_port}
+            except (socket.timeout, OSError) as exc:
+                checks["turn_server"] = {"ok": False, "host": turn_host, "port": turn_port, "error": str(exc)}
+            finally:
+                sock.close()
+        else:
+            checks["turn_server"] = {"ok": True, "note": "no TURN configured"}
+    except Exception as exc:
+        checks["turn_server"] = {"ok": False, "error": str(exc)}
+
     stream_usable = rtp_fresh and mode_ok
     return JSONResponse(
         status_code=200 if stream_usable else 503,
@@ -135,8 +157,8 @@ def health_stream() -> JSONResponse:
 
 # ── Full system status ──
 
-@router.get(f"/api/v1/{_CAM_TYPE}/status", summary="Full system status snapshot")
-@router.get("/status", summary="Full system status snapshot")
+@router.get(f"/api/v1/{_CAM_TYPE}/status", summary="Full system status snapshot", dependencies=[Depends(require_admin), Depends(require_admin_rate_limit)])
+@router.get("/status", summary="Full system status snapshot", dependencies=[Depends(require_admin), Depends(require_admin_rate_limit)])
 def system_status() -> JSONResponse:
     import time as _time
     from app.services import system_mode as smode

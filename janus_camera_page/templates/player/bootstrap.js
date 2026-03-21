@@ -3,8 +3,6 @@
   const AP = window.AutonomousPlayer;
   if (!AP) throw new Error('AutonomousPlayer namespace missing');
 
-  const DEFAULT_ICE = [{ urls: ['stun:stun.l.google.com:19302'] }];
-
   function ensureJanusInit(cfg){
     if (typeof Janus === 'undefined') {
       return Promise.reject(new Error(
@@ -66,14 +64,17 @@
       const resp = await fetch(url, { cache: 'no-store', signal: ac.signal });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
-      const iceServers = Array.isArray(data.iceServers) && data.iceServers.length ? data.iceServers : DEFAULT_ICE;
+      if (!Array.isArray(data.iceServers) || !data.iceServers.length) {
+        log.error('rtc_config_empty_ice_servers', {});
+        return null;
+      }
       const iceTransportPolicy = (data.iceTransportPolicy === 'relay' || data.iceTransportPolicy === 'all')
         ? data.iceTransportPolicy
         : 'all';
-      return sanitizeRtcConfig(iceServers, iceTransportPolicy, log);
+      return sanitizeRtcConfig(data.iceServers, iceTransportPolicy, log);
     } catch (e) {
-      log.warn('rtc_config_fallback', { error: String(e?.message || e) });
-      return sanitizeRtcConfig(DEFAULT_ICE, 'all', log);
+      log.error('rtc_config_load_failed', { error: String(e?.message || e) });
+      return null;
     } finally {
       clearTimeout(timer);
     }
@@ -96,7 +97,7 @@
     const cfg = AP.Config.computeConfig();
     if (!cfg) return;
 
-    cfg.run_id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    cfg.run_id = Date.now().toString(36) + Array.from(crypto.getRandomValues(new Uint8Array(4)), function(b) { return b.toString(16).padStart(2, '0'); }).join('');
     const clock = AP.Adapters.createClock();
     const log = AP.Adapters.createConsoleLogger({ debug: cfg.debug, prefix: '[AutonomousPlayer]', run_id: cfg.run_id });
 
@@ -111,6 +112,10 @@
 
     if (cfg.textOnly) {
       const rtcConfig = await loadRtcConfig(cfg, log);
+      if (!rtcConfig) {
+        log.error('boot_aborted_no_rtc_config', { mode: 'textOnly' });
+        return;
+      }
       const session = new AP.Adapters.JanusSessionManager(cfg, log);
       session.setRtcConfig(rtcConfig);
       const textroom = new AP.Adapters.JanusTextRoomAdapter(cfg, log, session);
@@ -121,6 +126,18 @@
     }
 
     const rtcConfig = await loadRtcConfig(cfg, log);
+    if (!rtcConfig) {
+      log.error('boot_aborted_no_rtc_config', { mode: 'video' });
+      const ui = new AP.Adapters.DomUIAdapter(cfg, log, AP.Adapters.createClock());
+      ui.render({
+        state: AP.Core.PlayerState.ERROR,
+        desiredPlaying: false,
+        errCode: AP.Core.PlayerErrorCode ? AP.Core.PlayerErrorCode.BOOT_FAILED : 'no_rtc_config',
+        attempt: 0,
+        debugText: 'Failed to load ICE/TURN configuration from server',
+      });
+      return;
+    }
 
     const session = new AP.Adapters.JanusSessionManager(cfg, log);
     session.setRtcConfig(rtcConfig);

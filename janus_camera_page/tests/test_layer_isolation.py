@@ -114,7 +114,7 @@ class TestX2_JanusApiIsolation:
     async def test_fdir_mode_endpoint_with_janus_down(self, app_client):
         """The /fdir/mode endpoint must work regardless of Janus state."""
         with patch("app.services.janus.janus_summary", side_effect=ConnectionError):
-            r = await app_client.get("/fdir/mode")
+            r = await app_client.get("/fdir/mode", headers={"X-Admin-Token": "test-token"})
             assert r.status_code == 200
             assert "mode" in r.json()
 

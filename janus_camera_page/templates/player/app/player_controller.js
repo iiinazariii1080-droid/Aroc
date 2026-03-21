@@ -95,13 +95,14 @@
       this._reconnect = new AP.App.ReconnectCoordinator(cfg, clock, logger);
       this._reconnect.bindContext({
         getToken: () => this._sessionToken,
-        shouldContinue: () => this._isTabVisible() && this.cfg.autonomousEnabled && this.desiredPlaying && this.state !== PlayerState.ERROR,
+        shouldContinue: () => !this._isPlayerHidden() && this.cfg.autonomousEnabled && this.desiredPlaying && this.state !== PlayerState.ERROR,
         isRecovered: () => this._isConnected(),
         executeAttempt: (ctx) => this._executeRecoveryAttempt(ctx),
         onScheduled: () => {
           this._render();
         },
         onSuccess: () => {
+          this._degraded = false;
           this.handleEvent({ type: EventType.RECONNECT_SUCCESS, generation: this._sessionToken });
         },
         onExhausted: (pending) => {
@@ -120,6 +121,13 @@
     _isTabVisible(){
       if (typeof document === 'undefined') return true;
       return document.visibilityState === 'visible';
+    }
+
+    /** Unified check: player is hidden if tab is hidden OR video element is off-screen (iframe hidden). */
+    _isPlayerHidden(){
+      if (!this._isTabVisible()) return true;
+      if (this.ui && typeof this.ui.isElementVisible === 'function' && !this.ui.isElementVisible()) return true;
+      return false;
     }
 
     /**
@@ -246,6 +254,21 @@
 
       if (this.cfg.visibilityAwareReconnect && typeof document !== 'undefined') {
         document.addEventListener('visibilitychange', this._boundOnVisibilityChange);
+      }
+
+      // Element-level visibility (iframe/CSS hiding) — suppress watchdog while off-screen
+      if (typeof this.ui.onElementVisibilityChange === 'function') {
+        this.ui.onElementVisibilityChange((visible) => {
+          if (visible) {
+            this._watchdog.resetAfterTabResume();
+            this.log.info('element_visible', { state: this.state, token: this._sessionToken });
+            if (this.state === PlayerState.RECONNECTING) {
+              this._reconnect.resumeIfPending();
+            }
+          } else {
+            this.log.info('element_hidden', { token: this._sessionToken });
+          }
+        });
       }
 
       // Network connectivity: restart recovery from scratch when browser regains internet.
@@ -577,12 +600,12 @@
      * Guarded by _connectInFlight so overlapping START_JANUS does not run twice.
      */
     async _runConnectFlow(){
+      const token = this._sessionToken;  // R4-06: capture before latch to prevent stale token
       if (this._connectInFlight) {
         this.log.warn('connect_flow_already_running');
         return;
       }
       this._connectInFlight = true;
-      const token = this._sessionToken;
       try {
         await this._ensureSessionAndWatch(token);
         if (this._dropIfStale(token, 'connect')) return;
@@ -784,6 +807,12 @@
 
     _onWatchdogTimeout(ageMs){
       if (!this.desiredPlaying) return;
+      // Suppress watchdog while player is hidden — rVFC stops when tab/element is off-screen,
+      // but the WebRTC stream is still alive. Reset timestamp so watchdog won't fire again next tick.
+      if (this._isPlayerHidden()) {
+        this._watchdog.resetAfterTabResume();
+        return;
+      }
       const iceNegotiating = this.iceState === 'new' || this.iceState === 'checking';
       if ((this.state === PlayerState.CONNECTING || this.state === PlayerState.PLAYING) && !iceNegotiating) {
         const snapshot = this._buildPolicySnapshot();
@@ -799,6 +828,7 @@
      */
     _onFpsDrop(fps){
       if (!this.desiredPlaying) return;
+      if (this._isPlayerHidden()) return;
       if (this.state !== PlayerState.PLAYING && this.state !== PlayerState.CONNECTING) return;
       this.log.warn('fps_drop_detected', { fps, threshold: this.cfg.minAcceptableFps, token: this._sessionToken });
       const snapshot = this._buildPolicySnapshot();
@@ -813,6 +843,7 @@
      */
     _onVideoStalled(){
       if (!this.desiredPlaying) return;
+      if (this._isPlayerHidden()) return;
       if (this.state !== PlayerState.PLAYING) return;
       // Only act if we haven't received a frame for a meaningful period
       const age = this._watchdog.getLastFrameAgeMs(this.clock.nowMs());
@@ -1046,7 +1077,12 @@
       // Stop everything
       this.desiredPlaying = false;
       this._stopAll('destroy');
-      this.streaming.stop().catch(() => {});
+      // R3-01/R3-04: Full teardown via destroy() if available
+      if (this.streaming && typeof this.streaming.destroy === 'function') {
+        this.streaming.destroy().catch(() => {});
+      } else if (this.streaming) {
+        this.streaming.stop().catch(() => {});
+      }
 
       // Remove visibility listener
       if (typeof document !== 'undefined') {
@@ -1058,8 +1094,15 @@
         window.removeEventListener('online', this._boundOnOnline);
       }
 
-      // Stop frame clock
-      if (this.ui && typeof this.ui.stopFrameClock === 'function') this.ui.stopFrameClock();
+      // R3-01: Full UI cleanup (IntersectionObserver, event listeners, frame clock)
+      if (this.ui && typeof this.ui.destroy === 'function') {
+        this.ui.destroy();
+      } else if (this.ui && typeof this.ui.stopFrameClock === 'function') {
+        this.ui.stopFrameClock();
+      }
+
+      // Stop joystick timers (ping/pong/clockSync)
+      if (this.joystick && typeof this.joystick.stop === 'function') this.joystick.stop();
 
       // Stop stats
       if (this.stats) this.stats.stop();

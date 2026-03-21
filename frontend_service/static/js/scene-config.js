@@ -466,13 +466,13 @@
       textureRotationDeg: 0,
       // Plane translation sliders in metres relative to map top-left anchor.
       // Startup defaults: Position (15.06, -12.84, 0), Rotation (0, -90, 0).
-      planePosXM: 15.06,
-      planePosYM: -12.84,
+      planePosXM: 0,
+      planePosYM: 0,
       planePosZM: 0,
       // Plane rotation sliders around map top-left origin
       // (origin derived from map offsets: x=offsetX, y=offsetY+heightM).
       planeRxDeg: 0,
-      planeRyDeg: -90,
+      planeRyDeg: 0,
       planeRzDeg: 0,
       // Texture sliders (UV shift in metres + rotation in degrees)
       texOffsetXM: 0,

@@ -29,19 +29,23 @@ logger = logging.getLogger("system_mode")
 _metrics_loaded = False
 _system_mode_gauge = None
 _mode_transitions_counter = None
+_metrics_lock = threading.Lock()
 
 
 def _ensure_metrics():  # noqa: D401
     global _metrics_loaded, _system_mode_gauge, _mode_transitions_counter
     if _metrics_loaded:
         return
-    try:
-        from app.metrics import system_mode as _g, mode_transitions_total as _c
-        _system_mode_gauge = _g
-        _mode_transitions_counter = _c
-    except Exception:  # pragma: no cover
-        pass
-    _metrics_loaded = True
+    with _metrics_lock:
+        if _metrics_loaded:
+            return
+        try:
+            from app.metrics import system_mode as _g, mode_transitions_total as _c
+            _system_mode_gauge = _g
+            _mode_transitions_counter = _c
+        except Exception:  # pragma: no cover
+            pass
+        _metrics_loaded = True
 
 
 class SystemMode(str, Enum):
@@ -129,6 +133,12 @@ def current_mode() -> SystemMode:
     """Return the current system operating mode."""
     with _state.lock:
         return _state.current
+
+
+def mode_uptime_sec() -> float:
+    """Seconds since the last mode transition."""
+    with _state.lock:
+        return time.monotonic() - _state.entered_at_mono
 
 
 def current_policy() -> ModePolicy:

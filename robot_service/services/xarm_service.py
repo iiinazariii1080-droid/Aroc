@@ -16,6 +16,28 @@ from app.decorator import*
 from exceptions import DeviceConnectionError, DeviceError
 xarm_lock = asyncio.Lock()
 
+# Shared channel lock: serializes motion commands between HTTP and WS clients.
+_xarm_channel_lock: Optional[asyncio.Lock] = None
+
+
+def set_xarm_channel_lock(lock: asyncio.Lock) -> None:
+    global _xarm_channel_lock
+    _xarm_channel_lock = lock
+
+
+def _channel_guarded(fn):
+    """Acquires inter-channel lock before executing. stop/emergency_stop must NOT use this."""
+    import functools
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        if _xarm_channel_lock is not None:
+            async with _xarm_channel_lock:
+                return await fn(*args, **kwargs)
+        return await fn(*args, **kwargs)
+
+    return wrapper
+
 
 @dataclass(frozen=True)
 class _ResiliencePolicy:
@@ -210,6 +232,7 @@ class XarmManipulatorClient:
         await self._post("/recover")
         await self._post("/enable_motion")
 
+    @_channel_guarded
     @guarded_async_call(xarm_lock)
     async def complex_move_with_joints(self, params: MoveWithJointsDictParams):
         return await self._run_with_resilience(
@@ -219,6 +242,7 @@ class XarmManipulatorClient:
             recoverable_predicate=self._is_motion_recoverable,
         )
 
+    @_channel_guarded
     @guarded_async_call(xarm_lock)
     async def move_with_joints(self, params: MoveWithJointsParams):
         return await self._run_with_resilience(
@@ -228,6 +252,7 @@ class XarmManipulatorClient:
             recoverable_predicate=self._is_motion_recoverable,
         )
 
+    @_channel_guarded
     @guarded_async_call(xarm_lock)
     async def move_to_pose(self, params: MoveWithPoseParams):
         return await self._run_with_resilience(
@@ -237,6 +262,7 @@ class XarmManipulatorClient:
             recoverable_predicate=self._is_motion_recoverable,
         )
 
+    @_channel_guarded
     @guarded_async_call(xarm_lock)
     async def change_tool_position(self, params: MoveWithToolParams):
         return await self._run_with_resilience(
@@ -246,6 +272,7 @@ class XarmManipulatorClient:
             recoverable_predicate=self._is_motion_recoverable,
         )
 
+    @_channel_guarded
     @safe_call
     async def gripper_drop(self) -> Dict[str, Any]:
         return await self._run_with_resilience(
@@ -255,6 +282,7 @@ class XarmManipulatorClient:
             recoverable_predicate=self._is_gripper_recoverable,
         )
 
+    @_channel_guarded
     @safe_call
     async def gripper_take(self) -> Dict[str, Any]:
         return await self._run_with_resilience(

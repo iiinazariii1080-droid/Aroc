@@ -78,11 +78,14 @@ async def startup(app: FastAPI) -> None:
             _LOGGER.info("Disconnected from xArm gateway")
 
         # Safety layer processes incoming reports (watchdog/deadman if used by reports)
+        from safety.safety_kernel import get_safety_kernel
+        _safety_kernel = get_safety_kernel()
         safety = SafetyLayer(
             send_stop=send_stop,
             forward_command=forward_command,
             watchdog_timeout=cfg.watchdog_timeout,
             hold_timeout=cfg.hold_timeout,
+            estop_check=lambda: _safety_kernel.estop_active,
         )
 
         responses = ResponseManager()
@@ -110,6 +113,30 @@ async def startup(app: FastAPI) -> None:
         app.state.xarm_commands = ManipulatorCommands(app.state.xarm_cm.send, user_id="joystick", version="xarm6", stop_cmd_name="emergency_stop", response_manager=responses)
         app.state.xarm_safety = safety
 
+        # Shared lock: serializes xArm motion commands between HTTP and WS channels.
+        # stop/emergency_stop are NOT guarded — they must never be blocked.
+        app.state.xarm_channel_lock = asyncio.Lock()
+
+        # Apply channel lock to WS motion commands (stop remains unguarded)
+        _ch_lock = app.state.xarm_channel_lock
+        _orig_move_step = app.state.xarm_commands.move_step
+        _orig_move_step_over = app.state.xarm_commands.move_step_over
+
+        async def _guarded_move_step(*args, **kwargs):
+            async with _ch_lock:
+                return await _orig_move_step(*args, **kwargs)
+
+        async def _guarded_move_step_over(*args, **kwargs):
+            async with _ch_lock:
+                return await _orig_move_step_over(*args, **kwargs)
+
+        app.state.xarm_commands.move_step = _guarded_move_step
+        app.state.xarm_commands.move_step_over = _guarded_move_step_over
+
+        # Inject channel lock into HTTP client
+        from services.xarm_service import set_xarm_channel_lock
+        set_xarm_channel_lock(_ch_lock)
+
         # Inject xarm WS commands into robot_scripts for emergency_stop
         import app.robot_scripts as _rs
         _rs.set_xarm_commands(app.state.xarm_commands)
@@ -133,6 +160,8 @@ async def startup(app: FastAPI) -> None:
             autotake_func=robot_scripts.autotake,
             autotake_velocity=40,
             safety_layer=safety,
+            task_busy_check=lambda: _rs.robot_lock.locked(),
+            safety_lockout_check=lambda: _safety_kernel.estop_active,
             deadzone=JOYSTICK_DEADZONE,
             default_ttl_ms=JOYSTICK_DEFAULT_TTL_MS,
             hold_timeout_ms=JOYSTICK_HOLD_TIMEOUT_MS,
@@ -211,6 +240,20 @@ async def shutdown(app: FastAPI) -> None:
                 await igus_http.aclose()
             except Exception:
                 pass
+
+        # Close lazy client sessions (Nav2AdapterClient)
+        try:
+            import app.robot_scripts as _rs
+            await _rs.cleanup_clients()
+        except Exception:
+            pass
+
+        # Close SafetyKernel session
+        try:
+            from safety.safety_kernel import get_safety_kernel
+            await get_safety_kernel().aclose()
+        except Exception:
+            pass
     except Exception as e:
         _LOGGER.warning("Shutdown cleanup error: %s", e)
 

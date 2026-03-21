@@ -26,6 +26,7 @@ _LOGGER = logging.getLogger(__name__)
 _CLIENT_ID_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
 from app.config import settings, teleop_config
 from domain.models import NavigationCommand
+from domain.state_machine import NavigationStateMachine
 
 
 router = APIRouter(
@@ -341,11 +342,21 @@ async def send_cancel(
 async def move_speed(
     req: MoveSpeedRequest,
     symovo: SymovoClient,
+    store: InjectedStateStore,
     robot_id: str = Path(..., description="Robot ID"),
     _auth: None = Depends(require_command_auth),
 ) -> Dict[str, Any]:
     if robot_id != settings.robot_id:
         raise HTTPException(status_code=404, detail=f"Robot {robot_id} not found")
+    # C2: reject teleop while a coordinated transport is active
+    active = await store.get_all_active_commands()
+    for _, t in active.items():
+        if not NavigationStateMachine.is_terminal_state(t.state):
+            raise HTTPException(
+                status_code=409,
+                detail={"error": {"type": "TransportActive",
+                                  "msg": "Navigation in progress"}},
+            )
     try:
         linear_dir = 0 if req.linear_dir is None else int(max(-1, min(1, req.linear_dir)))
         angular_dir = 0 if req.angular_dir is None else int(max(-1, min(1, req.angular_dir)))

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from typing import Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional
 
 import aiohttp
 
@@ -44,6 +44,8 @@ class JoystickPipeline:
         igus_client=None,
         lift_jog_speed: float = 2000.0,
         lift_jog_ttl_ms: int = 200,
+        task_busy_check: Optional[Callable[[], bool]] = None,
+        safety_lockout_check: Optional[Callable[[], bool]] = None,
     ) -> None:
         self._xcmd = xarm_commands
         self._xhttp = xarm_http
@@ -66,6 +68,8 @@ class JoystickPipeline:
         self._igus_client = igus_client
         self._lift_jog_speed = float(lift_jog_speed)
         self._lift_jog_ttl_ms = int(lift_jog_ttl_ms)
+        self._task_busy_check = task_busy_check
+        self._safety_lockout_check = safety_lockout_check
 
         self._queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue(maxsize=queue_maxsize)
         self._worker_task: Optional[asyncio.Task] = None
@@ -93,6 +97,7 @@ class JoystickPipeline:
         self.dropped_total = 0
         self.processed_total = 0
         self.errors_total = 0
+        self.suppressed_total = 0
         self._last_error_log_ts: float = 0.0
         self._error_log_interval_sec: float = 2.0
 
@@ -252,6 +257,33 @@ class JoystickPipeline:
             buttons = buttons + [0] * (18 - len(buttons))
         if self._prev_buttons is None:
             self._prev_buttons = [0] * len(buttons)
+
+        # Gate: suppress joystick during orchestrated tasks (robot_lock held)
+        # or when safety lockout is active (E-stop, relay open, etc.)
+        _suppress = False
+        if self._task_busy_check is not None and self._task_busy_check():
+            _suppress = True
+        elif self._safety_lockout_check is not None and self._safety_lockout_check():
+            _suppress = True
+
+        if _suppress:
+            if self._motion_active:
+                try:
+                    await self._xcmd.move_step_over()
+                except Exception:
+                    pass
+                self._motion_active = False
+                self._loop_active_direction = None
+            if self._lift_jog_direction is not None:
+                try:
+                    if self._igus_client:
+                        await self._igus_client.jog_stop()
+                except Exception:
+                    pass
+                self._lift_jog_direction = None
+            self._prev_buttons = list(buttons)
+            self.suppressed_total += 1
+            return
 
         lift_was_pressed = any(
             int(self._prev_buttons[i]) == 1 for i in (8, 10) if i < len(self._prev_buttons)
@@ -472,6 +504,10 @@ class JoystickPipeline:
         return axis_active or button_active
 
     async def _toggle_gripper(self) -> None:
+        if self._task_busy_check is not None and self._task_busy_check():
+            return
+        if self._safety_lockout_check is not None and self._safety_lockout_check():
+            return
         try:
             if not self._xhttp:
                 return
@@ -486,11 +522,15 @@ class JoystickPipeline:
             pass
 
     async def _call_autotake(self) -> None:
+        if self._task_busy_check is not None and self._task_busy_check():
+            return
+        if self._safety_lockout_check is not None and self._safety_lockout_check():
+            return
         try:
             if self._autotake_func is not None:
                 await self._autotake_func(self._autotake_velocity)
-        except Exception:
-            pass
+        except Exception as e:
+            self._record_error("autotake", e)
 
     async def _send_lift_jog(self, direction: str, *, ttl_ms: Optional[int] = None) -> None:
         if self._igus_client is None:
@@ -567,6 +607,10 @@ class JoystickPipeline:
         self, linear_dir: int, angular_dir: int, duration: Optional[float] = None
     ) -> None:
         if not self._symovo_teleop_url:
+            return
+        if self._task_busy_check is not None and self._task_busy_check():
+            return
+        if self._safety_lockout_check is not None and self._safety_lockout_check():
             return
         session = getattr(self, "_symovo_session", None)
         if session is None:

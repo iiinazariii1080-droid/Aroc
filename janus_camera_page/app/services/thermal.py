@@ -20,6 +20,7 @@ from pathlib import Path
 
 from app.services.fdir_events import Domain, Severity, emit, RecoveryAction
 from app.services import system_mode
+from app.services.system import atomic_write_text
 
 logger = logging.getLogger("thermal")
 
@@ -63,8 +64,7 @@ def set_fps_profile(profile: str) -> None:
     file and adjusts capture parameters accordingly.
     """
     try:
-        FPS_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        FPS_PROFILE_PATH.write_text(profile + "\n")
+        atomic_write_text(FPS_PROFILE_PATH, profile + "\n")
         logger.info("FPS profile set to: %s", profile)
     except Exception as exc:
         logger.warning("Could not write FPS profile: %s", exc)

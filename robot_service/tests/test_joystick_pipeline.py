@@ -442,3 +442,219 @@ async def test_lift_jog_release_sends_jog_stop():
         await jp.stop()
 
 
+# ── task_busy_check suppression gate ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_task_busy_suppresses_all_commands():
+    """When task_busy_check returns True, the entire frame is suppressed."""
+    fake = FakeXarm()
+    fake_http = FakeXarmHttp()
+    fake_igus = FakeIgus()
+    fake_safety = type("FakeSafety", (), {"heartbeat": lambda self: None})()
+    jp = JoystickPipeline(
+        fake,
+        xarm_http=fake_http,
+        safety_layer=fake_safety,
+        igus_client=fake_igus,
+        task_busy_check=lambda: True,
+        default_ttl_ms=200,
+    )
+    await jp.start()
+    try:
+        # Init prev_buttons
+        neutral = {"ts": time.time(), "axes": [0.0] * 6, "buttons": [0] * 18, "ttl": 200}
+        assert await jp.submit(neutral)
+        await asyncio.sleep(0.05)
+
+        # Press button 13 (arm), button 0 (gripper), button 10 (lift up)
+        active = {"ts": time.time(), "axes": [0.0] * 6,
+                  "buttons": [1] + [0] * 9 + [1] + [0] * 2 + [1] + [0] * (18 - 14), "ttl": 200}
+        assert await jp.submit(active)
+        await asyncio.sleep(0.05)
+
+        # No xarm, gripper, or igus commands should have been dispatched
+        assert fake.calls == [], f"xarm calls should be empty: {fake.calls}"
+        assert fake_http.calls == [], f"gripper calls should be empty: {fake_http.calls}"
+        assert fake_igus.calls == [], f"igus calls should be empty: {fake_igus.calls}"
+        assert jp.suppressed_total >= 1
+    finally:
+        await jp.stop()
+
+
+@pytest.mark.asyncio
+async def test_task_busy_stops_active_arm_and_lift():
+    """When task becomes busy during active motion, arm and lift are stopped."""
+    fake = FakeXarm()
+    fake_igus = FakeIgus()
+    fake_safety = type("FakeSafety", (), {"heartbeat": lambda self: None})()
+
+    busy = False
+    jp = JoystickPipeline(
+        fake,
+        safety_layer=fake_safety,
+        igus_client=fake_igus,
+        task_busy_check=lambda: busy,
+        deadzone=0.0,
+        default_ttl_ms=200,
+        hold_timeout_ms=1000,
+    )
+    await jp.start()
+    try:
+        # Init
+        neutral = {"ts": time.time(), "axes": [0.0] * 6, "buttons": [0] * 18, "ttl": 200}
+        assert await jp.submit(neutral)
+        await asyncio.sleep(0.02)
+
+        # Start arm motion with button 13 (y+1)
+        press = {"ts": time.time(), "axes": [0.0] * 6,
+                 "buttons": [0] * 13 + [1] + [0] * (18 - 14), "ttl": 200}
+        assert await jp.submit(press)
+        await asyncio.sleep(0.05)
+        # Hold to enter loop
+        hold = {"ts": time.time(), "axes": [0.0] * 6,
+                "buttons": [0] * 13 + [1] + [0] * (18 - 14), "ttl": 200}
+        assert await jp.submit(hold)
+        await asyncio.sleep(0.05)
+        assert any(c.get("type") == "move_step" for c in fake.calls), "arm motion should have started"
+
+        # Start lift jog (button 10 → up) — release arm first
+        lift_press = {"ts": time.time(), "axes": [0.0] * 6,
+                      "buttons": [0] * 10 + [1] + [0] * (18 - 11), "ttl": 200}
+        assert await jp.submit(lift_press)
+        await asyncio.sleep(0.05)
+        assert any(c.get("type") == "jog_start" for c in fake_igus.calls), "lift jog should have started"
+
+        # Now set busy and send another frame — gate should stop both
+        busy = True
+        suppressed_frame = {"ts": time.time(), "axes": [0.0] * 6,
+                           "buttons": [0] * 10 + [1] + [0] * (18 - 11), "ttl": 200}
+        assert await jp.submit(suppressed_frame)
+        await asyncio.sleep(0.05)
+
+        # Gate should have stopped lift (arm was already stopped by release)
+        assert any(c.get("type") == "jog_stop" for c in fake_igus.calls), "lift should be stopped"
+        assert jp.suppressed_total >= 1
+    finally:
+        await jp.stop()
+
+
+# ── per-method defense-in-depth gates ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_toggle_gripper_blocked_when_busy():
+    """Per-method gate: _toggle_gripper suppressed when task is busy."""
+    fake = FakeXarm()
+    fake_http = FakeXarmHttp()
+    fake_safety = type("FakeSafety", (), {"heartbeat": lambda self: None})()
+    jp = JoystickPipeline(
+        fake, xarm_http=fake_http, safety_layer=fake_safety,
+        task_busy_check=lambda: True,
+    )
+    await jp._toggle_gripper()
+    assert fake_http.calls == [], "gripper should be suppressed when busy"
+
+
+@pytest.mark.asyncio
+async def test_call_autotake_blocked_when_busy():
+    """Per-method gate: _call_autotake suppressed when task is busy."""
+    from unittest.mock import AsyncMock
+    fake = FakeXarm()
+    fake_safety = type("FakeSafety", (), {"heartbeat": lambda self: None})()
+    autotake_fn = AsyncMock()
+    jp = JoystickPipeline(
+        fake, safety_layer=fake_safety,
+        task_busy_check=lambda: True,
+        autotake_func=autotake_fn, autotake_velocity=40,
+    )
+    await jp._call_autotake()
+    autotake_fn.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_call_autotake_logs_error():
+    """Autotake errors are recorded via _record_error, not silently swallowed."""
+    from unittest.mock import AsyncMock
+    fake = FakeXarm()
+    fake_safety = type("FakeSafety", (), {"heartbeat": lambda self: None})()
+    autotake_fn = AsyncMock(side_effect=RuntimeError("autotake fail"))
+    jp = JoystickPipeline(
+        fake, safety_layer=fake_safety,
+        task_busy_check=lambda: False,
+        autotake_func=autotake_fn, autotake_velocity=40,
+    )
+    await jp._call_autotake()
+    assert jp.errors_total >= 1, "error should be recorded, not swallowed"
+
+
+@pytest.mark.asyncio
+async def test_send_symovo_motion_blocked_when_busy():
+    """Per-method gate: _send_symovo_motion suppressed when task is busy."""
+    from unittest.mock import AsyncMock, MagicMock
+    fake = FakeXarm()
+    fake_safety = type("FakeSafety", (), {"heartbeat": lambda self: None})()
+    jp = JoystickPipeline(
+        fake, safety_layer=fake_safety,
+        task_busy_check=lambda: True,
+        symovo_teleop_url="http://fake:7905/move/speed",
+    )
+    mock_session = MagicMock()
+    mock_session.put = AsyncMock()
+    jp._symovo_session = mock_session
+    await jp._send_symovo_motion(1, 0)
+    mock_session.put.assert_not_called()
+
+
+# ── Safety lockout per-method tests ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_send_symovo_motion_blocked_when_safety_lockout():
+    """Per-method gate: _send_symovo_motion suppressed when safety lockout active."""
+    from unittest.mock import AsyncMock, MagicMock
+    fake = FakeXarm()
+    fake_safety = type("FakeSafety", (), {"heartbeat": lambda self: None})()
+    jp = JoystickPipeline(
+        fake, safety_layer=fake_safety,
+        task_busy_check=lambda: False,
+        safety_lockout_check=lambda: True,
+        symovo_teleop_url="http://fake:7905/move/speed",
+    )
+    mock_session = MagicMock()
+    mock_session.put = AsyncMock()
+    jp._symovo_session = mock_session
+    await jp._send_symovo_motion(1, 0)
+    mock_session.put.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_toggle_gripper_blocked_when_safety_lockout():
+    """Per-method gate: _toggle_gripper suppressed when safety lockout active."""
+    fake = FakeXarm()
+    fake_http = FakeXarmHttp()
+    fake_safety = type("FakeSafety", (), {"heartbeat": lambda self: None})()
+    jp = JoystickPipeline(
+        fake, xarm_http=fake_http, safety_layer=fake_safety,
+        task_busy_check=lambda: False,
+        safety_lockout_check=lambda: True,
+    )
+    await jp._toggle_gripper()
+    assert fake_http.calls == [], "gripper should be suppressed during safety lockout"
+
+
+@pytest.mark.asyncio
+async def test_call_autotake_blocked_when_safety_lockout():
+    """Per-method gate: _call_autotake suppressed when safety lockout active."""
+    from unittest.mock import AsyncMock
+    fake = FakeXarm()
+    fake_safety = type("FakeSafety", (), {"heartbeat": lambda self: None})()
+    autotake_fn = AsyncMock()
+    jp = JoystickPipeline(
+        fake, safety_layer=fake_safety,
+        task_busy_check=lambda: False,
+        safety_lockout_check=lambda: True,
+        autotake_func=autotake_fn, autotake_velocity=40,
+    )
+    await jp._call_autotake()
+    autotake_fn.assert_not_awaited()

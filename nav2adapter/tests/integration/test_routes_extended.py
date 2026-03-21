@@ -12,7 +12,7 @@ from app.dependencies import (
     get_event_stream,
     get_command_handler,
 )
-from domain.models import NavigationStatus, NavigationStatusEnum, PositionStatus
+from domain.models import NavigationStatus, NavigationStatusEnum, PositionStatus, ActiveTransport
 
 
 @contextmanager
@@ -375,6 +375,74 @@ class TestAehubRoutes:
             )
         assert resp.status_code == 200
 
+    def test_move_speed_returns_409_when_transport_active(self, test_client):
+        """C2: /move/speed must reject when a coordinated transport is in progress."""
+        mock_symovo = AsyncMock()
+        mock_symovo.move_speed = AsyncMock(return_value={"status": "ok"})
+
+        mock_store = MagicMock()
+        mock_store.get_all_active_commands = AsyncMock(return_value={
+            "cmd-1": ActiveTransport(
+                command_id="cmd-1", transport_id="t-1", state=5,  # RUNNING
+            ),
+        })
+
+        async def _symovo_override():
+            yield mock_symovo
+
+        app.dependency_overrides[get_symovo_client] = _symovo_override
+        app.dependency_overrides[get_state_store] = lambda: mock_store
+        try:
+            with patch("routes.aehub.settings") as s, \
+                 patch("routes.aehub.teleop_config") as tc:
+                s.robot_id = "test-robot"
+                tc.linear_speed = 0.3
+                tc.angular_speed = 0.5
+                tc.duration = 0.2
+                resp = test_client.put(
+                    "/api/v1/robots/test-robot/move/speed",
+                    json={"speed": 0.1, "angular_speed": 0.2, "duration": 0.5},
+                )
+        finally:
+            app.dependency_overrides.pop(get_symovo_client, None)
+            app.dependency_overrides.pop(get_state_store, None)
+        assert resp.status_code == 409
+        assert "TransportActive" in str(resp.json())
+        mock_symovo.move_speed.assert_not_awaited()
+
+    def test_move_speed_passes_when_transport_terminal(self, test_client):
+        """C2: /move/speed allowed when all transports are in terminal state."""
+        mock_symovo = AsyncMock()
+        mock_symovo.move_speed = AsyncMock(return_value={"status": "ok"})
+
+        mock_store = MagicMock()
+        mock_store.get_all_active_commands = AsyncMock(return_value={
+            "cmd-1": ActiveTransport(
+                command_id="cmd-1", transport_id="t-1", state=8,  # FINISHED (terminal)
+            ),
+        })
+
+        async def _symovo_override():
+            yield mock_symovo
+
+        app.dependency_overrides[get_symovo_client] = _symovo_override
+        app.dependency_overrides[get_state_store] = lambda: mock_store
+        try:
+            with patch("routes.aehub.settings") as s, \
+                 patch("routes.aehub.teleop_config") as tc:
+                s.robot_id = "test-robot"
+                tc.linear_speed = 0.3
+                tc.angular_speed = 0.5
+                tc.duration = 0.2
+                resp = test_client.put(
+                    "/api/v1/robots/test-robot/move/speed",
+                    json={"speed": 0.1, "angular_speed": 0.2, "duration": 0.5},
+                )
+        finally:
+            app.dependency_overrides.pop(get_symovo_client, None)
+            app.dependency_overrides.pop(get_state_store, None)
+        assert resp.status_code == 200
+
 
 # ── more symovo_agv routes ───────────────────────────────────────────
 
@@ -428,25 +496,52 @@ class TestSymovoAgvRoutesMore:
         assert resp.json()["activated"] is True
 
     def test_go_to_pose(self, test_client):
+        mock_handler = MagicMock()
+        mock_handler.handle_drive_to_position = AsyncMock(
+            return_value=NavigationStatus(
+                status=NavigationStatusEnum.NAVIGATING,
+                goal_id="cmd-1",
+                progress_percent=1,
+            )
+        )
         mock_client = MagicMock()
-        mock_client.transport_move_to_pose = AsyncMock(return_value={"id": 99, "state": 0})
+        app.dependency_overrides[get_command_handler] = lambda: mock_handler
         with _override_symovo(mock_client):
-            resp = test_client.post("/go_to_pose", json={
-                "x_m": 1.0, "y_m": 2.0, "theta_deg": 90.0,
-            })
+            try:
+                resp = test_client.post("/go_to_pose", json={
+                    "x_m": 1.0, "y_m": 2.0, "theta_deg": 90.0, "wait": False,
+                })
+            finally:
+                app.dependency_overrides.pop(get_command_handler, None)
         assert resp.status_code == 200
-        assert resp.json()["id"] == 99
+        data = resp.json()
+        assert "command_id" in data
+        assert data["status"] == "navigating"
+        mock_handler.handle_drive_to_position.assert_awaited_once()
 
     def test_go_to_pose_with_wait(self, test_client):
+        mock_handler = MagicMock()
+        mock_handler.handle_drive_to_position = AsyncMock(
+            return_value=NavigationStatus(
+                status=NavigationStatusEnum.NAVIGATING,
+                goal_id="cmd-1",
+                progress_percent=50,
+            )
+        )
+        mock_transport = MagicMock()
+        mock_transport.transport_id = "99"
+        mock_handler.state_store = MagicMock()
+        mock_handler.state_store.get_active_transport = AsyncMock(return_value=mock_transport)
         mock_client = MagicMock()
-        mock_client.transport_move_to_pose = AsyncMock(return_value={
-            "id": 99, "state": 8, "_wait_transport_id": 99,
-        })
         mock_client.poll_transport_completion = AsyncMock(return_value={"id": 99, "state": 8})
+        app.dependency_overrides[get_command_handler] = lambda: mock_handler
         with _override_symovo(mock_client):
-            resp = test_client.post("/go_to_pose", json={
-                "x_m": 1.0, "y_m": 2.0, "theta_deg": 0.0, "wait": True,
-            })
+            try:
+                resp = test_client.post("/go_to_pose", json={
+                    "x_m": 1.0, "y_m": 2.0, "theta_deg": 0.0, "wait": True,
+                })
+            finally:
+                app.dependency_overrides.pop(get_command_handler, None)
         assert resp.status_code == 200
 
     def test_get_map_png(self, test_client):

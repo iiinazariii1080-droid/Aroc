@@ -35,6 +35,7 @@ def atomic_write_text(path: Path, content: str) -> None:
 def run(cmd: list[str], timeout: int = 5) -> str:
     result = subprocess.run(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

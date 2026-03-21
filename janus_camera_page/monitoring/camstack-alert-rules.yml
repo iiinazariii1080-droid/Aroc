@@ -63,13 +63,13 @@ groups:
             FDIR should escalate to L2 (restart Janus).
 
       - alert: CamstackVideoStale
-        expr: camstack_video_age_ms > 5000
+        expr: camstack_video_age_ms > 10000
         for: 1m
         labels:
           severity: warning
           service: camera_stack
         annotations:
-          summary: "Video frame age exceeds 5s"
+          summary: "Video frame age exceeds 10s (matches watchdog_stale_ms)"
           description: >
             Last video frame on mountpoint is {{ $value }}ms old on {{ $labels.instance }}.
             Pipeline may be stalled.
@@ -214,16 +214,45 @@ groups:
       # ── Thermal ───────────────────────────────────────────────────
 
       - alert: CamstackCPUHot
-        expr: camstack_cpu_temp_celsius > 80
+        expr: camstack_cpu_temp_celsius > 68
         for: 2m
         labels:
           severity: warning
           service: camera_stack
         annotations:
-          summary: "RPi5 CPU temperature > 80°C"
+          summary: "RPi5 CPU temperature > 68°C (throttle at ~70°C)"
           description: >
             CPU temperature is {{ $value }}°C on {{ $labels.instance }}.
             Thermal throttling likely active. Check cooling.
+
+      # ── Admin bruteforce ───────────────────────────────────────────
+
+      - alert: CamstackAdminBruteforce
+        expr: rate(camstack_admin_rate_limit_exceeded_total[5m]) > 0.15
+        for: 1m
+        labels:
+          severity: warning
+          service: camera_stack
+        annotations:
+          summary: "Admin endpoint bruteforce attempt (>9 429s/min)"
+          description: >
+            Admin rate-limit 429 rate is {{ $value }}/s on {{ $labels.instance }}.
+            Possible token bruteforce. Check access logs.
+
+      # ── Reboot circuit breaker ──────────────────────────────────────
+
+      - alert: CamstackRebootCircuitBreaker
+        expr: camstack_recovery_ladder_level >= 4
+        for: 10s
+        labels:
+          severity: critical
+          service: camera_stack
+        annotations:
+          summary: "FDIR reached reboot level — circuit breaker may trip"
+          description: >
+            Recovery ladder at level {{ $value }} (reboot) on {{ $labels.instance }}.
+            If max_fdir_reboots exceeded, system enters SAFE mode.
+            Immediate investigation required.
 
       # ── Watchdog stall ────────────────────────────────────────────
 
@@ -238,3 +267,101 @@ groups:
           description: >
             No watchdog check cycles in 5 min on {{ $labels.instance }}.
             The FDIR subsystem may have crashed.
+
+      # ── WebSocket connection flood ──────────────────────────────────
+
+      - alert: CamstackWSConnectionsHigh
+        expr: camstack_ws_connections_active > 8
+        for: 1m
+        labels:
+          severity: warning
+          service: camera_stack
+        annotations:
+          summary: "High number of active WebSocket connections"
+          description: >
+            {{ $value }} active WS connections on {{ $labels.instance }}.
+            May indicate a connection leak or DoS attempt.
+
+      # ── Janus summary parse errors ─────────────────────────────────
+
+      - alert: CamstackJanusSummaryParseErrors
+        expr: rate(camstack_janus_summary_parse_errors_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: camera_stack
+        annotations:
+          summary: "Janus summary response parse errors detected"
+          description: >
+            Janus REST API returning unexpected response format on
+            {{ $labels.instance }}. May indicate Janus version mismatch.
+
+      # ── Depth proxy errors ─────────────────────────────────────────
+
+      - alert: CamstackDepthProxyErrors
+        expr: rate(camstack_depth_proxy_errors_total[5m]) > 0.1
+        for: 3m
+        labels:
+          severity: warning
+          service: camera_stack
+        annotations:
+          summary: "Depth camera proxy errors"
+          description: >
+            Sustained depth proxy errors on {{ $labels.instance }}.
+            Check connectivity between color and depth nodes.
+
+  - name: camstack-audit-remediation
+    rules:
+      - alert: CamstackICESetupFailures
+        expr: rate(camstack_ice_setup_failures_total[5m]) > 0.05
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ICE setup failures detected"
+          description: "ICE connection setup is failing — clients cannot establish WebRTC media path."
+
+      - alert: CamstackDTLSFailures
+        expr: rate(camstack_dtls_handshake_failures_total[5m]) > 0.02
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DTLS handshake failures detected (>1/min)"
+          description: "DTLS handshake failures indicate potential TLS/crypto issues in the media path."
+
+      - alert: CamstackOrphanedSessions
+        expr: rate(camstack_orphaned_janus_sessions_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Orphaned Janus sessions accumulating"
+          description: "Janus sessions are not being cleanly destroyed — potential resource leak."
+
+      - alert: CamstackProcessMemoryHigh
+        expr: camstack_process_memory_bytes > 512 * 1024 * 1024
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Camera service RSS > 512MB"
+          description: "Process memory is elevated — investigate for leaks."
+
+      - alert: CamstackRecoveryActionSlow
+        expr: histogram_quantile(0.95, rate(camstack_recovery_action_duration_seconds_bucket[15m])) > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "FDIR recovery actions taking > 60s at p95"
+          description: "Recovery actions are slow — pipeline restarts or Janus restarts may be hanging."
+
+      - alert: CamstackServiceRestartLoop
+        expr: rate(camstack_watchdog_escalations_total{level="restart_pipeline"}[10m]) > 0.3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Pipeline restart loop detected"
+          description: "Pipeline restarts happening > 3/10min — likely a persistent failure."

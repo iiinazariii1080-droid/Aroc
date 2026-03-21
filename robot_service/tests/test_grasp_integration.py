@@ -51,12 +51,12 @@ def mocks():
     patches = {
         "lift": patch("app.robot_scripts.lift"),
         "manipulator": patch("app.robot_scripts.manipulator"),
-        "symovo": patch("app.robot_scripts.symovo"),
+        "agv": patch("app.robot_scripts.agv"),
         "depth_camera": patch("app.robot_scripts.depth_camera"),
         "robot_lock": patch("app.robot_scripts.robot_lock", new_callable=lambda: asyncio.Lock),
     }
     started = {k: p.start() for k, p in patches.items()}
-    for name in ("lift", "manipulator", "symovo", "depth_camera"):
+    for name in ("lift", "manipulator", "agv", "depth_camera"):
         for method in ("enable_motion", "fault_reset", "reference",
                        "depth", "change_tool_position", "complex_move_with_joints",
                        "gripper_take", "gripper_status", "go_to_pose", "status",

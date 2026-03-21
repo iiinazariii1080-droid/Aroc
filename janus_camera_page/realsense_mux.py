@@ -1,3 +1,6 @@
+import errno
+import fcntl
+import logging
 import os
 import sys
 import time
@@ -8,6 +11,8 @@ import threading
 import signal
 from dataclasses import dataclass
 from typing import List, Dict, Optional
+
+logger = logging.getLogger("realsense_mux")
 
 import pyrealsense2 as rs
 import numpy as np
@@ -212,6 +217,23 @@ def make_fastapi(service: CameraService):
             "data": encoded,
         }
 
+    @router.get("/health")
+    async def health(service: CameraService = Depends(get_camera_service)):
+        """Liveness/readiness probe for FDIR watchdog."""
+        now = time.time()
+        depth_age = now - service._updated_at if service._updated_at else None
+        color_age = now - service._color_updated_at if service._color_updated_at else None
+        has_depth = service._depth_m is not None
+        has_color = service._color_rgb is not None
+        ok = has_depth and has_color and (depth_age is not None and depth_age < 10.0)
+        return {
+            "ok": ok,
+            "depth_available": has_depth,
+            "color_available": has_color,
+            "depth_age_s": round(depth_age, 2) if depth_age is not None else None,
+            "color_age_s": round(color_age, 2) if color_age is not None else None,
+        }
+
     app.include_router(router)
     return app
 
@@ -300,15 +322,39 @@ def ensure_fifo(path: str) -> None:
         if not stat.S_ISFIFO(st.st_mode):
             raise RuntimeError(f"{path} exists but is not a FIFO")
     else:
-        os.mkfifo(path, 0o666)
+        os.mkfifo(path, 0o660)
         print(f"[fifo] created {path}", flush=True)
 
 
+# Maximum time to wait for a FIFO reader before giving up (DEF-08).
+_FIFO_OPEN_TIMEOUT_SEC = float(os.environ.get("FIFO_OPEN_TIMEOUT_SEC", "5"))
+
+
 def open_fifo_writer_blocking(path: str):
+    """Open a FIFO for writing, waiting up to _FIFO_OPEN_TIMEOUT_SEC for a reader.
+
+    Uses O_NONBLOCK + poll loop instead of blocking O_WRONLY to prevent
+    the main frame loop from hanging indefinitely when ffmpeg is not
+    running (DEF-08).
+    """
     print(f"[fifo] waiting for reader on {path} ...", flush=True)
-    fd = os.open(path, os.O_WRONLY)
-    print(f"[fifo] writer opened {path}", flush=True)
-    return os.fdopen(fd, "wb", buffering=0)
+    deadline = time.time() + _FIFO_OPEN_TIMEOUT_SEC
+    while True:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            # Clear O_NONBLOCK so subsequent writes block normally
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+            print(f"[fifo] writer opened {path}", flush=True)
+            return os.fdopen(fd, "wb", buffering=0)
+        except OSError as exc:
+            if exc.errno != errno.ENXIO:
+                raise
+            if time.time() >= deadline:
+                raise TimeoutError(
+                    f"FIFO {path}: no reader after {_FIFO_OPEN_TIMEOUT_SEC}s"
+                ) from exc
+            time.sleep(0.5)
 
 
 def run_pipeline(
@@ -413,7 +459,7 @@ def run_pipeline(
         app = make_fastapi(service)
 
         def _run_http():
-            uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
+            uvicorn.run(app, host=os.getenv("MUX_BIND_HOST", "127.0.0.1"), port=8000, log_level="warning")
 
         http_thread = threading.Thread(target=_run_http, daemon=True)
         http_thread.start()
@@ -468,9 +514,20 @@ def run_pipeline(
                     raise RuntimeError(f"FIFO {label} unrecoverable") from reopen_exc
                 return writer  # return original (broken) writer instead of None to avoid AttributeError
 
+    _consecutive_timeouts = 0
+    _MAX_CONSECUTIVE_TIMEOUTS = 3
+
     try:
         while running:
-            frames = pipeline.wait_for_frames()
+            try:
+                frames = pipeline.wait_for_frames(timeout_ms=10000)
+                _consecutive_timeouts = 0
+            except RuntimeError:
+                _consecutive_timeouts += 1
+                logger.warning("wait_for_frames timeout (%d/%d)", _consecutive_timeouts, _MAX_CONSECUTIVE_TIMEOUTS)
+                if _consecutive_timeouts >= _MAX_CONSECUTIVE_TIMEOUTS:
+                    raise RuntimeError("Camera unresponsive: %d consecutive frame timeouts" % _MAX_CONSECUTIVE_TIMEOUTS)
+                continue
 
             if color_mode:
                 cf = frames.get_color_frame()
@@ -537,15 +594,6 @@ def run_pipeline(
 def main():
     parser = argparse.ArgumentParser(description="RealSense FIFO streamer")
     parser.add_argument("--list-modes", action="store_true")
-
-    # эти аргументы всё ещё можно использовать вручную, но мы их хардкодим ниже
-    parser.add_argument("--color-index", type=int, default=-1)
-    parser.add_argument("--depth-index", type=int, default=-1)
-    parser.add_argument("--ir-index", type=int, default=-1)
-    parser.add_argument("--color-fifo", type=str, default="/run/realsense/color.fifo")
-    parser.add_argument("--depth-fifo", type=str, default="/run/realsense/depth.fifo")
-    parser.add_argument("--ir-fifo", type=str, default="/run/realsense/ir.fifo")
-
     args = parser.parse_args()
 
     if args.list_modes:
@@ -553,26 +601,17 @@ def main():
         print_modes(modes)
         return
 
-    rotate = "cw"  # наш фиксированный поворот
-
-    color_idx = int(os.environ.get("RS_COLOR_IDX", "90"))
-    depth_idx = int(os.environ.get("RS_DEPTH_IDX", "18"))
-    ir_idx = int(os.environ.get("RS_IR_IDX", "-1"))
-
     run_pipeline(
-        color_idx=color_idx,
-        depth_idx=depth_idx,
-        ir_idx=ir_idx,
-        color_fifo="/run/realsense/color.fifo",
-        depth_fifo="/run/realsense/depth.fifo",
-        # ir_fifo="/run/realsense/ir.fifo",
+        color_idx=int(os.environ.get("RS_COLOR_IDX", "90")),
+        depth_idx=int(os.environ.get("RS_DEPTH_IDX", "18")),
+        ir_idx=int(os.environ.get("RS_IR_IDX", "-1")),
+        color_fifo=os.environ.get("RS_COLOR_FIFO", "/run/realsense/color.fifo"),
+        depth_fifo=os.environ.get("RS_DEPTH_FIFO", "/run/realsense/depth.fifo"),
         ir_fifo=None,
-        rotate=rotate,
-        depth_flip180=False,             # color и depth sensor одинаково ориентированы после cw-поворота
+        rotate="cw",
+        depth_flip180=False,
     )
 
 
 if __name__ == "__main__":
     main()
-
-

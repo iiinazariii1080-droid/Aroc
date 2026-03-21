@@ -523,7 +523,14 @@ import { STLLoader } from "three/addons/loaders/STLLoader.js";
     const heightM = mapLayerMesh.userData.heightM || 1;
     const widthWu = CU.metersToWorld(widthM);
     const heightWu = CU.metersToWorld(heightM);
-    const [mx, _my, mz] = CU.rosMetersToThreeWorld(mapLayerTopLeftRosX, mapLayerTopLeftRosY, 0);
+    // Apply same coordinate transforms as robot pose (swapXY, invertX, invertY)
+    const poseCfg = SC?.AGV_VISUALIZATION?.pose || {};
+    let mapX = mapLayerTopLeftRosX;
+    let mapY = mapLayerTopLeftRosY;
+    if (poseCfg.swapXY === true) { const tmp = mapX; mapX = mapY; mapY = tmp; }
+    if (poseCfg.invertX === true) { mapX = -mapX; }
+    if (poseCfg.invertY === true) { mapY = -mapY; }
+    const [mx, _my, mz] = CU.rosMetersToThreeWorld(mapX, mapY, 0);
 
     // Map mesh local origin is center; move it so pivot origin equals top-left.
     mapLayerMesh.rotation.set(-Math.PI / 2, 0, 0);
@@ -546,8 +553,6 @@ import { STLLoader } from "three/addons/loaders/STLLoader.js";
   function setupAgvMapOffsetControls() {
     const panel = document.getElementById("arm3d-map-controls");
     if (!panel) return;
-    panel.style.display = "none";
-    return;
     if (!state.agvMapEnabled || !SC?.AGV_VISUALIZATION?.mapLayer) {
       panel.style.display = "none";
       return;
@@ -598,8 +603,8 @@ import { STLLoader } from "three/addons/loaders/STLLoader.js";
     bind(prx, "planeRxDeg"); bind(pry, "planeRyDeg"); bind(prz, "planeRzDeg");
     if (resetBtn) {
       resetBtn.addEventListener("click", () => {
-        cfg.planePosXM = 15.06; cfg.planePosYM = -12.84; cfg.planePosZM = 0;
-        cfg.planeRxDeg = 0; cfg.planeRyDeg = -90; cfg.planeRzDeg = 0;
+        cfg.planePosXM = 0; cfg.planePosYM = 0; cfg.planePosZM = 0;
+        cfg.planeRxDeg = 0; cfg.planeRyDeg = 0; cfg.planeRzDeg = 0;
         syncView();
         applyAgvMapLayerTransform();
       });

@@ -378,6 +378,13 @@
         this._httpInFlight = false;
       }
     }
+
+    /** Stop all timers and background activity. Call from PlayerController.destroy(). */
+    stop(){
+      if (this._pingTimer) { clearInterval(this._pingTimer); this._pingTimer = null; }
+      if (this._pongTimer) { clearTimeout(this._pongTimer); this._pongTimer = null; }
+      if (this._clockSyncTimer) { clearTimeout(this._clockSyncTimer); this._clockSyncTimer = null; }
+    }
   }
 
   AP.App.JoystickService = JoystickService;

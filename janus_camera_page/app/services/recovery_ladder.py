@@ -60,6 +60,29 @@ _REBOOT_MARKER_PATH = _REBOOT_COUNT_DIR / "last_reboot_request"
 # Dedup: minimum seconds between escalation calls that consume an attempt
 _DEDUP_WINDOW_SEC = float(os.getenv("FDIR_DEDUP_SEC", "3"))
 
+# Lazy metric references — loaded once outside the lock to avoid import deadlock
+_rl_gauge = None
+_esc_counter = None
+_ladder_metrics_loaded = False
+
+
+def _ensure_ladder_metrics():
+    global _ladder_metrics_loaded, _rl_gauge, _esc_counter
+    if _ladder_metrics_loaded:
+        return
+    try:
+        from app.metrics import recovery_ladder_level, watchdog_escalations_total
+        _rl_gauge = recovery_ladder_level
+        _esc_counter = watchdog_escalations_total
+    except Exception:
+        pass
+    _ladder_metrics_loaded = True
+
+# Reboot counter is only reset after this many seconds of stable uptime,
+# preventing boot loops where system reboots → recovers briefly → fails → reboots.
+_REBOOT_COUNTER_RESET_SEC = int(os.getenv("FDIR_REBOOT_COUNTER_RESET_SEC", "3600"))
+_PROCESS_START_MONO = time.monotonic()
+
 
 # ── Ladder configuration ──────────────────────────────────────────────
 
@@ -128,7 +151,7 @@ def _write_reboot_count(n: int) -> None:
     """Atomically write reboot count with file-level lock to prevent TOCTOU."""
     try:
         _REBOOT_COUNT_DIR.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(_REBOOT_COUNT_PATH), os.O_RDWR | os.O_CREAT)
+        fd = os.open(str(_REBOOT_COUNT_PATH), os.O_RDWR | os.O_CREAT, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             os.ftruncate(fd, 0)
@@ -145,11 +168,14 @@ def _atomic_increment_reboot_count() -> int:
     """Atomically read-increment-write reboot count. Returns the NEW count."""
     try:
         _REBOOT_COUNT_DIR.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(_REBOOT_COUNT_PATH), os.O_RDWR | os.O_CREAT)
+        fd = os.open(str(_REBOOT_COUNT_PATH), os.O_RDWR | os.O_CREAT, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             raw = os.read(fd, 64).decode().strip()
-            current = int(raw) if raw else 0
+            try:
+                current = int(raw) if raw else 0
+            except (ValueError, TypeError):
+                current = 0
             new_val = current + 1
             os.ftruncate(fd, 0)
             os.lseek(fd, 0, os.SEEK_SET)
@@ -267,60 +293,60 @@ class RecoveryLadder:
             return self._escalate_locked(detection_signal, domain)
 
     def _escalate_locked(self, detection_signal: str, domain: Domain) -> Dict[str, Any]:
-        level = self._current_level_obj()
-        if level is None:
-            # All levels exhausted → SAFE mode
-            system_mode.transition(system_mode.SystemMode.SAFE, detection_signal)
-            emit(
-                domain=domain,
-                severity=Severity.CRITICAL,
-                detection_signal=detection_signal,
-                recovery_action=RecoveryAction.NONE,
-                outcome="all recovery levels exhausted → SAFE mode",
-            )
-            return {"action": "safe_mode", "reason": "ladder_exhausted"}
+        while True:
+            level = self._current_level_obj()
+            if level is None:
+                # All levels exhausted → SAFE mode
+                system_mode.transition(system_mode.SystemMode.SAFE, detection_signal)
+                emit(
+                    domain=domain,
+                    severity=Severity.CRITICAL,
+                    detection_signal=detection_signal,
+                    recovery_action=RecoveryAction.NONE,
+                    outcome="all recovery levels exhausted → SAFE mode",
+                )
+                return {"action": "safe_mode", "reason": "ladder_exhausted"}
 
-        now = time.monotonic()
+            now = time.monotonic()
 
-        # Dedup: skip if another watchdog already escalated within the window
-        if now - self._last_escalation_ts < _DEDUP_WINDOW_SEC:
-            return {"action": "dedup_skip", "level": level.name}
+            # Dedup: skip if another watchdog already escalated within the window
+            if now - self._last_escalation_ts < _DEDUP_WINDOW_SEC:
+                return {"action": "dedup_skip", "level": level.name}
 
-        # Cooldown check
-        if now - level.last_attempt < level.cooldown_sec:
-            remaining = round(level.cooldown_sec - (now - level.last_attempt), 1)
-            return {"action": "cooldown", "remaining_sec": remaining, "level": level.name}
+            # Cooldown check
+            if now - level.last_attempt < level.cooldown_sec:
+                remaining = round(level.cooldown_sec - (now - level.last_attempt), 1)
+                return {"action": "cooldown", "remaining_sec": remaining, "level": level.name}
 
-        # Budget check → escalate if exhausted
-        if level.attempts >= level.max_attempts:
-            return self._escalate_to_next_locked(detection_signal, domain)
+            # Budget check → escalate if exhausted
+            if level.attempts >= level.max_attempts:
+                self._escalate_to_next_locked(detection_signal, domain)
+                continue
 
-        # Execute recovery action
-        level.attempts += 1
-        level.last_attempt = now
-        self._total_recoveries += 1
-        self._last_escalation_ts = now
+            # Execute recovery action
+            level.attempts += 1
+            level.last_attempt = now
+            self._total_recoveries += 1
+            self._last_escalation_ts = now
 
-        # Prometheus gauge
-        try:
-            from app.metrics import recovery_ladder_level
-            recovery_ladder_level.set(self._current_level)
-        except Exception:
-            pass
+            # Prometheus gauge (loaded outside lock via _ensure_ladder_metrics)
+            _ensure_ladder_metrics()
+            if _rl_gauge is not None:
+                _rl_gauge.set(self._current_level)
 
-        # Persist BEFORE executing — if the process crashes during _execute()
-        # (e.g. during systemctl restart or reboot), the attempt is still recorded.
-        # Without this, the ladder reloads stale state and retries the same action.
-        _save_ladder_state(self._current_level, self._levels, self._total_recoveries)
-        success = self._execute(level, detection_signal, domain)
+            # Persist BEFORE executing — if the process crashes during _execute()
+            # (e.g. during systemctl restart or reboot), the attempt is still recorded.
+            # Without this, the ladder reloads stale state and retries the same action.
+            _save_ladder_state(self._current_level, self._levels, self._total_recoveries)
+            success = self._execute(level, detection_signal, domain)
 
-        return {
-            "action": level.action.value,
-            "level": level.name,
-            "attempt": level.attempts,
-            "max_attempts": level.max_attempts,
-            "success": success,
-        }
+            return {
+                "action": level.action.value,
+                "level": level.name,
+                "attempt": level.attempts,
+                "max_attempts": level.max_attempts,
+                "success": success,
+            }
 
     def reset(self) -> None:
         """Reset ladder to level 0 (system recovered to nominal). Thread-safe."""
@@ -328,11 +354,9 @@ class RecoveryLadder:
             self._reset_locked()
 
     def _reset_locked(self) -> None:
-        try:
-            from app.metrics import recovery_ladder_level
-            recovery_ladder_level.set(0)
-        except Exception:
-            pass
+        _ensure_ladder_metrics()
+        if _rl_gauge is not None:
+            _rl_gauge.set(0)
         if self._current_level > 0:
             logger.info("Recovery ladder reset to level 0")
             emit(
@@ -348,8 +372,16 @@ class RecoveryLadder:
             lvl.last_attempt = 0.0
         self._last_escalation_ts = 0.0
         _save_ladder_state(0, self._levels, self._total_recoveries)
-        # Clear reboot counter — system is healthy again
-        _write_reboot_count(0)
+        # Clear reboot counter only after sustained stability (>= 1 hour uptime)
+        # to prevent boot loops where system reboots, recovers briefly, then fails again.
+        uptime_sec = time.monotonic() - _PROCESS_START_MONO
+        if uptime_sec >= _REBOOT_COUNTER_RESET_SEC:
+            _write_reboot_count(0)
+        else:
+            logger.info(
+                "Reboot counter NOT reset: uptime %.0fs < %ds threshold",
+                uptime_sec, _REBOOT_COUNTER_RESET_SEC,
+            )
 
     def status(self) -> Dict[str, Any]:
         """Return ladder status for diagnostics. Thread-safe."""
@@ -382,18 +414,16 @@ class RecoveryLadder:
             return None
         return self._levels[self._current_level]
 
-    def _escalate_to_next_locked(self, signal: str, domain: Domain) -> Dict[str, Any]:
+    def _escalate_to_next_locked(self, signal: str, domain: Domain) -> None:
         old_name = self._levels[self._current_level].name
         self._current_level += 1
         _save_ladder_state(self._current_level, self._levels, self._total_recoveries)
         if self._current_level < len(self._levels):
             new_name = self._levels[self._current_level].name
             logger.warning("Escalating: %s → %s  (signal: %s)", old_name, new_name, signal)
-            try:
-                from app.metrics import watchdog_escalations_total
-                watchdog_escalations_total.labels(level=new_name).inc()
-            except Exception:
-                pass
+            _ensure_ladder_metrics()
+            if _esc_counter is not None:
+                _esc_counter.labels(level=new_name).inc()
             emit(
                 domain=domain,
                 severity=Severity.WARN,
@@ -402,28 +432,37 @@ class RecoveryLadder:
                 outcome=f"escalate: {old_name} → {new_name}",
             )
             system_mode.degrade(f"fdir_escalate:{new_name}")
-        # Re-enter _escalate_locked iteratively (was recursive — refactored for clarity).
-        return self._escalate_locked(signal, domain)
 
     def _execute(self, level: LadderLevel, signal: str, domain: Domain) -> bool:
         """Execute the actual recovery action. Returns success flag."""
         settings = get_settings()
         action = level.action
+        _start = time.monotonic()
         try:
             if action == RecoveryAction.RETRY_HANDLE:
-                # Verify Janus is reachable AND check pipeline service status
+                # Verify Janus is reachable, data plane healthy, AND pipeline active
                 from app.services import janus
-                janus.janus_summary(settings.janus_mount_id)
+                summary = janus.janus_summary(settings.janus_mount_id)
+                age = summary.get("video_age_ms")
+                data_plane_ok = (
+                    age is not None
+                    and isinstance(age, (int, float))
+                    and age <= settings.watchdog_stale_ms
+                )
                 # Also check if pipeline service is active
                 try:
                     result = subprocess.run(
                         ["sudo", "systemctl", "is-active", "--quiet", settings.service_name],
                         timeout=5,
+                        capture_output=True,
                     )
                     pipeline_active = result.returncode == 0
                 except Exception:
                     pipeline_active = False
-                outcome = f"handle_retry: janus_ok, pipeline_active={pipeline_active}"
+                if not data_plane_ok:
+                    outcome = f"handle_retry: data_plane_stale (age={age}), escalating"
+                    raise RuntimeError(outcome)
+                outcome = f"handle_retry: janus_ok, data_plane_ok, pipeline_active={pipeline_active}"
 
             elif action == RecoveryAction.RESTART_PIPELINE:
                 run_cmd(["sudo", "systemctl", "restart", settings.service_name], timeout=45)
@@ -474,11 +513,13 @@ class RecoveryLadder:
                     )
                     return True
 
-                # Write reboot marker + increment counter
+                # Write reboot marker + increment counter BEFORE reboot
+                # (process won't survive a successful reboot).
                 _atomic_increment_reboot_count()
                 try:
-                    _REBOOT_MARKER_PATH.write_text(
-                        json.dumps({"ts": time.time(), "signal": signal}) + "\n"
+                    atomic_write_text(
+                        _REBOOT_MARKER_PATH,
+                        json.dumps({"ts": time.time(), "signal": signal}) + "\n",
                     )
                 except OSError:
                     pass
@@ -490,7 +531,14 @@ class RecoveryLadder:
                     recovery_action=action,
                     outcome=f"initiating node reboot (count={reboots + 1})",
                 )
-                run_cmd(["sudo", "systemctl", "reboot"], timeout=10)
+                try:
+                    run_cmd(["sudo", "systemctl", "reboot"], timeout=10)
+                except RuntimeError:
+                    # Reboot command failed — roll back counter so the
+                    # circuit breaker budget is not consumed by a failed attempt.
+                    logger.error("Reboot command failed, rolling back reboot counter")
+                    _write_reboot_count(reboots)
+                    raise
                 outcome = "reboot initiated"
 
             else:
@@ -504,6 +552,12 @@ class RecoveryLadder:
                 outcome=outcome,
                 details={"attempt": level.attempts, "level": level.name},
             )
+            _duration = time.monotonic() - _start
+            try:
+                from app.metrics import recovery_action_duration_seconds
+                recovery_action_duration_seconds.labels(action=level.name).observe(_duration)
+            except Exception:
+                pass
             return True
 
         except Exception as exc:
@@ -516,6 +570,12 @@ class RecoveryLadder:
                 details={"attempt": level.attempts, "level": level.name},
             )
             logger.exception("Recovery action %s failed", action.value)
+            _duration = time.monotonic() - _start
+            try:
+                from app.metrics import recovery_action_duration_seconds
+                recovery_action_duration_seconds.labels(action=level.name).observe(_duration)
+            except Exception:
+                pass
             return False
 
 

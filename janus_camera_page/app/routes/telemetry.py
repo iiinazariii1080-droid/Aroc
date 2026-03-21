@@ -9,9 +9,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+
+from app.middleware.rate_limit import require_rate_limit
 
 logger = logging.getLogger("telemetry")
 
@@ -29,7 +31,7 @@ class IceCandidate(BaseModel):
 
 class TelemetryPayload(BaseModel):
     """Subset of RTCPeerConnection.getStats() sent by the player."""
-    event: Literal["ice_connected", "ice_failed", "stats_report"] = "stats_report"
+    event: Literal["ice_connected", "ice_failed", "dtls_failed", "stats_report"] = "stats_report"
     session_id: Optional[str] = None
     camera: Optional[str] = None          # "color" or "depth"
     ice_connect_ms: Optional[float] = None
@@ -48,7 +50,8 @@ class TelemetryPayload(BaseModel):
 
 # ── Endpoint ────────────────────────────────────────────────────────
 
-@router.post("/telemetry", status_code=204, response_class=Response, summary="Ingest client WebRTC telemetry")
+@router.post("/telemetry", status_code=204, response_class=Response, summary="Ingest client WebRTC telemetry",
+              dependencies=[Depends(require_rate_limit)])
 async def ingest_telemetry(payload: TelemetryPayload, request: Request) -> Response:
     """Accept a telemetry report from the browser player.
 
@@ -69,6 +72,8 @@ async def ingest_telemetry(payload: TelemetryPayload, request: Request) -> Respo
         from app.metrics import (
             ice_connects_total,
             ice_connect_duration_seconds,
+            ice_setup_failures_total,
+            dtls_handshake_failures_total,
             ttff_seconds,
             client_packet_loss_ratio,
             client_frames_decoded_total,
@@ -81,6 +86,12 @@ async def ingest_telemetry(payload: TelemetryPayload, request: Request) -> Respo
                 ice_connect_duration_seconds.observe(payload.ice_connect_ms / 1000.0)
             if payload.time_to_first_frame_ms is not None:
                 ttff_seconds.observe(payload.time_to_first_frame_ms / 1000.0)
+
+        if payload.event == "ice_failed":
+            ice_setup_failures_total.inc()
+
+        if payload.event == "dtls_failed":
+            dtls_handshake_failures_total.inc()
 
         if payload.event == "stats_report":
             client_last_report_age_seconds.set(0)  # reset on each report

@@ -286,6 +286,26 @@
         return;
       }
 
+      // Health check: verify Janus is reachable before consuming an attempt
+      if (this.cfg.healthCheckBeforeReconnect && this.cfg.healthCheckUrl) {
+        try {
+          const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+          const hcTimeout = ctrl ? this.clock.setTimeout(() => ctrl.abort(), this.cfg.healthCheckTimeoutMs || 3000) : null;
+          const resp = await (typeof fetch !== 'undefined' ? fetch : globalThis.fetch)(
+            this.cfg.healthCheckUrl, { signal: ctrl?.signal }
+          );
+          if (hcTimeout != null) this.clock.clearTimeout(hcTimeout);
+          if (!resp.ok) throw new Error(`healthz ${resp.status}`);
+          const body = await resp.json();
+          if (!body.ok) throw new Error('healthz not ok');
+        } catch (e) {
+          this.log.warn('reconnect_health_check_failed', { error: String(e?.message || e), attempt: this._attempt + 1, token });
+          // Do NOT consume an attempt — reschedule with current backoff
+          this._scheduleNext();
+          return;
+        }
+      }
+
       this._inFlight = true;
       this._attempt += 1;
 
@@ -330,13 +350,17 @@
         if (this._settleTimer) return;
 
         // Wait for startSettleWindow() (offer received); if not called within settleStartTimeoutMs, treat as failed.
-        const settleStartTimeoutMs = this.cfg.settleStartTimeoutMs ?? 15000;
+        const settleStartTimeoutMs = this.cfg.settleStartTimeoutMs ?? 5000;
         this._settleStartTimeoutTimer = this.clock.setTimeout(() => {
           this._settleStartTimeoutTimer = null;
           if (this._settleTimer) return; // startSettleWindow() was already called
           if (token !== this._ctx.getToken()) return; // stale timer from previous cycle
           if (!this._ctx.shouldContinue()) { this._inFlight = false; return; }
           this.log.debug('reconnect_settle_start_timeout', { attempt: this._attempt, token });
+          // Offer never arrived — escalate to HARD so next attempt skips to RECREATE_SESSION.
+          if (this._pending) {
+            this._pending.severity = Math.max(this._pending.severity, 3); // RecoverySeverity.HARD
+          }
           this._inFlight = false;
           this._scheduleNext();
         }, settleStartTimeoutMs);
@@ -367,7 +391,11 @@
         this._inFlight = false;
         return;
       }
-      // Settle timer fired without notifyRecovered() — treat as not recovered and schedule next attempt.
+      // Settle timer fired without notifyRecovered() — treat as not recovered.
+      // Escalate to HARD: if settle failed, soft recovery isn't working.
+      if (this._pending) {
+        this._pending.severity = Math.max(this._pending.severity, 3); // RecoverySeverity.HARD
+      }
       this._inFlight = false;
       this._scheduleNext();
     }

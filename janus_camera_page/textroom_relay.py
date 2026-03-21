@@ -48,7 +48,7 @@ def _is_ping(frame: Dict[str, Any]) -> bool:
 
 
 def _is_valid_frame(frame: Dict[str, Any]) -> bool:
-    # минимальная валидация без тормозов
+    """Validate joystick frame structure and value bounds (DEF-08)."""
     if not isinstance(frame, dict):
         return False
     # ping-фреймы валидны без axes/buttons
@@ -56,9 +56,22 @@ def _is_valid_frame(frame: Dict[str, Any]) -> bool:
         return True
     if "ts" not in frame or "axes" not in frame or "buttons" not in frame:
         return False
-    if not isinstance(frame.get("ts"), int):
-        # допускаем float, но приводим ниже
-        if not isinstance(frame.get("ts"), (float,)):
+    ts = frame.get("ts")
+    if not isinstance(ts, (int, float)):
+        return False
+    # Axes: list of floats in [-1.0, 1.0], max 8 (standard gamepad)
+    axes = frame.get("axes")
+    if not isinstance(axes, list) or len(axes) > 8:
+        return False
+    for v in axes:
+        if not isinstance(v, (int, float)) or v < -1.0 or v > 1.0:
+            return False
+    # Buttons: list of 0/1, max 20 (standard gamepad)
+    buttons = frame.get("buttons")
+    if not isinstance(buttons, list) or len(buttons) > 20:
+        return False
+    for v in buttons:
+        if v not in (0, 1, 0.0, 1.0):
             return False
     return True
 
@@ -165,6 +178,12 @@ async def textroom_hook(request: Request) -> Response:
     Быстрый приём входящего вебхука от Janus.
     Никаких indent/log payload на каждый кадр, никаких await POST к роботу здесь.
     """
+    # D3: Only accept webhooks from localhost (Janus runs on same host)
+    client_ip = request.client.host if request.client else ""
+    if client_ip not in ("127.0.0.1", "::1"):
+        log.warning("textroom-hook rejected from non-local IP: %s", client_ip)
+        return Response(status_code=403, content="forbidden")
+
     global _seen, _enqueued, _dropped
 
     try:

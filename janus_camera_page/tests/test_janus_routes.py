@@ -11,6 +11,7 @@ from app.routes.janus import JanusNatConfig
 from app.services.nat_config import (
     load_nat_config,
     render_nat_block,
+    restart_depth_camera_janus,
     restart_janus,
 )
 
@@ -47,8 +48,8 @@ class TestJanusRestart:
     @patch("app.routes.janus.restart_janus")
     async def test_restart_ok(self, mock_restart, client):
         resp = await client.post("/janus/restart")
-        # Now requires admin auth — expect 403 or 503 without token
-        assert resp.status_code in (200, 403, 503)
+        # No admin token provided → require_admin raises 403
+        assert resp.status_code == 403
 
 
 class TestJanusProxy:
@@ -169,15 +170,68 @@ class TestLoadNatConfig:
         cfg = load_nat_config()
         assert cfg.stun_server == "5.6.7.8"
 
+    @patch("app.services.nat_config.ADMIN_TOKEN", "test-admin-token-def01")
+    @patch("app.services.nat_config.httpx.get")
+    @patch("app.services.nat_config._janus_nat_json")
+    @patch("app.services.nat_config.get_settings")
+    def test_depth_camera_sends_admin_token(self, mock_settings, mock_path, mock_get):
+        """DEF-01: depth camera must send X-Admin-Token when fetching NAT config."""
+        mock_settings.return_value = MagicMock(camera_type="depth_camera")
+        mock_path.return_value.exists.return_value = False
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"stun_server": "1.2.3.4"}
+        mock_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_resp
+        load_nat_config()
+        _, kwargs = mock_get.call_args
+        assert kwargs["headers"]["X-Admin-Token"] == "test-admin-token-def01"
+
+
+class TestRestartDepthCameraJanus:
+    """DEF-01: restart_depth_camera_janus must send X-Admin-Token."""
+
+    @patch("app.services.nat_config.ADMIN_TOKEN", "test-admin-token-def01")
+    @patch("app.services.nat_config.httpx.post")
+    def test_sends_admin_token(self, mock_post):
+        mock_post.return_value = MagicMock(status_code=200)
+        restart_depth_camera_janus()
+        _, kwargs = mock_post.call_args
+        assert kwargs["headers"]["X-Admin-Token"] == "test-admin-token-def01"
+
+    @patch("app.services.nat_config.ADMIN_TOKEN", "test-admin-token-def01")
+    @patch("app.services.nat_config.httpx.post")
+    def test_raises_on_failure(self, mock_post):
+        mock_post.return_value = MagicMock(status_code=500, text="error")
+        with pytest.raises(RuntimeError, match="Failed to restart janus"):
+            restart_depth_camera_janus()
+
 
 class TestRenderNatBlock:
-    def test_renders_template(self):
+    def test_renders_template_with_ignore_list(self):
+        """Default config uses ice_ignore_list (blacklist) for multi-homed TURN safety."""
         cfg = JanusNatConfig()
         block = render_nat_block(cfg)
         assert "stun_server" in block
         assert "turn_server" in block
         assert "nat_1_1_mapping" in block
         assert "nat:" in block
+        assert "ice_ignore_list" in block
+        assert "ice_enforce_list" not in block
+        assert '"docker"' in block
+        assert '"tailscale"' in block
+
+    def test_renders_enforce_list_when_set(self):
+        """When ice_enforce_list is explicitly set, render it instead of ignore list."""
+        cfg = JanusNatConfig(ice_enforce_list="br0")
+        block = render_nat_block(cfg)
+        assert 'ice_enforce_list = "br0"' in block
+        assert "ice_ignore_list" not in block
+
+    def test_renders_custom_ignore_list(self):
+        """Custom ice_ignore_list entries are rendered correctly."""
+        cfg = JanusNatConfig(ice_ignore_list=["lo", "wg0"])
+        block = render_nat_block(cfg)
+        assert 'ice_ignore_list = [ "lo", "wg0" ]' in block
 
 
 class TestRestartJanus:
@@ -190,3 +244,25 @@ class TestRestartJanus:
     def test_failure(self, mock_run):
         with pytest.raises(RuntimeError):
             restart_janus()
+
+
+class TestJanusHealthzDefensive:
+    """Test defensive parsing in janus_healthz."""
+
+    @pytest.mark.asyncio
+    async def test_healthz_malformed_response(self, client):
+        with patch("app.routes.janus.janus.streaming_info", return_value="garbage"):
+            resp = await client.get("/janus/healthz")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_healthz_valid_response(self, client):
+        with patch("app.routes.janus.janus.streaming_info", return_value={
+            "data": {"info": {"id": 1, "enabled": True}}
+        }):
+            resp = await client.get("/janus/healthz")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["ok"] is True

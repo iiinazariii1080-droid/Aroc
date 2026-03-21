@@ -4,6 +4,8 @@ Optimized routes for Symovo AGV.
 from typing import Any
 import logging
 import math
+import uuid
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, status, Path, Depends, Query
 from fastapi.responses import Response
 
@@ -12,9 +14,10 @@ _logger = logging.getLogger(__name__)
 from routes.decorators import safe_getter
 from services.symovo_service import SymovoAgvClient, normalize_symovo_status
 from models.api_types import ErrorStatus
-from app.dependencies import SymovoClient, InjectedStateStore, InjectedSafetyTracker
+from app.dependencies import SymovoClient, InjectedStateStore, InjectedSafetyTracker, InjectedCommandHandler
 from app.config import settings
 from exceptions import DeviceConnectionError
+from domain.models import NavigationCommand, NavigationStatusEnum
 from models.api_types import (
     SymovoStatusResponse,
     GenericResponse,
@@ -374,30 +377,46 @@ async def get_map_png(
     summary="Navigate to pose",
     description=(
         "Creates a transport that moves the AGV to the specified pose.\n\n"
-        "Request model has examples; set wait=true to return final transport state."
+        "Routes through CommandHandler for proper busy-checking, readiness\n"
+        "verification, and StateStore registration.  Set wait=true to block\n"
+        "until the transport completes."
     ),
     response_description="Transport result or created transport",
 )
 @safe_getter(GenericResponse)
-async def go_to_pose(req: GoToPoseRequest, client: SymovoClient) -> Any:
-    """Move AGV to the specified pose."""
-    # Prefer transport API, which is stable on some firmware versions
-    rad = req.theta_deg * math.pi / 180.0
-    data = await client.transport_move_to_pose(
-        x_m=req.x_m,
-        y_m=req.y_m,
-        theta_rad=rad,
-        map_id=req.map_id,
+async def go_to_pose(
+    req: GoToPoseRequest,
+    client: SymovoClient,
+    handler: InjectedCommandHandler,
+) -> Any:
+    """Move AGV to the specified pose via CommandHandler (coordinated)."""
+    cmd = NavigationCommand(
+        command_id=str(uuid.uuid4()),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        target_id=f"go_to_pose_{req.x_m:.2f}_{req.y_m:.2f}",
+        x=req.x_m,
+        y=req.y_m,
+        theta=req.theta_deg * math.pi / 180.0,
+        map_id=int(req.map_id) if req.map_id is not None else 0,
         max_speed_m_s=req.max_speed_m_s,
-        wait=req.wait,
     )
-    # P1-1: when wait=True, lock is already released; poll for completion outside it.
-    if isinstance(data, dict) and "_wait_transport_id" in data:
-        tid = data.pop("_wait_transport_id")
-        data = await client.poll_transport_completion(tid)
-    if isinstance(data, dict):
-        return data
-    return {"result": data}
+    nav_status = await handler.handle_drive_to_position(cmd)
+    if nav_status.status == NavigationStatusEnum.ERROR:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": nav_status.error_reason or "navigation_rejected"},
+        )
+    result: dict[str, Any] = {
+        "command_id": cmd.command_id,
+        "status": nav_status.status.value,
+    }
+    if req.wait and nav_status.goal_id:
+        transport = await handler.state_store.get_active_transport(cmd.command_id)
+        if transport and transport.transport_id:
+            data = await client.poll_transport_completion(int(transport.transport_id))
+            if isinstance(data, dict):
+                result.update(data)
+    return result
 
 
 @router.get(

@@ -19,6 +19,7 @@ from typing import Dict, List, Literal, Optional, Tuple
 import httpx
 from pydantic import BaseModel, Field
 
+from app.core.admin import ADMIN_TOKEN
 from app.core.settings import get_settings
 from app.services.system import atomic_write_text, run as run_cmd
 from shared_config.network import DEVICES, PORTS
@@ -51,7 +52,11 @@ class JanusNatConfig(BaseModel):
 
     ice_tcp: bool = Field(default=False)
     full_trickle: bool = Field(default=True)
-    ice_enforce_list: str = Field(default="br0", description="Whitelist of interfaces for ICE gathering (substring match)")
+    ice_enforce_list: str = Field(default="", description="Whitelist of interfaces for ICE gathering (substring match). Empty = use ice_ignore_list instead.")
+    ice_ignore_list: List[str] = Field(
+        default_factory=lambda: ["docker", "veth", "lo", "vmnet", "tailscale"],
+        description="Blacklist of interfaces excluded from ICE gathering. Used when ice_enforce_list is empty.",
+    )
     keep_private_host: bool = Field(default=False)
 
     min_port: int = Field(default=40000)
@@ -105,7 +110,9 @@ def load_nat_config() -> JanusNatConfig:
     if get_settings().camera_type == "depth_camera":
         try:
             response = httpx.get(
-                f"http://{DEVICES.HOST_LAN_IP}:{PORTS.COLOR_CAMERA}/janus/nat", timeout=3
+                f"http://{DEVICES.HOST_LAN_IP}:{PORTS.COLOR_CAMERA}/janus/nat",
+                timeout=3,
+                headers={"X-Admin-Token": ADMIN_TOKEN},
             )
             response.raise_for_status()
             data = response.json()
@@ -138,12 +145,24 @@ def render_nat_block(cfg: JanusNatConfig) -> str:
     def b(value: bool) -> str:
         return "true" if value else "false"
 
+    # Janus supports ice_enforce_list (whitelist) OR ice_ignore_list (blacklist).
+    # When ice_enforce_list is set, Janus only gathers candidates on matching
+    # interfaces.  This breaks TURN on multi-homed hosts where the TURN server
+    # is reachable only via an interface not in the whitelist.
+    # Prefer ice_ignore_list (blacklist) — it allows all interfaces except
+    # explicitly excluded ones, which is safer for TURN relay connectivity.
+    if cfg.ice_enforce_list:
+        ice_line = f'  ice_enforce_list = "{cfg.ice_enforce_list}"'
+    else:
+        items = ", ".join(f'"{s}"' for s in cfg.ice_ignore_list)
+        ice_line = f"  ice_ignore_list = [ {items} ]"
+
     return f"""nat: {{
   ice_tcp = {b(cfg.ice_tcp)}
   full_trickle = {b(cfg.full_trickle)}
   ignore_mdns = true
-  ice_enforce_list = "{cfg.ice_enforce_list}"
   keep_private_host = {b(cfg.keep_private_host)}
+{ice_line}
 
   stun_server = "{cfg.stun_server}"
   stun_port   = {cfg.stun_port}
@@ -199,7 +218,7 @@ def restart_janus() -> None:
 def restart_depth_camera_janus() -> None:
     try:
         url = f"http://{DEVICES.DEPTH_CAMERA_IP}:{PORTS.COLOR_CAMERA}/janus/restart"
-        response = httpx.post(url, timeout=10)
+        response = httpx.post(url, timeout=10, headers={"X-Admin-Token": ADMIN_TOKEN})
         if response.status_code != 200:
             raise RuntimeError(f"Failed to restart janus: {response.text}")
     except httpx.HTTPError as exc:

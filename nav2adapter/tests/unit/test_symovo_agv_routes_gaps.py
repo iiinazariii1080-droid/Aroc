@@ -4,8 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from contextlib import contextmanager
 
 from main import app
-from app.dependencies import get_symovo_client, get_state_store
+from app.dependencies import get_symovo_client, get_state_store, get_command_handler
 from models.api_types import ErrorStatus
+from domain.models import NavigationStatus, NavigationStatusEnum
 
 
 @contextmanager
@@ -189,30 +190,57 @@ class TestNonDictBranches:
 
 class TestGoToPoseWait:
     def test_go_to_pose_wait_transport_id(self, test_client):
-        """When transport returns _wait_transport_id, poll_transport_completion is called."""
-        mock_client = MagicMock()
-        mock_client.transport_move_to_pose = AsyncMock(
-            return_value={"_wait_transport_id": 42, "state": 0}
+        """When wait=True and transport exists, poll_transport_completion is called."""
+        mock_handler = MagicMock()
+        mock_handler.handle_drive_to_position = AsyncMock(
+            return_value=NavigationStatus(
+                status=NavigationStatusEnum.NAVIGATING,
+                goal_id="cmd-1",
+                progress_percent=50,
+            )
         )
+        mock_transport = MagicMock()
+        mock_transport.transport_id = "42"
+        mock_handler.state_store = MagicMock()
+        mock_handler.state_store.get_active_transport = AsyncMock(return_value=mock_transport)
+        mock_client = MagicMock()
         mock_client.poll_transport_completion = AsyncMock(
             return_value={"id": 42, "state": 5, "completed": True}
         )
+        app.dependency_overrides[get_command_handler] = lambda: mock_handler
         with _override_symovo(mock_client):
-            resp = test_client.post("/go_to_pose", json={
-                "x_m": 1.0, "y_m": 2.0, "theta_deg": 90.0
-            })
+            try:
+                resp = test_client.post("/go_to_pose", json={
+                    "x_m": 1.0, "y_m": 2.0, "theta_deg": 90.0, "wait": True,
+                })
+            finally:
+                app.dependency_overrides.pop(get_command_handler, None)
         assert resp.status_code == 200
         mock_client.poll_transport_completion.assert_awaited_once_with(42)
 
     def test_go_to_pose_non_dict_result(self, test_client):
+        """go_to_pose with wait=False returns command_id and status."""
+        mock_handler = MagicMock()
+        mock_handler.handle_drive_to_position = AsyncMock(
+            return_value=NavigationStatus(
+                status=NavigationStatusEnum.NAVIGATING,
+                goal_id="cmd-1",
+                progress_percent=0,
+            )
+        )
         mock_client = MagicMock()
-        mock_client.transport_move_to_pose = AsyncMock(return_value="raw")
+        app.dependency_overrides[get_command_handler] = lambda: mock_handler
         with _override_symovo(mock_client):
-            resp = test_client.post("/go_to_pose", json={
-                "x_m": 1.0, "y_m": 2.0, "theta_deg": 0.0
-            })
+            try:
+                resp = test_client.post("/go_to_pose", json={
+                    "x_m": 1.0, "y_m": 2.0, "theta_deg": 0.0, "wait": False,
+                })
+            finally:
+                app.dependency_overrides.pop(get_command_handler, None)
         assert resp.status_code == 200
-        assert resp.json()["result"] == "raw"
+        data = resp.json()
+        assert "command_id" in data
+        assert data["status"] == "navigating"
 
 
 # ── v1 map/png error branches ───────────────────────────────────────

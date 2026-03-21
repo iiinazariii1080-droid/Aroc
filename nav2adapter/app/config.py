@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     symovo_allow_invalid_certs: bool = Field(default=True)
     # If true, backend will try to call Symovo "drive_mode" endpoint when drive_ready is false
     # right before starting a transport. Disabled by default for safety.
-    symovo_auto_set_drive_mode: bool = Field(default=False)
+    symovo_auto_set_drive_mode: bool = Field(default=True)
     symovo_auto_set_drive_mode_wait_s: float = Field(default=1.0)
     # If true, backend will clear ALL transports on the controller at startup (destructive).
     symovo_clear_transports_on_startup: bool = Field(default=False)

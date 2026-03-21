@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.core.admin import require_admin
 from app.core.settings import get_settings
+from app.middleware.rate_limit import require_admin_rate_limit, require_rate_limit
 from app.services import janus, janus_proxy
 from app.services.nat_config import (
     JanusNatConfig,
@@ -23,6 +24,7 @@ from shared_config.network import PORTS
 
 router = APIRouter(tags=["janus"])
 ADMIN_DEPENDENCY = Depends(require_admin)
+ADMIN_RATE_LIMIT = Depends(require_admin_rate_limit)
 # Boot-time constant — FastAPI route paths must be static at decoration time.
 _CAM_TYPE = get_settings().camera_type
 
@@ -55,11 +57,22 @@ class JanusHealthResponse(BaseModel):
     response_model=JanusHealthResponse,
     summary="Check Janus mount availability",
     description="Queries janus.plugin.streaming to confirm the mount exists and is enabled.",
+    dependencies=[Depends(require_rate_limit)],
 )
 def janus_healthz() -> JanusHealthResponse:
     settings = get_settings()
-    data = janus.streaming_info(settings.janus_mount_id)
-    mount = (data or {}).get("data", {}).get("info", {})
+    try:
+        data = janus.streaming_info(settings.janus_mount_id)
+    except Exception:
+        return JanusHealthResponse(ok=False, mount_id=settings.janus_mount_id)
+    if not isinstance(data, dict):
+        return JanusHealthResponse(ok=False, mount_id=settings.janus_mount_id)
+    info = data.get("data", {})
+    if not isinstance(info, dict):
+        return JanusHealthResponse(ok=False, mount_id=settings.janus_mount_id)
+    mount = info.get("info", {})
+    if not isinstance(mount, dict):
+        mount = {}
     return JanusHealthResponse(ok=mount.get("enabled") is not None, mount_id=settings.janus_mount_id)
 
 
@@ -140,19 +153,20 @@ def get_client_rtc_config() -> ClientRtcConfig:
 @router.get(
     "/janus/nat",
     response_model=JanusNatConfig,
-    dependencies=[ADMIN_DEPENDENCY],
+    dependencies=[ADMIN_DEPENDENCY, ADMIN_RATE_LIMIT],
     summary="Read Janus NAT/STUN/TURN settings",
     description="Loads the JSON stored at `/etc/robot/janus-nat.json`.",
 )
 def get_janus_nat_config():
-    return load_nat_config()
+    cfg = load_nat_config()
+    return cfg.model_copy(update={"turn_pwd": "***" if cfg.turn_pwd else ""})
 
 
 if _CAM_TYPE == "color_camera":
     @router.post(
         "/janus/nat",
         response_model=JanusNatConfig,
-        dependencies=[ADMIN_DEPENDENCY],
+        dependencies=[ADMIN_DEPENDENCY, ADMIN_RATE_LIMIT],
         summary="Update Janus NAT/STUN/TURN settings",
         description="Persists the JSON, rewrites the `janus.jcfg` block between markers, and restarts Janus.",
     )
@@ -170,13 +184,13 @@ if _CAM_TYPE == "color_camera":
             except RuntimeError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-            return new_cfg
+            return new_cfg.model_copy(update={"turn_pwd": "***" if new_cfg.turn_pwd else ""})
 
 
 # ── Janus restart ──
 
 
-@router.post("/janus/restart", summary="Restart Janus service", description="Restarts the Janus service.", dependencies=[ADMIN_DEPENDENCY])
+@router.post("/janus/restart", summary="Restart Janus service", description="Restarts the Janus service.", dependencies=[ADMIN_DEPENDENCY, ADMIN_RATE_LIMIT])
 def _restart_janus() -> None:
     try:
         restart_janus()
@@ -188,8 +202,15 @@ def _restart_janus() -> None:
 
 
 @router.api_route(
+    f"/api/v1/{_CAM_TYPE}/janus",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    dependencies=[Depends(require_rate_limit)],
+    include_in_schema=False,
+)
+@router.api_route(
     "/janus",
     methods=["GET", "POST", "PUT", "DELETE"],
+    dependencies=[Depends(require_rate_limit)],
     summary="HTTP proxy to the Janus core API",
     description="Transparently forwards REST calls to the upstream Janus (`/janus`) endpoint used by the web client.",
 )
@@ -197,10 +218,29 @@ async def proxy_janus_root(request: Request) -> Response:
     return await janus_proxy.forward_request(request)
 
 
+@router.api_route(
+    f"/api/v1/{_CAM_TYPE}/janus/{{path:path}}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    dependencies=[Depends(require_rate_limit)],
+    include_in_schema=False,
+)
+@router.api_route(
+    "/janus/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    dependencies=[Depends(require_rate_limit)],
+    include_in_schema=False,
+)
+async def proxy_janus_subpath(request: Request, path: str) -> Response:
+    return await janus_proxy.forward_request(request, subpath=path)
+
+
+@router.websocket(f"/api/v1/{_CAM_TYPE}/janus-ws")
+@router.websocket("/janus-ws")
+@router.websocket(f"/api/v1/{_CAM_TYPE}/janus/ws")
 @router.websocket("/janus/ws")
 async def janus_ws_proxy(client_ws: WebSocket) -> None:
     from app.services.ws_proxy import proxy_websocket
 
     settings = get_settings()
     upstream_url = settings.janus_ws_backends.get("1", f"ws://127.0.0.1:{PORTS.JANUS_WS}/janus-ws")
-    await proxy_websocket(client_ws, upstream_url, pass_subprotocol=False, label="janus-ws")
+    await proxy_websocket(client_ws, upstream_url, pass_subprotocol=True, label="janus-ws")

@@ -210,7 +210,7 @@ class CommandHandler:
 
             if not readiness.ready:
                 # Optional auto-action: try to switch controller into drive mode once.
-                # Disabled by default; enable with SYMOVO_AUTO_SET_DRIVE_MODE=true.
+                # Enabled by default; disable with SYMOVO_AUTO_SET_DRIVE_MODE=false.
                 if (
                     readiness.error_detail == "not_ready:drive_not_ready"
                     and settings.symovo_auto_set_drive_mode

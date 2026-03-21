@@ -500,7 +500,7 @@ class RobotSystemStatus(BaseApiModel):
     ready: bool = Field(..., description="True if all subsystems are ready for operation")
     message: str = Field(..., description="If not ready, explanation; empty if ready")
     igus: Union["IgusStatusResponse", "ErrorStatus"]
-    symovo: Union["SymovoStatusResponse", "ErrorStatus"]
+    symovo: Union["SymovoStatusResponse", "ErrorStatus", dict]
     xarm: Optional[Any] = Field(None, description="xArm status payload: full websocket report (when available) with optional `summary` and `updated_ts`.")
 
 # ============================================================================

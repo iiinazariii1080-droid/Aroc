@@ -54,10 +54,10 @@ async def test_system_status_all_error():
 
     with (
         patch("app.robot_scripts.lift") as mock_lift,
-        patch("app.robot_scripts.symovo") as mock_symovo,
+        patch("app.robot_scripts.agv") as mock_agv,
     ):
         mock_lift.status = AsyncMock(side_effect=ConnectionError("igus offline"))
-        mock_symovo.status = AsyncMock(side_effect=TimeoutError("symovo timeout"))
+        mock_agv.status = AsyncMock(side_effect=TimeoutError("symovo timeout"))
 
         with patch("app.robot_scripts.xarm_status") as x_status:
             x_status.get_status.return_value = None

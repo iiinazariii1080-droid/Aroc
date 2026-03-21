@@ -97,6 +97,21 @@ class TaskStatus(str, Enum):
     CANCELLED = "cancelled"
     NOT_FOUND = "not_found"
 
+
+class TaskPhase(str, Enum):
+    """Execution phase within an orchestrated task.
+
+    Tracks where a long-running task currently is so operators and logs
+    can see *what* the robot is doing, not just *that* it is busy.
+    """
+    IDLE = "idle"
+    PREFLIGHT = "preflight"
+    NAVIGATE = "navigate"
+    POSITION = "position"
+    EXECUTE = "execute"
+    VERIFY = "verify"
+    CLEANUP = "cleanup"
+
 class DeviceState(str, Enum):
     """Device states."""
     OFFLINE = "offline"
@@ -218,7 +233,7 @@ __all__ = [
     'VelocityLimits', 'PositionLimits', 'ToolOffsetLimits', 'JointLimits', 'CoordinateLimits',
     
     # Enums
-    'TaskStatus', 'DeviceState', 'MovementType', 'ErrorLevel',
+    'TaskStatus', 'TaskPhase', 'DeviceState', 'MovementType', 'ErrorLevel',
     
     # Base models
     'BaseApiModel', 'BaseResponse', 'BaseError', 'BaseAsyncResponse',

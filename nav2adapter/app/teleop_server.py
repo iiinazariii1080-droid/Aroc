@@ -85,9 +85,11 @@ def _ssl_context() -> ssl.SSLContext | None:
 @teleop_app.put("/move/speed")
 @teleop_app.post("/move/speed")
 async def move_speed(body: MoveSpeedBody) -> dict[str, Any]:
-    """
-    Send speed command to the robot.
+    """Send speed command to the robot.
     Proxies to Symovo PUT /v0/agv/{id}/move/speed.
+
+    LIMITATION: This endpoint runs in a separate thread without StateStore access.
+    Coordinated busy-check is enforced in aehub.py /move/speed, not here.
     """
     url = _robot_url()
     linear_dir = 0 if body.linear_dir is None else int(max(-1, min(1, body.linear_dir)))

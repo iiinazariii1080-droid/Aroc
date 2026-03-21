@@ -1,9 +1,10 @@
+import os
+
 from fastapi import HTTPException
 from models.api_types import RobotActionResponse, TaskStatusResponse
 from models.base_types import TaskStatus
-from typing import Any,Type, Optional, Dict
+from typing import Any, Type, Optional, Dict, Callable, Awaitable, TypeVar
 
-from typing import Callable, Awaitable, TypeVar, Any
 from functools import wraps
 
 T = TypeVar('T', bound=Callable[..., Awaitable[Any]])
@@ -11,6 +12,33 @@ from fastapi import HTTPException, status
 
 from exceptions import DeviceBusyError, RobotBaseError, RobotError, InputError, DeviceError, Conflict, DeviceReadyError, DeviceConnectionError, SafetyLockoutError
 ALLOWED_ERRORS = (DeviceBusyError, RobotError, Conflict, DeviceError, InputError, DeviceReadyError, DeviceConnectionError, SafetyLockoutError)
+
+
+def _raise_http_for_domain_error(exc: Exception, *, extra_detail: dict | None = None) -> None:
+    """Map domain exceptions to HTTPException. Shared by safe_getter / tasked_getter."""
+    detail: dict = {"error": str(exc)}
+    if extra_detail:
+        detail.update(extra_detail)
+
+    if isinstance(exc, DeviceBusyError):
+        raise HTTPException(status_code=status.HTTP_202_ACCEPTED, detail=detail)
+    if isinstance(exc, SafetyLockoutError):
+        detail["safety_lockout"] = True
+        raise HTTPException(status_code=423, detail=detail)
+    if isinstance(exc, RobotError):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)
+    if isinstance(exc, Conflict):
+        raise HTTPException(status_code=status.HTTP_202_ACCEPTED, detail=detail)
+    if isinstance(exc, DeviceReadyError):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+    if isinstance(exc, DeviceError):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+    if isinstance(exc, DeviceConnectionError):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail)
+    if isinstance(exc, InputError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)
+
 
 def safe_getter(response_model: Type[Any]):
     def decorator(fn: Callable[..., Awaitable[Any]]):
@@ -24,51 +52,10 @@ def safe_getter(response_model: Type[Any]):
                     except Exception:
                         raise HTTPException(status_code=503, detail="Malformed result from getter")
                 return result
-            except DeviceBusyError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_202_ACCEPTED,
-                    detail={"error": str(e)}
-                )
-            except SafetyLockoutError as e:
-                raise HTTPException(
-                    status_code=423,
-                    detail={"error": str(e), "safety_lockout": True}
-                )
-            except RobotError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail={"error": str(e)}
-                )
-            except Conflict as e:
-                raise HTTPException(
-                    status_code=status.HTTP_202_ACCEPTED,
-                    detail={"error": str(e)}
-                )
-            except DeviceError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={"error": str(e)}
-                )
-            except DeviceReadyError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={"error": str(e)}
-                )
-            except DeviceConnectionError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail={"error": str(e)}
-                )
-            except InputError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail={"error": str(e)}
-                )
-            except Exception as e:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail={"error": str(e)}
-                )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                _raise_http_for_domain_error(exc)
         return wrapper
     return decorator
 
@@ -115,10 +102,15 @@ class _TaskManager:
     async def start(self, coro_factory) -> str:
         async with self._lock:
             if self.is_busy():
-                # Cancel previous task and wait for it to fully clean up
-                # (releases robot_lock in finally blocks before new task starts)
-                self._task.cancel()
-                await asyncio.wait({self._task}, timeout=5.0)
+                # DO NOT cancel + preempt here.  The previous implementation
+                # cancelled the running task and started a new one, but this
+                # caused a critical bug: when the frontend retried a navigate
+                # request while POSITIONING was in progress (lift raising,
+                # arm moving), the cancel killed the physical motion mid-way
+                # and the robot was left in an unsafe intermediate state.
+                # Instead, reject the duplicate — the frontend should poll
+                # /tasks/status/{task_id} and wait for completion.
+                raise DeviceBusyError("Task already running")
 
             self._result = None
             self._error = None
@@ -127,6 +119,12 @@ class _TaskManager:
 
             async def _runner():
                 self._status = TaskStatus.WORKING
+                # Propagate task_id to phase tracker for correlation
+                try:
+                    import app.robot_scripts as _rs
+                    _rs._set_phase(_rs.TaskPhase.IDLE, task_id=self._task_id)
+                except Exception:
+                    pass
                 try:
                     res = await coro_factory()
                     self._result = _jsonable(res)
@@ -136,6 +134,7 @@ class _TaskManager:
                     self._status = TaskStatus.CANCELLED
                     raise
                 except Exception as e:
+                    _safety_logger.error("Task %s failed: %s", self._task_id, e, exc_info=True)
                     self._error = str(e)
                     self._status = TaskStatus.ERROR
                 finally:
@@ -155,7 +154,14 @@ class _TaskManager:
             return TaskStatusResponse(status=self._status, result={"error": self._error})
         if self._status == TaskStatus.CANCELLED:
             return TaskStatusResponse(status=self._status, result={"error": self._error})
-        return TaskStatusResponse(status=self._status, result=None)
+        # Include phase info for in-progress tasks
+        phase_info = None
+        try:
+            import app.robot_scripts as _rs
+            phase_info = _rs.get_task_phase()
+        except Exception:
+            pass
+        return TaskStatusResponse(status=self._status, result=phase_info)
 
     async def cancel(self, task_id: Optional[str]) -> TaskStatusResponse:
         if not task_id or task_id != self._task_id:
@@ -167,7 +173,7 @@ class _TaskManager:
             return self.status(task_id)
         self._task.cancel()
         try:
-            await asyncio.wait_for(self._task, timeout=0.2)
+            await asyncio.wait_for(self._task, timeout=5.0)
         except asyncio.TimeoutError:
             # Still cancelling, report working to caller
             return TaskStatusResponse(status=TaskStatus.WORKING, result=None)
@@ -179,26 +185,18 @@ class _TaskManager:
 task_manager = _TaskManager()
 
 
-import aiohttp
 import logging as _logging
 
 _safety_logger = _logging.getLogger("robot_service.safety")
 
+
 async def check_safety_lockout() -> None:
-    """Pre-flight check: query nav2adapter /safety/state. Raise SafetyLockoutError if locked."""
-    from app.config import SAFETY_STATE_URL
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(SAFETY_STATE_URL, timeout=aiohttp.ClientTimeout(total=2)) as resp:
-                if resp.status != 200:
-                    return  # nav2adapter unavailable — fail open (don't block operations)
-                data = await resp.json()
-    except Exception:
-        return  # network error — fail open
-    if data.get("safety_lockout"):
-        reason = data.get("reason", "safety lockout active")
-        _safety_logger.warning("Safety lockout active: %s", reason)
-        raise SafetyLockoutError(f"Safety lockout: {reason}")
+    """Pre-flight check: raises SafetyLockoutError if motion is unsafe.
+
+    Delegates to the centralized SafetyKernel (safety/safety_kernel.py).
+    """
+    from safety.safety_kernel import get_safety_kernel
+    await get_safety_kernel().authorize_motion_force("task_start")
 
 
 def tasked_getter(response_model: Type[Any]):
@@ -225,50 +223,11 @@ def tasked_getter(response_model: Type[Any]):
                     return response_model(success=True, task_id=task_id, detail="working")
                 except Exception:
                     return RobotActionResponse(success=True, task_id=task_id, detail="working")
-            except DeviceBusyError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_202_ACCEPTED,
-                    detail={"error": str(e), "task_id": task_manager.current_id()}
-                )
-            except SafetyLockoutError as e:
-                raise HTTPException(
-                    status_code=423,
-                    detail={"error": str(e), "safety_lockout": True}
-                )
-            except RobotError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail={"error": str(e)}
-                )
-            except Conflict as e:
-                raise HTTPException(
-                    status_code=status.HTTP_202_ACCEPTED,
-                    detail={"error": str(e)}
-                )
-            except DeviceError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={"error": str(e)}
-                )
-            except DeviceReadyError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={"error": str(e)}
-                )
-            except DeviceConnectionError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail={"error": str(e)}
-                )
-            except InputError as e:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail={"error": str(e)}
-                )
-            except Exception as e:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail={"error": str(e)}
-                )
+            except HTTPException:
+                raise
+            except DeviceBusyError as exc:
+                _raise_http_for_domain_error(exc, extra_detail={"task_id": task_manager.current_id()})
+            except Exception as exc:
+                _raise_http_for_domain_error(exc)
         return wrapper
     return decorator

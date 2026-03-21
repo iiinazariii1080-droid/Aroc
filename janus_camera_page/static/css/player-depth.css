@@ -1,0 +1,42 @@
+/* Depth view extras — HUD and toast overlays. */
+
+:root {
+  --video-fit: fill;
+}
+
+/* -- Depth HUD -- */
+#depthHud {
+  position: fixed;
+  top: 52px; right: var(--inset);
+  z-index: 16;
+  min-width: 150px;
+  background: var(--clr-surface);
+  color: var(--clr-text);
+  padding: 8px 10px;
+  font: var(--text-sm) / var(--line-height) var(--font-mono);
+  border-radius: var(--radius);
+  pointer-events: none;
+  text-align: right;
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+/* -- Depth Toast -- */
+#depthToast {
+  position: fixed;
+  bottom: 18px; left: 50%;
+  transform: translateX(-50%);
+  z-index: 16;
+  padding: 10px 16px;
+  background: var(--clr-surface);
+  color: var(--clr-text);
+  font: var(--text-md) / 1.4 var(--font-ui);
+  border-radius: var(--radius-pill);
+  opacity: 0; display: none;
+  transition: opacity var(--duration) var(--ease);
+  pointer-events: none;
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+}
+
+#depthToast strong { font-weight: 600; }

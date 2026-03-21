@@ -207,7 +207,7 @@ class TestSymovoClientHappy:
     @pytest.mark.asyncio
     async def test_fault_reset(self, symovo_client):
         with aioresponses() as m:
-            m.get(f"{SYMOVO_BASE}/fault_reset", payload={"success": True})
+            m.post(f"{SYMOVO_BASE}/fault_reset", payload={"success": True})
             result = await symovo_client.fault_reset()
         assert result["success"] is True
 
@@ -307,3 +307,43 @@ class TestNormalizeSymovoStatus:
         result = _normalize_symovo_status([])
         # Empty list → empty dict → missing required fields → ErrorStatus
         assert isinstance(result, ErrorStatus)
+
+
+# ── xArm channel lock ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_xarm_channel_lock_serializes_calls():
+    """_channel_guarded decorator serializes concurrent calls via shared lock."""
+    import asyncio
+    from services.xarm_service import _channel_guarded, set_xarm_channel_lock
+
+    lock = asyncio.Lock()
+    set_xarm_channel_lock(lock)
+
+    log: list[tuple[str, str]] = []
+
+    @_channel_guarded
+    async def task_a():
+        log.append(("a", "enter"))
+        await asyncio.sleep(0.05)
+        log.append(("a", "exit"))
+
+    @_channel_guarded
+    async def task_b():
+        log.append(("b", "enter"))
+        await asyncio.sleep(0.05)
+        log.append(("b", "exit"))
+
+    try:
+        await asyncio.gather(task_a(), task_b())
+        # With serialization, one must fully complete before the other starts
+        assert log[0] == (log[0][0], "enter")
+        assert log[1] == (log[0][0], "exit")
+        assert log[2] == (log[2][0], "enter")
+        assert log[3] == (log[2][0], "exit")
+        # Both tasks ran
+        names = {e[0] for e in log}
+        assert names == {"a", "b"}
+    finally:
+        set_xarm_channel_lock(None)

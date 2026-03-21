@@ -33,6 +33,7 @@
       if (!this.debugPanel) throw new Error(`Missing debug panel #${cfg.debugPanelId}`);
 
       this._statsVisible = false;
+      this._cleanMode = !new URLSearchParams(window.location.search).has('controls');
       this._intentHandlers = { onTogglePlay: null, onRetry: null, onToggleStats: null };
 
       // Frame clock (single installation)
@@ -50,6 +51,21 @@
       this._video.muted = true;
 
       this._wireDom();
+
+      // Element-level visibility (IntersectionObserver) — detects iframe/CSS hiding
+      this._elementVisible = true;
+      this._elementVisibilityCb = null;
+      this._intersectionObserver = null;
+      if (typeof IntersectionObserver !== 'undefined') {
+        this._intersectionObserver = new IntersectionObserver((entries) => {
+          const wasVisible = this._elementVisible;
+          this._elementVisible = entries[0].isIntersecting;
+          if (wasVisible !== this._elementVisible && this._elementVisibilityCb) {
+            try { this._elementVisibilityCb(this._elementVisible); } catch(_) {}
+          }
+        }, { threshold: 0 });
+        this._intersectionObserver.observe(this._video);
+      }
     }
 
     _wireDom(){
@@ -83,6 +99,10 @@
       this.statsBox.style.display = 'none';
       this.statusPill.style.display = 'none';
       this.debugPanel.style.display = 'none';
+      if (this._cleanMode) {
+        this.playBtn.style.display = 'none';
+        this.statsBtn.style.display = 'none';
+      }
     }
 
     /** Debounced video stall handler — coalesces rapid stalled+waiting bursts. */
@@ -103,6 +123,14 @@
       this._videoStalledCb = typeof cb === 'function' ? cb : null;
     }
 
+    /** @returns {boolean} true if the video element is intersecting the viewport */
+    isElementVisible(){ return this._elementVisible; }
+
+    /** Register callback for element visibility changes (IntersectionObserver). */
+    onElementVisibilityChange(cb){
+      this._elementVisibilityCb = typeof cb === 'function' ? cb : null;
+    }
+
     bindIntents(handlers){
       this._intentHandlers = Object.assign(this._intentHandlers, handlers || {});
     }
@@ -112,7 +140,7 @@
     }
 
     setDebugText(text){
-      if (!this.cfg.debugPanelEnabled) return;
+      if (!this.cfg.debugPanelEnabled || this._cleanMode) return;
       this.debugPanel.textContent = text || '';
       this.debugPanel.style.display = 'block';
     }
@@ -170,6 +198,11 @@
      * @param {{state:string, attempt:number, desiredPlaying:boolean, errCode?:string, autoplayBlocked?:boolean, debugText?:string}} vm
      */
     render(vm){
+      if (this._cleanMode) {
+        this.statusPill.dataset.state = vm.degraded ? 'DEGRADED' : vm.state;
+        return;
+      }
+
       const st = vm.state;
       const attempt = vm.attempt || 0;
       const errCode = vm.errCode;
@@ -252,6 +285,10 @@
         this._stalledDebounceTimer = null;
       }
       this.stopFrameClock();
+      if (this._intersectionObserver) {
+        this._intersectionObserver.disconnect();
+        this._intersectionObserver = null;
+      }
     }
   }
 

@@ -49,11 +49,7 @@ from app.config import (
     JOYSTICK_MOVE_ACC,
     JOYSTICK_IS_MOVE_TOOL,
     JOYSTICK_MODE,
-    SYMOVO_TELEOP_MOVE_URL,
-    SYMOVO_DRIVE_MODE_URL,
-    SAFETY_STATE_URL,
 )
-import aiohttp
 
 
 router = APIRouter(tags=["AE.01 Robot"])
@@ -477,20 +473,8 @@ async def check_devices_ready() -> RobotSystemStatus:
     response_description="Current values: duration (s), linear speed (m/s), angular speed (rad/s).",
 )
 async def get_symovo_teleop_config(request: Request) -> SymovoTeleopConfigResponse:
-    move_url = (SYMOVO_TELEOP_MOVE_URL or "").strip().rstrip("/")
-    if not move_url.endswith("/move/speed"):
-        raise HTTPException(status_code=503, detail="symovo_teleop_config_unavailable")
-    cfg_url = f"{move_url[:-len('/move/speed')]}/teleop/config"
     try:
-        timeout = aiohttp.ClientTimeout(total=5.0)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(cfg_url) as resp:
-                raw = await resp.text()
-                if resp.status >= 400:
-                    raise HTTPException(status_code=503, detail=f"teleop_config_backend_error_{resp.status}: {raw}")
-                data = json.loads(raw) if raw else {}
-    except HTTPException:
-        raise
+        data = await robot.agv.teleop_config_get()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"teleop_config_backend_unavailable: {e}")
 
@@ -514,10 +498,6 @@ async def get_symovo_teleop_config(request: Request) -> SymovoTeleopConfigRespon
 async def put_symovo_teleop_config(
     request: Request, body: SymovoTeleopConfigUpdate
 ) -> SymovoTeleopConfigResponse:
-    move_url = (SYMOVO_TELEOP_MOVE_URL or "").strip().rstrip("/")
-    if not move_url.endswith("/move/speed"):
-        raise HTTPException(status_code=503, detail="symovo_teleop_config_unavailable")
-    cfg_url = f"{move_url[:-len('/move/speed')]}/teleop/config"
     payload: dict[str, float] = {}
     if body.duration is not None:
         payload["duration"] = float(body.duration)
@@ -527,15 +507,7 @@ async def put_symovo_teleop_config(
         payload["angular_rad_s"] = float(body.angular_rad_s)
 
     try:
-        timeout = aiohttp.ClientTimeout(total=5.0)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.put(cfg_url, json=payload) as resp:
-                raw = await resp.text()
-                if resp.status >= 400:
-                    raise HTTPException(status_code=503, detail=f"teleop_config_backend_error_{resp.status}: {raw}")
-                data = json.loads(raw) if raw else {}
-    except HTTPException:
-        raise
+        data = await robot.agv.teleop_config_put(json=payload)
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"teleop_config_backend_unavailable: {e}")
 
@@ -559,42 +531,24 @@ async def put_symovo_teleop_config(
     response_description="Success, requested enable value, and on success the backend response in result.",
 )
 async def put_symovo_drive_mode(body: SymovoDriveModeRequest) -> SymovoDriveModeResponse:
-    if not SYMOVO_DRIVE_MODE_URL or not SYMOVO_DRIVE_MODE_URL.strip():
-        raise HTTPException(
-            status_code=503,
-            detail="drive_mode service unavailable: SYMOVO_DRIVE_MODE_URL is not set.",
-        )
-    base = SYMOVO_DRIVE_MODE_URL.rstrip("/").rstrip("?")
-    url = f"{base}?enable={'true' if body.enable else 'false'}"
+    from exceptions import DeviceConnectionError, DeviceError
     try:
-        timeout = aiohttp.ClientTimeout(total=10.0)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.put(url) as resp:
-                raw = await resp.text()
-                data: Any = None
-                if raw:
-                    try:
-                        data = json.loads(raw)
-                    except Exception:
-                        data = raw
-                if resp.status >= 400:
-                    return SymovoDriveModeResponse(
-                        success=False,
-                        enable=body.enable,
-                        result=data if resp.status < 500 else None,
-                        detail=f"Backend returned {resp.status}: {data if isinstance(data, str) else str(data)}",
-                    )
-                return SymovoDriveModeResponse(
-                    success=True,
-                    enable=body.enable,
-                    result=data,
-                    detail=None,
-                )
-    except aiohttp.ClientError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Error calling drive_mode: {e!s}",
+        result = await robot.agv.drive_mode(enable=body.enable)
+        return SymovoDriveModeResponse(
+            success=True,
+            enable=body.enable,
+            result=result,
+            detail=None,
         )
+    except DeviceError as exc:
+        return SymovoDriveModeResponse(
+            success=False,
+            enable=body.enable,
+            result=None,
+            detail=str(exc),
+        )
+    except DeviceConnectionError as exc:
+        raise HTTPException(status_code=502, detail=f"Error calling drive_mode: {exc}")
 
 
 @router.get(
@@ -911,6 +865,10 @@ async def emergency_stop(request: Request):
     # 2. Stop all devices in parallel
     await robot_scripts._stop_all_devices()
 
+    # 3. Set persistent e-stop flag — blocks new tasks until /safety/recover
+    from safety.safety_kernel import get_safety_kernel
+    get_safety_kernel().set_estop(True)
+
     return {"stopped": True, "cancelled_task": tid}
 
 
@@ -935,34 +893,29 @@ _safety_log = _logging.getLogger("robot_service.safety_recover")
 async def safety_recover():
     steps: list[dict] = []
 
-    # Step 1 — verify safety relay is closed
+    # Step 1 — verify safety relay is closed (via Nav2AdapterClient)
     relay_ok = False
     try:
-        timeout = aiohttp.ClientTimeout(total=3)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(SAFETY_STATE_URL) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data.get("safety_lockout"):
-                        reason = data.get("reason", "safety lockout active")
-                        steps.append({"name": "check_safety_relay", "status": "failed", "error": reason})
-                        return {"success": False, "steps": steps, "message": "Safety relay still open — release E-Stop first"}
-                    relay_ok = True
-                    steps.append({"name": "check_safety_relay", "status": "ok"})
-                else:
-                    steps.append({"name": "check_safety_relay", "status": "skipped", "reason": f"nav2adapter returned {resp.status}"})
+        data = await robot.agv.safety_state()
+        if data.get("safety_lockout"):
+            reason = data.get("reason", "safety lockout active")
+            steps.append({"name": "check_safety_relay", "status": "failed", "error": reason})
+            return {"success": False, "steps": steps, "message": "Safety relay still open — release E-Stop first"}
+        relay_ok = True
+        steps.append({"name": "check_safety_relay", "status": "ok"})
     except Exception as exc:
         steps.append({"name": "check_safety_relay", "status": "skipped", "reason": str(exc)})
 
-    # Step 2 — igus fault_reset
+    # Step 2 — igus fault_reset (critical — abort on failure)
     try:
         await robot.lift.fault_reset()
         steps.append({"name": "igus_fault_reset", "status": "ok"})
     except Exception as exc:
         _safety_log.warning("igus fault_reset failed: %s", exc)
         steps.append({"name": "igus_fault_reset", "status": "failed", "error": str(exc)})
+        return {"success": False, "steps": steps, "message": "Recovery aborted: igus fault_reset failed"}
 
-    # Step 3 — xArm recover + enable_motion
+    # Step 3 — xArm recover + enable_motion (critical — abort on failure)
     try:
         await robot.manipulator.fault_reset()
         steps.append({"name": "xarm_recover", "status": "ok"})
@@ -977,24 +930,21 @@ async def safety_recover():
         _safety_log.warning("xarm enable_motion failed: %s", exc)
         steps.append({"name": "xarm_enable_motion", "status": "failed", "error": str(exc)})
 
-    # Step 4 — drive_mode enable
-    if SYMOVO_DRIVE_MODE_URL:
-        try:
-            url = f"{SYMOVO_DRIVE_MODE_URL.rstrip('/').rstrip('?')}?enable=true"
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                async with session.put(url) as resp:
-                    if resp.status < 400:
-                        steps.append({"name": "drive_mode_enable", "status": "ok"})
-                    else:
-                        body = await resp.text()
-                        steps.append({"name": "drive_mode_enable", "status": "failed", "error": f"HTTP {resp.status}: {body[:200]}"})
-        except Exception as exc:
-            _safety_log.warning("drive_mode enable failed: %s", exc)
-            steps.append({"name": "drive_mode_enable", "status": "failed", "error": str(exc)})
-    else:
-        steps.append({"name": "drive_mode_enable", "status": "skipped", "reason": "SYMOVO_DRIVE_MODE_URL not set"})
+    if any(s["status"] == "failed" for s in steps if s["name"] in ("xarm_recover", "xarm_enable_motion")):
+        return {"success": False, "steps": steps, "message": "Recovery aborted: xArm recovery failed"}
+
+    # Step 4 — drive_mode enable (via Nav2AdapterClient)
+    try:
+        await robot.agv.drive_mode(enable=True)
+        steps.append({"name": "drive_mode_enable", "status": "ok"})
+    except Exception as exc:
+        _safety_log.warning("drive_mode enable failed: %s", exc)
+        steps.append({"name": "drive_mode_enable", "status": "failed", "error": str(exc)})
 
     all_ok = all(s["status"] == "ok" for s in steps)
+    if all_ok:
+        from safety.safety_kernel import get_safety_kernel
+        get_safety_kernel().set_estop(False)
     _safety_log.info("Safety recovery %s: %s", "succeeded" if all_ok else "partial", steps)
     return {"success": all_ok, "steps": steps}
 

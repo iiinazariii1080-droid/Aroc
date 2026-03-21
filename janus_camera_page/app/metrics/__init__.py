@@ -8,7 +8,13 @@ The ``/metrics`` HTTP endpoint is served by ``app.routes.metrics``.
 """
 from __future__ import annotations
 
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import Counter, Gauge, Histogram, Info
+
+# ── Identity ───────────────────────────────────────────────────────
+camera_info = Info(
+    "camstack",
+    "Camera node identity (camera_type, hostname)",
+)
 
 # ── Gauges (current state) ──────────────────────────────────────────
 
@@ -94,6 +100,28 @@ ice_connects_total = Counter(
     "Client ICE connection events (reported via /telemetry)",
 )
 
+admin_auth_failures_total = Counter(
+    "camstack_admin_auth_failures_total",
+    "Admin authentication failures (403 responses)",
+)
+
+janus_summary_parse_errors_total = Counter(
+    "camstack_janus_summary_parse_errors_total",
+    "Janus summary parse errors (format mismatch)",
+)
+
+depth_proxy_errors_total = Counter(
+    "camstack_depth_proxy_errors_total",
+    "Depth camera proxy forwarding errors",
+)
+
+# ── Gauges (WebSocket) ───────────────────────────────────────────────
+
+ws_connections_active = Gauge(
+    "camstack_ws_connections_active",
+    "Active WebSocket proxy connections",
+)
+
 # ── Histograms ──────────────────────────────────────────────────────
 
 ice_connect_duration_seconds = Histogram(
@@ -107,3 +135,35 @@ ttff_seconds = Histogram(
     "Time-to-first-frame as reported by client telemetry",
     buckets=[1, 2, 3, 5, 8, 10, 15, 20, 30],
 )
+
+# ── New metrics (audit remediation) ────────────────────────────────
+
+ice_setup_failures_total = Counter(
+    "camstack_ice_setup_failures_total",
+    "ICE setup failures reported by client telemetry",
+)
+
+dtls_handshake_failures_total = Counter(
+    "camstack_dtls_handshake_failures_total",
+    "DTLS handshake failures reported by client or Janus",
+)
+
+orphaned_janus_sessions_total = Counter(
+    "camstack_orphaned_janus_sessions_total",
+    "Janus sessions that failed to cleanly destroy",
+)
+
+process_memory_bytes = Gauge(
+    "camstack_process_memory_bytes",
+    "RSS memory of this process in bytes",
+)
+
+recovery_action_duration_seconds = Histogram(
+    "camstack_recovery_action_duration_seconds",
+    "Time taken by FDIR recovery actions",
+    ["action"],
+    buckets=[1, 5, 10, 30, 60, 120],
+)
+
+# NOTE: admin_rate_limit_exceeded_total is defined in app.middleware.rate_limit
+# (not here) to avoid duplicate Prometheus Counter registration.

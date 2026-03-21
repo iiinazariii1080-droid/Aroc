@@ -63,5 +63,5 @@ class TestStaticMount:
     async def test_static_css_or_js(self, client):
         """Static mount should be accessible (even if file doesn't exist → 404)."""
         r = await client.get("/static/nonexistent.js")
-        # 404 is fine — it means the mount is registered
-        assert r.status_code in (200, 404)
+        # File doesn't exist → static mount returns 404
+        assert r.status_code == 404

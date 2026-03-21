@@ -247,28 +247,6 @@ def test_save_trajectory(client):
         mock_save.assert_called_once()
 
 
-def test_get_robot_positions_list(client):
-    with patch("routes.robot.get_robot_positions_list", return_value=[]):
-        resp = client.get("/robot_positions/list")
-        assert resp.status_code == 200
-
-
-def test_save_robot_position(client):
-    with patch("routes.robot.save_robot_position"):
-        resp = client.post(
-            "/robot_positions/save",
-            json={"name": "test", "params": {"velocity_percent": 20}},
-        )
-        assert resp.status_code == 201
-        assert "id" in resp.json()
-
-
-def test_delete_robot_position(client):
-    with patch("routes.robot.delete_robot_position"):
-        resp = client.post("/robot_positions/delete?position_id=abc")
-        assert resp.status_code == 201
-
-
 def test_task_status_unknown(client):
     resp = client.get("/tasks/status/nonexistent")
     assert resp.status_code == 200
@@ -286,14 +264,20 @@ def test_cancel_current_no_task(client):
     assert resp.status_code == 200
 
 
-def test_symovo_drive_mode_no_url(client):
-    with patch("routes.robot.SYMOVO_DRIVE_MODE_URL", ""):
+def test_symovo_drive_mode_connection_error(client):
+    """drive_mode endpoint returns 502 when nav2adapter is unreachable."""
+    from exceptions import DeviceConnectionError
+    with patch("routes.robot.robot.agv.drive_mode", new_callable=AsyncMock,
+               side_effect=DeviceConnectionError("unreachable")):
         resp = client.put("/symovo_drive_mode", json={"enable": True})
-        assert resp.status_code == 503
+        assert resp.status_code == 502
 
 
-def test_symovo_teleop_config_no_url(client):
-    with patch("routes.robot.SYMOVO_TELEOP_MOVE_URL", ""):
+def test_symovo_teleop_config_unavailable(client):
+    """teleop_config GET returns 503 when nav2adapter is unreachable."""
+    from exceptions import DeviceConnectionError
+    with patch("routes.robot.robot.agv.teleop_config_get", new_callable=AsyncMock,
+               side_effect=DeviceConnectionError("unreachable")):
         resp = client.get("/symovo_teleop_config")
         assert resp.status_code == 503
 

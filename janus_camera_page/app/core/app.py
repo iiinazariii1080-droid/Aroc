@@ -1,4 +1,5 @@
 import os
+import uuid
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +18,8 @@ _FRAME_ANCESTORS_LAN = os.environ.get(
     "CSP_FRAME_ANCESTORS_LAN",
     f"http://{DEVICES.HOST_LAN_IP}:{PORTS.COLOR_CAMERA} "
     f"http://{DEVICES.DEPTH_CAMERA_IP}:{PORTS.COLOR_CAMERA} "
-    f"https://blupassionsystem.de:8443",
+    f"https://blupassionsystem.de:8443 "
+    f"http://212.227.150.180:3456",
 )
 
 
@@ -25,7 +27,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add security headers to every response (P2.9)."""
 
     async def dispatch(self, request: Request, call_next):
+        # Correlation ID: propagate incoming or generate new
+        req_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
+        request.state.request_id = req_id
+        style_nonce = uuid.uuid4().hex[:16]
+        request.state.style_nonce = style_nonce
+
         response: Response = await call_next(request)
+        response.headers["X-Request-ID"] = req_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         # X-Frame-Options removed: CSP frame-ancestors is the modern
         # replacement and already allows cross-origin embedding from
@@ -34,8 +43,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             "script-src 'self' https://cdn.jsdelivr.net; "
-            "style-src 'self' 'unsafe-inline'; "
-            "connect-src 'self' wss: ws: https://*.techvisioncloud.pl; "
+            f"style-src 'self' 'nonce-{style_nonce}'; "
+            f"connect-src 'self' "
+            f"ws://{DEVICES.HOST_LAN_IP}:* ws://{DEVICES.DEPTH_CAMERA_IP}:* "
+            f"ws://127.0.0.1:* ws://localhost:* "
+            f"wss://{DEVICES.HOST_LAN_IP}:* wss://{DEVICES.DEPTH_CAMERA_IP}:* "
+            f"wss://*.techvisioncloud.pl; "
             "img-src 'self' data: blob:; "
             "media-src 'self' blob:; "
             f"frame-ancestors 'self' https://*.techvisioncloud.pl {_FRAME_ANCESTORS_LAN}"
@@ -46,6 +59,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 def create_app() -> FastAPI:
+    from app.core.admin import validate_admin_config
+    validate_admin_config()
+
     settings = get_settings()
     application = FastAPI(title=settings.app_title, version=settings.app_version)
 

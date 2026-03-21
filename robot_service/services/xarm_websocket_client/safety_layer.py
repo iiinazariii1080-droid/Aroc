@@ -8,19 +8,22 @@ class SafetyLayer:
                  send_stop: Callable[[str], None],
                  forward_command: Callable[[Dict[str, Any]], None],
                  watchdog_timeout: float = 0.2,
-                 hold_timeout: float = 0.2):
+                 hold_timeout: float = 0.2,
+                 estop_check: Optional[Callable[[], bool]] = None):
         """Safety checks layer.
         :param send_stop: async function to send STOP (reason)
         :param forward_command: async function to pass commands downstream
         :param watchdog_timeout: max idle time without messages (sec)
         :param hold_timeout: max hold time for step_over (sec)
+        :param estop_check: optional callback returning True when E-stop is active
         """
         self.send_stop = send_stop
         self.forward_command = forward_command
         self.watchdog_timeout = watchdog_timeout
         self.hold_timeout = hold_timeout
+        self._estop_check = estop_check
 
-        self.last_msg_ts = time.time()
+        self.last_msg_ts = time.monotonic()
         self.last_hold_ts = None
         self.running = True
 
@@ -28,7 +31,7 @@ class SafetyLayer:
 
     async def handle_message(self, msg: Dict[str, Any]):
         """Process incoming message"""
-        now = time.time()
+        now = time.monotonic()
         self.last_msg_ts = now
 
         cmd = msg.get("cmd")
@@ -43,6 +46,11 @@ class SafetyLayer:
                 await self.send_stop("expired_command")
                 return
 
+        # E-stop gate: block motion commands when E-stop is active
+        if cmd in ("xarm_move_step",) and self._estop_check is not None and self._estop_check():
+            await self.send_stop("estop_active")
+            return
+
         # Deadman-switch: step hold
         if cmd == "xarm_move_step_over":
             self.last_hold_ts = now
@@ -52,13 +60,13 @@ class SafetyLayer:
 
     def heartbeat(self):
         """Update last message timestamp for heartbeat"""
-        self.last_msg_ts = time.time()
+        self.last_msg_ts = time.monotonic()
 
     async def _watchdog_loop(self):
         """Watchdog loop"""
         while self.running:
             await asyncio.sleep(0.05)
-            now = time.time()
+            now = time.monotonic()
             if not self.running:
                 return
             # main connection timeout

@@ -173,3 +173,57 @@ def sample_active_transport():
         created_at=datetime.now(),
         target_id="position_A",
     )
+
+
+# ── Shared mock factories ──────────────────────────────────────────
+# Reusable across test files to eliminate copy-paste.
+
+
+def make_state_store_mock(**overrides) -> MagicMock:
+    """Create a MagicMock StateStore with sensible defaults for CommandHandler tests."""
+    defaults = {
+        "get_active_transport": AsyncMock(return_value=None),
+        "get_last_navigation_status": AsyncMock(return_value=None),
+        "get_last_position_status": AsyncMock(return_value=None),
+        "get_all_active_commands": AsyncMock(return_value={}),
+        "register_command": AsyncMock(),
+        "set_last_navigation_status": AsyncMock(),
+        "clear_transport": AsyncMock(),
+        "clear_session": AsyncMock(),
+        "clear_all_commands": AsyncMock(return_value=0),
+        "get_session": AsyncMock(return_value=None),
+        "upsert_session": AsyncMock(),
+    }
+    defaults.update(overrides)
+    return MagicMock(**defaults)
+
+
+def make_ready_symovo_mock(**overrides) -> MagicMock:
+    """Create a MagicMock SymovoAgvClient that passes readiness checks."""
+    defaults = {
+        "status_uncached": AsyncMock(return_value={
+            "state_flags": {"drive_ready": True, "safety_cleared": True},
+        }),
+        "pose": AsyncMock(return_value={"x": 0, "y": 0, "theta": 0}),
+        "pose_uncached": AsyncMock(return_value={"x": 0, "y": 0, "theta": 0}),
+        "transport_get": AsyncMock(return_value={"state": 1}),
+        "transport_move_to_pose": AsyncMock(return_value={"id": "t1", "state": 1}),
+        "transport_create_station": AsyncMock(return_value={"id": "t2", "state": 1}),
+        "transport_start": AsyncMock(return_value={"ok": True}),
+        "transport_stop": AsyncMock(),
+        "delete_transport": AsyncMock(),
+        "set_drive_mode": AsyncMock(),
+        "close": AsyncMock(),
+    }
+    defaults.update(overrides)
+    return MagicMock(**defaults)
+
+
+def make_command_handler(event_bus=None, *, symovo=None, ss=None):
+    """Create a CommandHandler wired to mocks."""
+    from services.command_handler import CommandHandler
+    return CommandHandler(
+        symovo_client=symovo or make_ready_symovo_mock(),
+        event_bus=event_bus or EventBus(queue_size=100),
+        state_store=ss or make_state_store_mock(),
+    )

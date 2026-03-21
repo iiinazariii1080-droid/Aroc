@@ -17,6 +17,23 @@ if _SERVICE_ROOT not in sys.path:
     sys.path.insert(0, _SERVICE_ROOT)
 
 
+@pytest.fixture(autouse=True)
+def _patch_safety_kernel(monkeypatch: pytest.MonkeyPatch):
+    """Globally patch SafetyKernel so tests never hit the real nav2adapter.
+
+    Tests that explicitly want to test safety behaviour should mock
+    ``check_safety_lockout`` or ``get_safety_kernel`` themselves.
+    """
+    from safety.safety_kernel import get_safety_kernel
+    kernel = get_safety_kernel()
+    kernel.set_estop(False)
+    # Make authorize_motion / authorize_motion_force a no-op by default
+    monkeypatch.setattr(kernel, "authorize_motion", AsyncMock())
+    monkeypatch.setattr(kernel, "authorize_motion_force", AsyncMock())
+    yield
+    kernel.set_estop(False)
+
+
 @pytest.fixture
 def noop_startup(monkeypatch: pytest.MonkeyPatch) -> None:
     """Disable startup/shutdown so TestClient doesn't touch hardware."""

@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import os
+import subprocess
 import time
 from collections import deque
 from dataclasses import asdict
@@ -365,6 +366,7 @@ class TestRebootCircuitBreaker:
             patch("app.services.recovery_ladder._REBOOT_COUNT_PATH", reboot_dir / "reboot_count"),
             patch("app.services.recovery_ladder._REBOOT_MARKER_PATH", reboot_dir / "last_reboot_request"),
             patch("app.services.recovery_ladder._DEDUP_WINDOW_SEC", 0),
+            patch("app.services.recovery_ladder._REBOOT_COUNTER_RESET_SEC", 0),
             patch("app.services.recovery_ladder.subprocess.run", return_value=MagicMock(returncode=0)),
         ):
             from app.services.recovery_ladder import RecoveryLadder
@@ -475,3 +477,209 @@ class TestNodeLocalReboot:
         finally:
             for p in patches:
                 p.stop()
+
+
+# ── Audit remediation tests ──────────────────────────────────────────
+
+
+class TestCorruptedRebootCounter:
+    """TD-C4: Corrupted reboot counter file must not crash the system."""
+
+    def test_garbage_in_counter_handled(self, tmp_path):
+        """Write non-numeric garbage → _atomic_increment_reboot_count returns 1."""
+        from app.services.recovery_ladder import _atomic_increment_reboot_count
+        counter_file = tmp_path / "reboot_count"
+        counter_file.write_text("not-a-number\n")
+        with patch("app.services.recovery_ladder._REBOOT_COUNT_PATH", counter_file), \
+             patch("app.services.recovery_ladder._REBOOT_COUNT_DIR", tmp_path):
+            result = _atomic_increment_reboot_count()
+            assert result == 1  # corrupt → treated as 0, incremented to 1
+
+    def test_empty_counter_handled(self, tmp_path):
+        """Empty file → _atomic_increment_reboot_count returns 1."""
+        from app.services.recovery_ladder import _atomic_increment_reboot_count
+        counter_file = tmp_path / "reboot_count"
+        counter_file.write_text("")
+        with patch("app.services.recovery_ladder._REBOOT_COUNT_PATH", counter_file), \
+             patch("app.services.recovery_ladder._REBOOT_COUNT_DIR", tmp_path):
+            result = _atomic_increment_reboot_count()
+            assert result == 1
+
+
+class TestRebootCounterPermissions:
+    """DEF-05: Reboot counter file must be created with 0o644 permissions."""
+
+    def test_write_creates_file_with_644(self, tmp_path):
+        from app.services.recovery_ladder import _write_reboot_count
+        counter_file = tmp_path / "reboot_count"
+        with patch("app.services.recovery_ladder._REBOOT_COUNT_PATH", counter_file), \
+             patch("app.services.recovery_ladder._REBOOT_COUNT_DIR", tmp_path):
+            _write_reboot_count(1)
+            mode = counter_file.stat().st_mode & 0o777
+            assert mode == 0o644, f"Expected 0o644, got {oct(mode)}"
+
+    def test_increment_creates_file_with_644(self, tmp_path):
+        from app.services.recovery_ladder import _atomic_increment_reboot_count
+        counter_file = tmp_path / "reboot_count"
+        with patch("app.services.recovery_ladder._REBOOT_COUNT_PATH", counter_file), \
+             patch("app.services.recovery_ladder._REBOOT_COUNT_DIR", tmp_path):
+            _atomic_increment_reboot_count()
+            mode = counter_file.stat().st_mode & 0o777
+            assert mode == 0o644, f"Expected 0o644, got {oct(mode)}"
+
+
+class TestStdinDevnull:
+    """DEF-04: subprocess.run must use stdin=DEVNULL to prevent hangs."""
+
+    def test_run_passes_stdin_devnull(self):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            from app.services.system import run
+            run(["echo", "test"])
+            call_kwargs = mock_run.call_args[1]
+            assert call_kwargs.get("stdin") == subprocess.DEVNULL
+
+
+# ===================================================================
+# 6. FDIR Route Tests (HTTP layer)
+# ===================================================================
+
+from httpx import ASGITransport, AsyncClient
+
+_ADMIN_TOKEN = "test-token-fdir-routes-16ch"
+
+
+@pytest.fixture
+def fdir_app():
+    """Create a test app with mocked event handlers and known admin token."""
+    with patch("app.core.events.register_event_handlers", lambda app: None), \
+         patch.dict(os.environ, {"CAM_ADMIN_TOKEN": _ADMIN_TOKEN}):
+        import app.core.admin as _admin
+        _admin.ADMIN_TOKEN = _ADMIN_TOKEN
+        from app.core.app import create_app
+        return create_app()
+
+
+@pytest.fixture
+async def fdir_client(fdir_app):
+    # Clear admin rate limiter state to prevent 429s from other tests
+    from app.middleware import rate_limit as _rl
+    _rl._admin_buckets.clear()
+    _rl._buckets.clear()
+    transport = ASGITransport(app=fdir_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+class TestFdirRoutes:
+    """HTTP-level tests for /fdir/* routes."""
+
+    @pytest.mark.asyncio
+    async def test_ladder_status_returns_200(self, fdir_client):
+        """GET /fdir/ladder returns 200 with correct schema."""
+        with patch("app.routes.fdir.get_ladder") as mock_ladder:
+            mock_ladder.return_value.status.return_value = {
+                "current_level": 0,
+                "current_level_name": "retry_handle",
+                "total_recoveries": 0,
+                "levels": [],
+            }
+            resp = await fdir_client.get("/fdir/ladder", headers={"X-Admin-Token": _ADMIN_TOKEN})
+            assert resp.status_code == 200
+            body = resp.json()
+            assert "current_level" in body
+            assert "current_level_name" in body
+            assert "total_recoveries" in body
+            assert "levels" in body
+
+    @pytest.mark.asyncio
+    async def test_fdir_events_returns_list(self, fdir_client):
+        """GET /fdir/events returns 200 with a list."""
+        with patch("app.routes.fdir.fdir_recent", return_value=[]):
+            resp = await fdir_client.get("/fdir/events", headers={"X-Admin-Token": _ADMIN_TOKEN})
+            assert resp.status_code == 200
+            assert isinstance(resp.json(), list)
+
+    @pytest.mark.asyncio
+    async def test_fdir_events_with_n_param(self, fdir_client):
+        """GET /fdir/events?n=5 passes the limit parameter."""
+        fake_events = [{"id": i} for i in range(5)]
+        with patch("app.routes.fdir.fdir_recent", return_value=fake_events) as mock_recent:
+            resp = await fdir_client.get("/fdir/events", params={"n": 5}, headers={"X-Admin-Token": _ADMIN_TOKEN})
+            assert resp.status_code == 200
+            assert len(resp.json()) == 5
+            mock_recent.assert_called_once_with(5)
+
+    @pytest.mark.asyncio
+    async def test_mode_status_returns_200(self, fdir_client):
+        """GET /fdir/mode returns 200 with mode info."""
+        with patch("app.routes.fdir.system_mode") as mock_sm:
+            mock_sm.mode_info.return_value = {
+                "mode": "nominal",
+                "since": 1000.0,
+                "uptime_s": 100.0,
+                "reason": "init",
+                "policy": {"streams_enabled": True},
+            }
+            resp = await fdir_client.get("/fdir/mode", headers={"X-Admin-Token": _ADMIN_TOKEN})
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["mode"] == "nominal"
+            assert "policy" in body
+
+    @pytest.mark.asyncio
+    async def test_force_mode_requires_admin(self, fdir_client):
+        """POST /fdir/mode/nominal without admin token → 403."""
+        resp = await fdir_client.post("/fdir/mode/nominal")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_force_mode_with_admin_succeeds(self, fdir_client):
+        """POST /fdir/mode/nominal with valid admin token → 200."""
+        with patch("app.routes.fdir.system_mode") as mock_sm:
+            mock_sm.SystemMode = SystemMode
+            mock_sm.transition.return_value = True
+            mock_sm.current_mode.return_value = SystemMode.NOMINAL
+            resp = await fdir_client.post(
+                "/fdir/mode/nominal",
+                headers={"X-Admin-Token": _ADMIN_TOKEN},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert "transitioned" in body
+            assert "current" in body
+
+    @pytest.mark.asyncio
+    async def test_force_mode_invalid_target(self, fdir_client):
+        """POST /fdir/mode/invalid_mode with admin token → 422."""
+        resp = await fdir_client.post(
+            "/fdir/mode/invalid_mode",
+            headers={"X-Admin-Token": _ADMIN_TOKEN},
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_reset_ladder_requires_admin(self, fdir_client):
+        """POST /fdir/ladder/reset without admin token → 403."""
+        resp = await fdir_client.post("/fdir/ladder/reset")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_reset_ladder_with_admin_succeeds(self, fdir_client):
+        """POST /fdir/ladder/reset with valid admin token → 200."""
+        with patch("app.routes.fdir.get_ladder") as mock_ladder:
+            mock_ladder.return_value.reset.return_value = None
+            mock_ladder.return_value.status.return_value = {
+                "current_level": 0,
+                "current_level_name": "retry_handle",
+                "total_recoveries": 0,
+                "levels": [],
+            }
+            resp = await fdir_client.post(
+                "/fdir/ladder/reset",
+                headers={"X-Admin-Token": _ADMIN_TOKEN},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["reset"] is True
+            assert "status" in body

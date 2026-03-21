@@ -23,7 +23,7 @@ nat: {
   full_trickle = true
   ignore_mdns = true
   keep_private_host = true
-  ice_enforce_list = "eth0"
+  ice_ignore_list = [ "docker", "veth", "lo", "vmnet", "tailscale" ]
 
   stun_server = "82.165.177.194"
   stun_port   = 3478

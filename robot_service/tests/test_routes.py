@@ -61,43 +61,6 @@ class TestTrajectoryConfig:
         mock_save.assert_called_once()
 
 
-# ── Robot positions CRUD ───────────────────────────────────────────────────
-
-class TestRobotPositionsCRUD:
-    def test_list_positions(self, client):
-        with patch("routes.robot.get_robot_positions_list", return_value=[{"id": "abc", "name": "pos1"}]):
-            r = client.get("/robot_positions/list")
-        assert r.status_code == 200
-        assert len(r.json()) == 1
-
-    def test_save_position(self, client):
-        with patch("routes.robot.save_robot_position") as mock_save:
-            payload = {
-                "name": "test_pos",
-                "params": {
-                    "location": {"x_m": 1.0, "y_m": 2.0, "theta_deg": 0.0, "map_id": 0},
-                    "lift_position_cm": 10.0,
-                    "velocity_percent": 50.0,
-                },
-            }
-            r = client.post("/robot_positions/save", json=payload)
-        assert r.status_code == 201
-        assert r.json()["id"]  # non-empty generated id
-        mock_save.assert_called_once()
-
-    def test_save_minimal_params(self, client):
-        """Saving with minimal params merges with defaults."""
-        with patch("routes.robot.save_robot_position"):
-            r = client.post("/robot_positions/save", json={"name": "minimal"})
-        assert r.status_code == 201
-
-    def test_delete_position(self, client):
-        with patch("routes.robot.delete_robot_position") as mock_del:
-            r = client.post("/robot_positions/delete", params={"position_id": "abc123"})
-        assert r.status_code == 201
-        mock_del.assert_called_once_with("abc123")
-
-
 # ── Task management endpoints ─────────────────────────────────────────────
 
 class TestTaskEndpoints:

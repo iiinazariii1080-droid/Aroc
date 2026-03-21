@@ -43,6 +43,9 @@
       /** Generation counter for recreate; stale enqueued operations check this and bail out. */
       this._ioGen = 0;
 
+      /** DEF-07: request ICE restart on next createAnswer after session recreate. */
+      this._wantIceRestart = false;
+
       // Invalidate handle if session is destroyed/recreated.
       this._unsubSession = this.session.onEvent((ev) => {
         if (!ev || !ev.type) return;
@@ -57,14 +60,7 @@
           }
           this._handleGen += 1;
           this.handle = null;
-          this._tracksByMid.clear();
-          try {
-            for (const tr of this._inboundStream.getTracks()) {
-              try { tr.onmute = null; tr.onunmute = null; tr.onended = null; } catch(_) {}
-              try { tr.stop && tr.stop(); } catch(_) {}
-            }
-          } catch(_) {}
-          this._inboundStream = new MediaStream();
+          this._clearAllTracks();
           this._emit('SESSION_RESET', { type: ev.type });
         }
       });
@@ -82,6 +78,18 @@
       } catch (e) {
         this.log.warn('event_sink_error', { type, error: String(e) });
       }
+    }
+
+    /** Clear all inbound tracks, detach event handlers, and reset the MediaStream. */
+    _clearAllTracks(){
+      this._tracksByMid.clear();
+      try {
+        for (const tr of this._inboundStream.getTracks()) {
+          try { tr.onmute = null; tr.onunmute = null; tr.onended = null; } catch(_) {}
+          try { tr.stop && tr.stop(); } catch(_) {}
+        }
+      } catch(_) {}
+      this._inboundStream = new MediaStream();
     }
 
     /** Returns true if handle generation is stale (callback from previous handle). When true, logs EVENT_DROPPED. */
@@ -133,11 +141,14 @@
       }
       // Flush stale queued operations from timed-out attempts.
       // _handleGen guards against stale attach callbacks corrupting state.
+      // NEW-04: Clear stale ensure promise to prevent orphaned waits
+      this._ensurePromise = null;
       this._io = Promise.resolve();
       return this._enqueue(async () => {
         if (this._ioGen !== gen) return;
         await this._detachHandle();
         if (this._ioGen !== gen) return;
+        this._wantIceRestart = true;
         await this.session.recreate(rtcConfig);
         if (this._ioGen !== gen) return;
         await this._ensureSessionAndHandle(rtcConfig);
@@ -145,6 +156,11 @@
     }
 
     async detach(){
+      // NEW-02: Clean up session listener on detach to prevent leak
+      if (this._unsubSession) {
+        this._unsubSession();
+        this._unsubSession = null;
+      }
       return this._enqueue(async () => {
         await this._detachHandle();
         await this._ensureSessionAndHandle(null);
@@ -184,6 +200,18 @@
         this.log.debug('stop_cleanup_skipped', { reason: 'gen_changed', gen, current: this._handleGen });
       }
       });
+    }
+
+    /**
+     * Full teardown: stop + null all references (R3-03, R3-04).
+     * Call this when the adapter will never be reused.
+     */
+    async destroy(){
+      await this.stop();
+      this._eventSink = null;
+      this._getToken = null;
+      this._inboundStream = null;
+      this.session = null;
     }
 
     async listStreams(){
@@ -271,9 +299,9 @@
           if (that._dropIfStaleGen(gen, 'handle_onmessage')) return;
           let offerEmitted = false;
           if (jsep) {
-            that._emit('STREAMING_OFFER_RECEIVED', {});
-            offerEmitted = true;
+            // NEW-03: Don't emit STREAMING_OFFER_RECEIVED here — moved to _onJsepOffer after SDP validation
             that._onJsepOffer(gen, jsep);
+            offerEmitted = true;
           }
           const errCode = msg && (msg.error_code ?? msg.errorCode);
           const errMsg = msg && (msg.error || msg.error_message || '');
@@ -341,9 +369,34 @@
     _onJsepOffer(gen, jsep){
       const h = this.handle;
       if (!h) return;
+
+      // DEF-07: Validate SDP to prevent oversized/malicious offers
+      const MAX_SDP_BYTES = 16384;
+      if (!jsep?.sdp || typeof jsep.sdp !== 'string') {
+        this._emit('ERROR', { where: '_onJsepOffer', error: 'missing or invalid SDP' });
+        return;
+      }
+      if (jsep.sdp.length > MAX_SDP_BYTES) {
+        this._emit('ERROR', { where: '_onJsepOffer', error: `SDP too large: ${jsep.sdp.length}b (max ${MAX_SDP_BYTES})` });
+        return;
+      }
+
+      // DEF-02: Verify SDP contains DTLS fingerprint (defense-in-depth)
+      if (!/a=fingerprint:/m.test(jsep.sdp)) {
+        this.log.warn('sdp_missing_dtls_fingerprint', { sdp_length: jsep.sdp.length });
+        this._emit('ERROR', { where: '_onJsepOffer', error: 'SDP missing DTLS fingerprint' });
+        return;
+      }
+
+      // NEW-03: Emit STREAMING_OFFER_RECEIVED only after SDP passes validation
+      this._emit('STREAMING_OFFER_RECEIVED', {});
+
       try {
-        h.createAnswer({
+        const wantRestart = this._wantIceRestart;
+      this._wantIceRestart = false;
+      h.createAnswer({
           jsep,
+          iceRestart: wantRestart,
           tracks: [
             { type: 'video', recv: true, add: false },
             { type: 'audio', recv: false, add: false },
@@ -410,15 +463,7 @@
         this._cleanupResolve();
         this._cleanupResolve = null;
       }
-      this._tracksByMid.clear();
-
-      try {
-        for (const tr of this._inboundStream.getTracks()) {
-          try { tr.onmute = null; tr.onunmute = null; tr.onended = null; } catch(_) {}
-          try { tr.stop && tr.stop(); } catch(_) {}
-        }
-      } catch(_) {}
-      this._inboundStream = new MediaStream();
+      this._clearAllTracks();
 
       await new Promise((resolve) => {
         try {

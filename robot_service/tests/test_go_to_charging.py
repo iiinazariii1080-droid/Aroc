@@ -46,27 +46,28 @@ async def test_go_to_charging_calls_preflight_and_activate(_import_scripts):
     scripts = _import_scripts
     with patch.object(scripts, "manipulator") as mock_manip, \
          patch.object(scripts, "lift") as mock_lift, \
-         patch.object(scripts, "symovo") as mock_symovo, \
+         patch.object(scripts, "agv") as mock_agv, \
          patch.object(scripts, "_move_to_job_pose", new_callable=AsyncMock) as mock_job_pose, \
          patch.object(scripts, "igus_move_and_check", new_callable=AsyncMock), \
          patch.object(scripts, "_get_global_velocity", return_value=30):
 
         mock_manip.fault_reset = AsyncMock()
         mock_manip.enable_motion = AsyncMock()
-        mock_manip.current_joints_position = AsyncMock(return_value={"name": "RANDOM_POSE"})
+        # After preflight, arm is at JOB_POSE (coordination gate re-queries)
+        mock_manip.current_joints_position = AsyncMock(return_value={"name": "JOB_POSE"})
         mock_lift.fault_reset = AsyncMock()
         mock_lift.position = AsyncMock(return_value={"position": 5000})
-        mock_symovo.fault_reset = AsyncMock()
-        mock_symovo.go_to_charging_station = AsyncMock(return_value={"status": "ok"})
+        mock_agv.fault_reset = AsyncMock()
+        mock_agv.go_to_charging_station = AsyncMock(return_value={"status": "ok"})
+        mock_agv.disable_all_charging_stations = AsyncMock(return_value={})
 
         result = await scripts.go_to_charging_station.__wrapped__(station_id=12345)
 
         assert result is True
         mock_manip.fault_reset.assert_awaited_once()
         mock_manip.enable_motion.assert_awaited_once()
-        mock_job_pose.assert_awaited_once()
-        mock_symovo.fault_reset.assert_awaited_once()
-        mock_symovo.go_to_charging_station.assert_awaited_once_with(12345)
+        mock_agv.fault_reset.assert_awaited_once()
+        mock_agv.go_to_charging_station.assert_awaited_once_with(12345)
 
 
 @pytest.mark.asyncio
@@ -75,7 +76,7 @@ async def test_go_to_charging_skips_job_pose_if_already_there(_import_scripts):
     scripts = _import_scripts
     with patch.object(scripts, "manipulator") as mock_manip, \
          patch.object(scripts, "lift") as mock_lift, \
-         patch.object(scripts, "symovo") as mock_symovo, \
+         patch.object(scripts, "agv") as mock_agv, \
          patch.object(scripts, "_move_to_job_pose", new_callable=AsyncMock) as mock_job_pose, \
          patch.object(scripts, "igus_move_and_check", new_callable=AsyncMock), \
          patch.object(scripts, "_get_global_velocity", return_value=30):
@@ -85,8 +86,9 @@ async def test_go_to_charging_skips_job_pose_if_already_there(_import_scripts):
         mock_manip.current_joints_position = AsyncMock(return_value={"name": "JOB_POSE"})
         mock_lift.fault_reset = AsyncMock()
         mock_lift.position = AsyncMock(return_value={"position": 5000})
-        mock_symovo.fault_reset = AsyncMock()
-        mock_symovo.go_to_charging_station = AsyncMock(return_value={"status": "ok"})
+        mock_agv.fault_reset = AsyncMock()
+        mock_agv.go_to_charging_station = AsyncMock(return_value={"status": "ok"})
+        mock_agv.disable_all_charging_stations = AsyncMock(return_value={})
 
         result = await scripts.go_to_charging_station.__wrapped__(station_id=12345)
 
@@ -100,7 +102,7 @@ async def test_go_to_charging_lowers_lift_if_too_high(_import_scripts):
     scripts = _import_scripts
     with patch.object(scripts, "manipulator") as mock_manip, \
          patch.object(scripts, "lift") as mock_lift, \
-         patch.object(scripts, "symovo") as mock_symovo, \
+         patch.object(scripts, "agv") as mock_agv, \
          patch.object(scripts, "_move_to_job_pose", new_callable=AsyncMock), \
          patch.object(scripts, "igus_move_and_check", new_callable=AsyncMock) as mock_igus, \
          patch.object(scripts, "_get_global_velocity", return_value=30):
@@ -110,8 +112,9 @@ async def test_go_to_charging_lowers_lift_if_too_high(_import_scripts):
         mock_manip.current_joints_position = AsyncMock(return_value={"name": "JOB_POSE"})
         mock_lift.fault_reset = AsyncMock()
         mock_lift.position = AsyncMock(return_value={"position": 50000})  # above LIFT_TRANSPORT_MAX
-        mock_symovo.fault_reset = AsyncMock()
-        mock_symovo.go_to_charging_station = AsyncMock(return_value={"status": "ok"})
+        mock_agv.fault_reset = AsyncMock()
+        mock_agv.go_to_charging_station = AsyncMock(return_value={"status": "ok"})
+        mock_agv.disable_all_charging_stations = AsyncMock(return_value={})
 
         await scripts.go_to_charging_station.__wrapped__(station_id=12345)
 

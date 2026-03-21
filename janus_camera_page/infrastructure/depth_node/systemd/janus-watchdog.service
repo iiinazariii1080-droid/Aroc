@@ -1,0 +1,8 @@
+[Unit]
+Description=Janus health-check watchdog
+After=janus.service
+BindsTo=janus.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'curl -sf --max-time 5 http://127.0.0.1:8088/janus/info > /dev/null || (echo "Janus HTTP unreachable, restarting" | systemd-cat -t janus-watchdog -p err && systemctl restart janus.service)'

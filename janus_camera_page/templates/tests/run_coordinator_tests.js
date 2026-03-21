@@ -652,6 +652,185 @@ async function main() {
   }
 
   // ═══════════════════════════════════════════════
+  // Test 27: settleStartTimeout escalates severity to HARD
+  // ═══════════════════════════════════════════════
+  console.log('--- RC Test 27: settleStartTimeout escalates to HARD ---');
+  {
+    const { rc, clock, calls } = createCoordinator({ settleStartTimeoutMs: 500 });
+    rc.request('no_frames', RS.SOFT);
+    await clock.advance(500);
+    await flushMicrotasks();
+    // in-flight, startSettleWindow never called → settleStartTimeout will fire
+    assert(rc.inFlight(), 'RC27: in-flight after first attempt');
+    await clock.advance(500); // settleStartTimeout fires
+    await flushMicrotasks();
+    assert(!rc.inFlight(), 'RC27: not in-flight after settleStartTimeout');
+    // Severity should have been escalated to HARD
+    const pending = rc.pending();
+    assert(pending !== null, 'RC27: pending exists');
+    assert(pending.severity >= 3, 'RC27: severity escalated to HARD (' + pending.severity + ')');
+  }
+
+  // ═══════════════════════════════════════════════
+  // Test 28: _onSettle escalates severity to HARD
+  // ═══════════════════════════════════════════════
+  console.log('--- RC Test 28: settle timeout escalates to HARD ---');
+  {
+    const { rc, clock, calls } = createCoordinator({ connectSettleMs: 500 });
+    rc.request('no_frames', RS.SOFT);
+    await clock.advance(500);
+    await flushMicrotasks();
+    assert(rc.inFlight(), 'RC28: in-flight');
+    // Start settle window
+    rc.startSettleWindow();
+    // Don't call notifyRecovered → settle timer will fire
+    await clock.advance(500);
+    await flushMicrotasks();
+    assert(!rc.inFlight(), 'RC28: not in-flight after settle timeout');
+    const pending = rc.pending();
+    assert(pending !== null, 'RC28: pending exists');
+    assert(pending.severity >= 3, 'RC28: severity escalated to HARD (' + pending.severity + ')');
+  }
+
+  // ═══════════════════════════════════════════════
+  // Test 29: maxWatchRetries=1 → immediate escalation to REATTACH
+  // ═══════════════════════════════════════════════
+  console.log('--- RC Test 29: maxWatchRetries=1 ladder ---');
+  {
+    const { rc, clock, calls } = createCoordinator({
+      maxWatchRetries: 1,
+      maxReattachRetries: 1,
+      maxReconnectAttempts: 6,
+      connectSettleMs: 100,
+    });
+    rc.request('no_frames', RS.SOFT);
+
+    // Attempt 1: should be SOFT_RESTART (maxWatchRetries=1)
+    await clock.advance(500);
+    await flushMicrotasks();
+    assert(calls.attempts.length === 1, 'RC29: attempt 1 fired');
+    assert(calls.attempts[0].action === RA.SOFT_RESTART, 'RC29: attempt 1 is SOFT_RESTART');
+
+    // Fail it via settle timeout
+    rc.startSettleWindow();
+    await clock.advance(100);
+    await flushMicrotasks();
+
+    // Attempt 2: should be REATTACH_PLUGIN (watch budget exhausted)
+    // But severity was escalated to HARD by settle timeout, so it should be RECREATE_SESSION
+    await clock.advance(1000);
+    await flushMicrotasks();
+    assert(calls.attempts.length === 2, 'RC29: attempt 2 fired');
+    // After HARD escalation, should be RECREATE_SESSION
+    assert(calls.attempts[1].action === RA.RECREATE_SESSION, 'RC29: attempt 2 is RECREATE_SESSION (HARD escalation)');
+  }
+
+  // ═══════════════════════════════════════════════
+  // Test 30: health check failure → attempt NOT consumed, rescheduled
+  // ═══════════════════════════════════════════════
+  console.log('--- RC Test 30: health check failure skips attempt ---');
+  {
+    let fetchCalls = 0;
+    sandbox.fetch = async () => { fetchCalls++; throw new Error('network error'); };
+    sandbox.AbortController = class { constructor() { this.signal = {}; } abort() {} };
+
+    const { rc, clock, calls } = createCoordinator({
+      healthCheckBeforeReconnect: true,
+      healthCheckUrl: 'http://test/janus/healthz',
+      healthCheckTimeoutMs: 1000,
+    });
+    rc.request('no_frames', RS.SOFT);
+    await clock.advance(500);
+    await flushMicrotasks();
+
+    assert(fetchCalls === 1, 'RC30: fetch called once');
+    assert(calls.attempts.length === 0, 'RC30: no attempt (health check failed)');
+    assert(rc.attempt() === 0, 'RC30: attempt counter not incremented');
+    // Should have rescheduled
+    assert(calls.scheduled.length >= 2, 'RC30: rescheduled after health check failure');
+
+    delete sandbox.fetch;
+    delete sandbox.AbortController;
+  }
+
+  // ═══════════════════════════════════════════════
+  // Test 31: health check success → normal attempt flow
+  // ═══════════════════════════════════════════════
+  console.log('--- RC Test 31: health check success → attempt runs ---');
+  {
+    let fetchCalls = 0;
+    sandbox.fetch = async () => {
+      fetchCalls++;
+      return { ok: true, json: async () => ({ ok: true }) };
+    };
+    sandbox.AbortController = class { constructor() { this.signal = {}; } abort() {} };
+
+    const { rc, clock, calls } = createCoordinator({
+      healthCheckBeforeReconnect: true,
+      healthCheckUrl: 'http://test/janus/healthz',
+      healthCheckTimeoutMs: 1000,
+    });
+    rc.request('no_frames', RS.SOFT);
+    await clock.advance(500);
+    await flushMicrotasks();
+
+    assert(fetchCalls === 1, 'RC31: fetch called');
+    assert(calls.attempts.length === 1, 'RC31: attempt executed after healthy check');
+    assert(rc.attempt() === 1, 'RC31: attempt counter incremented');
+
+    delete sandbox.fetch;
+    delete sandbox.AbortController;
+  }
+
+  // ═══════════════════════════════════════════════
+  // Test 32: health check disabled → no fetch, normal flow
+  // ═══════════════════════════════════════════════
+  console.log('--- RC Test 32: health check disabled ---');
+  {
+    let fetchCalls = 0;
+    sandbox.fetch = async () => { fetchCalls++; return { ok: true, json: async () => ({ ok: true }) }; };
+    sandbox.AbortController = class { constructor() { this.signal = {}; } abort() {} };
+
+    const { rc, clock, calls } = createCoordinator({
+      healthCheckBeforeReconnect: false,
+      healthCheckUrl: 'http://test/janus/healthz',
+    });
+    rc.request('no_frames', RS.SOFT);
+    await clock.advance(500);
+    await flushMicrotasks();
+
+    assert(fetchCalls === 0, 'RC32: fetch NOT called when disabled');
+    assert(calls.attempts.length === 1, 'RC32: attempt runs without health check');
+
+    delete sandbox.fetch;
+    delete sandbox.AbortController;
+  }
+
+  // ═══════════════════════════════════════════════
+  // Test 33: health check returns {ok: false} → treated as failure
+  // ═══════════════════════════════════════════════
+  console.log('--- RC Test 33: health check ok=false ---');
+  {
+    sandbox.fetch = async () => ({ ok: true, json: async () => ({ ok: false }) });
+    sandbox.AbortController = class { constructor() { this.signal = {}; } abort() {} };
+
+    const { rc, clock, calls } = createCoordinator({
+      healthCheckBeforeReconnect: true,
+      healthCheckUrl: 'http://test/janus/healthz',
+      healthCheckTimeoutMs: 1000,
+    });
+    rc.request('no_frames', RS.SOFT);
+    await clock.advance(500);
+    await flushMicrotasks();
+
+    assert(calls.attempts.length === 0, 'RC33: no attempt when healthz ok=false');
+    assert(rc.attempt() === 0, 'RC33: attempt counter not incremented');
+
+    delete sandbox.fetch;
+    delete sandbox.AbortController;
+  }
+
+  // ═══════════════════════════════════════════════
   // Summary
   // ═══════════════════════════════════════════════
   console.log(`\nCoordinator tests: ${passed} passed, ${failed} failed`);

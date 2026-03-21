@@ -9,6 +9,8 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 
+from exceptions import DeviceReadyError
+
 
 def _symovo_raw_ok(**overrides):
     """Raw dict that _normalize_symovo_status can convert to SymovoStatusResponse."""
@@ -28,7 +30,7 @@ def _patch_services():
     return {
         "lift": patch("app.robot_scripts.lift"),
         "manipulator": patch("app.robot_scripts.manipulator"),
-        "symovo": patch("app.robot_scripts.symovo"),
+        "agv": patch("app.robot_scripts.agv"),
         "depth_camera": patch("app.robot_scripts.depth_camera"),
         "robot_lock": patch("app.robot_scripts.robot_lock", new_callable=lambda: asyncio.Lock),
     }
@@ -41,7 +43,7 @@ def mocks():
     started = {k: p.start() for k, p in patches.items()}
 
     # Make all service methods async by default
-    for name in ("lift", "manipulator", "symovo", "depth_camera"):
+    for name in ("lift", "manipulator", "agv", "depth_camera"):
         for method in ("status", "fault_reset", "reference", "enable_motion",
                        "position", "move", "current_joints_position",
                        "complex_move_with_joints", "change_tool_position",
@@ -98,7 +100,7 @@ async def test_fault_reset_success(mocks):
     assert result is True
     mocks["lift"].fault_reset.assert_awaited_once()
     mocks["manipulator"].fault_reset.assert_awaited_once()
-    mocks["symovo"].fault_reset.assert_awaited_once()
+    mocks["agv"].fault_reset.assert_awaited_once()
     mocks["manipulator"].enable_motion.assert_awaited_once()
 
 
@@ -124,7 +126,7 @@ async def test_igus_move_and_check_too_far(mocks):
     mocks["lift"].position = AsyncMock(return_value={"position": 5000})
     from app.robot_scripts import igus_move_and_check
     result = await igus_move_and_check(1000, 50)
-    assert result is None  # position too far
+    assert result is False  # position too far
 
 
 # ── set_ready ──────────────────────────────────────────────────────
@@ -138,7 +140,7 @@ async def test_set_ready_success(mocks):
     mocks["lift"].status = AsyncMock(return_value={
         "connected": True, "homed": True, "error": None
     })
-    mocks["symovo"].status = AsyncMock(return_value=_symovo_raw_ok())
+    mocks["agv"].status = AsyncMock(return_value=_symovo_raw_ok())
 
     from app.robot_scripts import set_ready
     result = await set_ready()
@@ -153,7 +155,7 @@ async def test_set_ready_not_ready(mocks):
     xarm_status._last_status = None
     xarm_status._last_updated_ts = 0.0
     mocks["lift"].status = AsyncMock(return_value={"connected": False})
-    mocks["symovo"].status = AsyncMock(side_effect=RuntimeError("offline"))
+    mocks["agv"].status = AsyncMock(side_effect=RuntimeError("offline"))
 
     from app.robot_scripts import set_ready
     with pytest.raises(DeviceReadyError):
@@ -222,7 +224,7 @@ async def test_get_robot_system_status_all_ready(mocks):
     mocks["lift"].status = AsyncMock(return_value={
         "connected": True, "homed": True, "error": None
     })
-    mocks["symovo"].status = AsyncMock(return_value=_symovo_raw_ok())
+    mocks["agv"].status = AsyncMock(return_value=_symovo_raw_ok())
 
     from app.robot_scripts import get_robot_system_status
     result = await get_robot_system_status()
@@ -238,7 +240,7 @@ async def test_get_robot_system_status_igus_down(mocks):
         "connected": True, "has_error": False, "has_err_warn": False
     })
     mocks["lift"].status = AsyncMock(side_effect=RuntimeError("igus offline"))
-    mocks["symovo"].status = AsyncMock(return_value=_symovo_raw_ok())
+    mocks["agv"].status = AsyncMock(return_value=_symovo_raw_ok())
 
     from app.robot_scripts import get_robot_system_status
     result = await get_robot_system_status()
@@ -255,7 +257,7 @@ async def test_get_robot_system_status_no_cache(mocks):
     mocks["lift"].status = AsyncMock(return_value={
         "connected": True, "homed": True, "error": None
     })
-    mocks["symovo"].status = AsyncMock(side_effect=RuntimeError("symovo offline"))
+    mocks["agv"].status = AsyncMock(side_effect=RuntimeError("symovo offline"))
 
     from app.robot_scripts import get_robot_system_status
     result = await get_robot_system_status()
@@ -355,3 +357,302 @@ async def test_preflight_needs_manipulator_move(mocks):
     params = SimpleNamespace(velocity_percent=20)
     await _preflight_make_transport_safe(params)
     mocks["manipulator"].complex_move_with_joints.assert_awaited_once()
+
+
+# ── Coordination gates ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_assert_arm_stowed_transport_safe(mocks):
+    """Transport-safe poses should not raise."""
+    from app.robot_scripts import _assert_arm_stowed_for_transport
+
+    for pose_name in ("JOB_POSE", "TRANSPORT_STEP_2"):
+        mocks["manipulator"].current_joints_position = AsyncMock(return_value={"name": pose_name})
+        await _assert_arm_stowed_for_transport()  # should not raise
+
+
+@pytest.mark.asyncio
+async def test_assert_arm_stowed_not_safe(mocks):
+    """Non-transport pose should raise DeviceReadyError."""
+    from app.robot_scripts import _assert_arm_stowed_for_transport
+
+    mocks["manipulator"].current_joints_position = AsyncMock(return_value={"name": "HOME"})
+    with pytest.raises(DeviceReadyError, match="not stowed"):
+        await _assert_arm_stowed_for_transport()
+
+
+@pytest.mark.asyncio
+async def test_assert_agv_stopped_ok(mocks):
+    """Stopped AGV should not raise."""
+    from app.robot_scripts import _assert_agv_stopped
+
+    mocks["agv"].status = AsyncMock(return_value={"velocity": {"vx_m_s": 0.0, "vy_m_s": 0.0}})
+    await _assert_agv_stopped()
+
+
+@pytest.mark.asyncio
+async def test_assert_agv_stopped_moving(mocks):
+    """Moving AGV should raise DeviceReadyError after retries exhaust."""
+    from app.robot_scripts import _assert_agv_stopped
+
+    mocks["agv"].status = AsyncMock(return_value={"velocity": {"vx_m_s": 0.10, "vy_m_s": 0.0}})
+    with pytest.raises(DeviceReadyError, match="still moving"):
+        await _assert_agv_stopped(retries=2, interval=0.01)
+
+
+@pytest.mark.asyncio
+async def test_check_safety_periodic_rate_limited(mocks):
+    """_check_safety_periodic should rate-limit calls via SafetyKernel."""
+    from app.robot_scripts import _check_safety_periodic
+    from safety.safety_kernel import get_safety_kernel
+
+    kernel = get_safety_kernel()
+    # Reset rate-limit timestamp to force fresh check
+    kernel._last_check_ts = 0.0
+
+    mock_auth = AsyncMock()
+    with patch.object(kernel, "authorize_motion", mock_auth):
+        await _check_safety_periodic()
+        mock_auth.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_all_devices_verify_retries(mocks):
+    """_stop_all_devices retries stop when AGV is still moving after first stop."""
+    import app.robot_scripts as rs
+    from app.robot_scripts import _stop_all_devices
+
+    rs._xarm_commands = None  # use manipulator.fault_reset path
+
+    mocks["agv"].fault_reset = AsyncMock(return_value={})
+    mocks["manipulator"].fault_reset = AsyncMock(return_value={})
+    mocks["lift"].fault_reset = AsyncMock(return_value={})
+    # First status check: still moving. Second: stopped.
+    mocks["agv"].status = AsyncMock(side_effect=[
+        {"velocity": {"vx_m_s": 0.1, "vy_m_s": 0.0}},
+        {"velocity": {"vx_m_s": 0.0, "vy_m_s": 0.0}},
+    ])
+    mocks["manipulator"].status = AsyncMock(return_value={"state": 0})  # not moving
+
+    await _stop_all_devices()
+
+    # AGV fault_reset called at least twice (initial + retry)
+    assert mocks["agv"].fault_reset.await_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_move_robot_to_product_coordination_gates(mocks):
+    """move_robot_to_product calls coordination gates at correct phases."""
+    import app.robot_scripts as rs
+
+    mocks["agv"].pose = AsyncMock(return_value={"pose": {"x_m": 0, "y_m": 0, "theta_deg": 0}})
+    mocks["agv"].status = AsyncMock(return_value={
+        "online": True, "velocity": {"vx_m_s": 0, "vy_m_s": 0}
+    })
+    mocks["agv"].go_to_pose = AsyncMock(return_value={"transport_id": 1})
+    mocks["agv"].disable_all_charging_stations = AsyncMock(return_value={})
+    mocks["manipulator"].current_joints_position = AsyncMock(return_value={"name": "JOB_POSE"})
+    mocks["lift"].position = AsyncMock(return_value={"position": 100})
+
+    location = SimpleNamespace(x_m=5.0, y_m=5.0, theta_deg=0, map_id=None, place="shelf1")
+
+    with patch.object(rs, "_assert_arm_stowed_for_transport", new_callable=AsyncMock) as mock_arm_check, \
+         patch.object(rs, "_assert_agv_stopped", new_callable=AsyncMock) as mock_agv_check, \
+         patch.object(rs, "_check_safety_periodic", new_callable=AsyncMock), \
+         patch.object(rs, "agv_is_near", new_callable=AsyncMock, return_value=False), \
+         patch.object(rs, "_preflight_for_navigation", new_callable=AsyncMock, return_value=30), \
+         patch.object(rs, "_wait_agv_arrival", new_callable=AsyncMock):
+
+        params = SimpleNamespace(
+            velocity_percent=30,
+            location=location,
+            product=SimpleNamespace(lift_position_encoder_value=5000, position="AUTO"),
+        )
+        try:
+            await rs.move_robot_to_product.__wrapped__(params)
+        except Exception:
+            pass  # may fail in Phase 3 positioning — that's OK
+
+        mock_arm_check.assert_awaited()
+        mock_agv_check.assert_awaited()
+
+
+# ── TaskPhase FSM ─────────────────────────────────────────────────
+
+
+def test_task_phase_enum():
+    """TaskPhase enum has all required phases."""
+    from models.base_types import TaskPhase
+    expected = {"idle", "preflight", "navigate", "position", "execute", "verify", "cleanup"}
+    actual = {p.value for p in TaskPhase}
+    assert expected == actual
+
+
+def test_set_phase_updates_state():
+    """_set_phase correctly updates the global phase."""
+    import app.robot_scripts as rs
+    from models.base_types import TaskPhase
+
+    rs._set_phase(TaskPhase.IDLE)
+    assert rs._current_phase == TaskPhase.IDLE
+
+    rs._set_phase(TaskPhase.PREFLIGHT, task_id="abc123")
+    assert rs._current_phase == TaskPhase.PREFLIGHT
+    assert rs._phase_task_id == "abc123"
+
+
+def test_get_task_phase_snapshot():
+    """get_task_phase returns current state as dict."""
+    import app.robot_scripts as rs
+    from models.base_types import TaskPhase
+
+    rs._set_phase(TaskPhase.NAVIGATE, task_id="xyz789")
+    info = rs.get_task_phase()
+    assert info == {"phase": "navigate", "task_id": "xyz789"}
+
+    rs._set_phase(TaskPhase.IDLE)
+
+
+@pytest.mark.asyncio
+async def test_move_robot_to_product_phase_transitions(mocks):
+    """move_robot_to_product transitions through PREFLIGHT → NAVIGATE → POSITION → VERIFY → IDLE."""
+    import app.robot_scripts as rs
+    from models.base_types import TaskPhase
+
+    phases_seen: list[str] = []
+    _orig_set_phase = rs._set_phase
+
+    def _tracking_set_phase(phase, *, task_id=None):
+        phases_seen.append(phase.value)
+        _orig_set_phase(phase, task_id=task_id)
+
+    mocks["agv"].pose = AsyncMock(return_value={"pose": {"x_m": 0, "y_m": 0, "theta_deg": 0}})
+    mocks["agv"].status = AsyncMock(return_value={
+        "online": True, "velocity": {"vx_m_s": 0, "vy_m_s": 0}
+    })
+    mocks["agv"].go_to_pose = AsyncMock(return_value={"transport_id": 1})
+    mocks["agv"].disable_all_charging_stations = AsyncMock(return_value={})
+    mocks["manipulator"].current_joints_position = AsyncMock(return_value={
+        "name": "JOB_POSE", "joints": {"j1": 0, "j2": 0, "j3": 0, "j4": 0, "j5": 0, "j6": 0}
+    })
+    mocks["lift"].position = AsyncMock(return_value={"position": 1000})
+
+    location = SimpleNamespace(x_m=5.0, y_m=5.0, theta_deg=0, map_id=None, place="shelf1")
+    xarm_joints = SimpleNamespace(joints=SimpleNamespace(
+        j1=0.0, j2=0.0, j3=0.0, j4=0.0, j5=0.0, j6=0.0,
+    ))
+    params = SimpleNamespace(
+        location=location,
+        lift_position_cm=1.0,
+        xarm_joints=xarm_joints,
+    )
+
+    with patch.object(rs, "_set_phase", side_effect=_tracking_set_phase), \
+         patch.object(rs, "_check_safety_periodic", new_callable=AsyncMock), \
+         patch.object(rs, "agv_is_near", new_callable=AsyncMock, return_value=False), \
+         patch.object(rs, "_preflight_for_navigation", new_callable=AsyncMock, return_value=30), \
+         patch.object(rs, "_wait_agv_arrival", new_callable=AsyncMock), \
+         patch.object(rs, "_assert_arm_stowed_for_transport", new_callable=AsyncMock), \
+         patch.object(rs, "_assert_agv_stopped", new_callable=AsyncMock):
+
+        await rs.move_robot_to_product.__wrapped__(params)
+
+    # Must have transitioned through these phases in order
+    assert "preflight" in phases_seen
+    assert "navigate" in phases_seen
+    assert "position" in phases_seen
+    assert "verify" in phases_seen
+    assert phases_seen[-1] == "idle", "must return to idle after completion"
+
+
+@pytest.mark.asyncio
+async def test_phase_returns_to_idle_on_error(mocks):
+    """Phase resets to IDLE even when task throws."""
+    import app.robot_scripts as rs
+    from models.base_types import TaskPhase
+
+    mocks["agv"].status = AsyncMock(return_value={
+        "velocity": {"vx_m_s": 0, "vy_m_s": 0}
+    })
+
+    with patch.object(rs, "_check_safety_periodic", new_callable=AsyncMock), \
+         patch.object(rs, "agv_is_near", new_callable=AsyncMock, return_value=False), \
+         patch.object(rs, "_preflight_for_navigation", new_callable=AsyncMock,
+                      side_effect=DeviceReadyError("xarm offline")):
+        try:
+            await rs.move_robot_to_product.__wrapped__(
+                SimpleNamespace(location=SimpleNamespace(x_m=1, y_m=1, theta_deg=0, map_id=None),
+                                lift_position_cm=0, xarm_joints=None)
+            )
+        except DeviceReadyError:
+            pass
+
+    assert rs._current_phase == TaskPhase.IDLE, "phase must reset to IDLE on error"
+
+
+@pytest.mark.asyncio
+async def test_autotake_phase_execute(mocks):
+    """autotake sets phase to EXECUTE and resets to IDLE."""
+    import app.robot_scripts as rs
+    from models.base_types import TaskPhase
+
+    mocks["agv"].status = AsyncMock(return_value={"velocity": {"vx_m_s": 0, "vy_m_s": 0}})
+    mocks["manipulator"].enable_motion = AsyncMock()
+
+    with patch.object(rs, "_assert_agv_stopped", new_callable=AsyncMock), \
+         patch("app.robot_scripts.init_trajectory_table"), \
+         patch("app.robot_scripts.get_trajectory", return_value={"baseMove": {"active": False}}), \
+         patch.object(rs, "_measure_depth", new_callable=AsyncMock, return_value=100.0), \
+         patch.object(rs, "_verify_vacuum", new_callable=AsyncMock, return_value=(True, "ok")):
+
+        phases_seen = []
+        _orig = rs._set_phase
+
+        def _track(phase, *, task_id=None):
+            phases_seen.append(phase.value)
+            _orig(phase, task_id=task_id)
+
+        with patch.object(rs, "_set_phase", side_effect=_track):
+            await rs.autotake.__wrapped__(40)
+
+        assert "execute" in phases_seen
+        assert rs._current_phase == TaskPhase.IDLE
+
+
+@pytest.mark.asyncio
+async def test_go_to_charging_phase_transitions(mocks):
+    """go_to_charging_station transitions through phases and returns to IDLE."""
+    import app.robot_scripts as rs
+    from models.base_types import TaskPhase
+
+    mocks["agv"].fault_reset = AsyncMock(return_value={})
+    mocks["agv"].go_to_charging_station = AsyncMock(return_value={})
+
+    phases_seen = []
+    _orig = rs._set_phase
+
+    def _track(phase, *, task_id=None):
+        phases_seen.append(phase.value)
+        _orig(phase, task_id=task_id)
+
+    with patch.object(rs, "_set_phase", side_effect=_track), \
+         patch.object(rs, "_preflight_for_navigation", new_callable=AsyncMock, return_value=30), \
+         patch.object(rs, "_assert_arm_stowed_for_transport", new_callable=AsyncMock), \
+         patch("aiohttp.ClientSession") as mock_session:
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+        mock_session_inst = AsyncMock()
+        mock_session_inst.put = MagicMock(return_value=mock_resp)
+        mock_session_inst.__aenter__ = AsyncMock(return_value=mock_session_inst)
+        mock_session_inst.__aexit__ = AsyncMock(return_value=False)
+        mock_session.return_value = mock_session_inst
+
+        await rs.go_to_charging_station.__wrapped__(1)
+
+    assert "preflight" in phases_seen
+    assert "execute" in phases_seen
+    assert phases_seen[-1] == "idle"

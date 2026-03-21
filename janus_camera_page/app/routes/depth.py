@@ -7,14 +7,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, Dict, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
+from app.middleware.rate_limit import require_rate_limit
+
 from app.core.settings import get_settings
+
+_log = logging.getLogger(__name__)
+
+
+def _inc_depth_proxy_errors() -> None:
+    try:
+        from app.metrics import depth_proxy_errors_total
+        depth_proxy_errors_total.inc()
+    except Exception:
+        _log.debug("depth proxy error metric increment failed", exc_info=True)
 
 router = APIRouter(tags=["depth"])
 
@@ -23,24 +36,28 @@ _CAM_TYPE = get_settings().camera_type
 
 # Async HTTP client for realsense_mux — lazy-initialized on first use.
 _mux_client: httpx.AsyncClient | None = None
+_mux_client_lock = asyncio.Lock()
 
 
 async def _get_mux_client() -> httpx.AsyncClient:
     global _mux_client
     if _mux_client is None:
-        _mux_client = httpx.AsyncClient(
-            base_url=get_settings().realsense_mux_url,
-            timeout=httpx.Timeout(connect=2.0, read=5.0, write=2.0, pool=5.0),
-        )
+        async with _mux_client_lock:
+            if _mux_client is None:
+                _mux_client = httpx.AsyncClient(
+                    base_url=get_settings().realsense_mux_url,
+                    timeout=httpx.Timeout(connect=2.0, read=5.0, write=2.0, pool=5.0),
+                )
     return _mux_client
 
 
 async def close_mux_client() -> None:
     """Close the realsense_mux HTTP client (called on app shutdown)."""
     global _mux_client
-    if _mux_client is not None:
-        await _mux_client.aclose()
-        _mux_client = None
+    async with _mux_client_lock:
+        if _mux_client is not None:
+            await _mux_client.aclose()
+            _mux_client = None
 
 
 class DepthResponse(BaseModel):
@@ -69,12 +86,19 @@ async def _proxy_realsense(upstream_path: str, format: str = "json") -> Response
                     "X-Timestamp": resp.headers.get("X-Timestamp", ""),
                 },
             )
-        return JSONResponse(content=resp.json())
+        try:
+            return JSONResponse(content=resp.json())
+        except (json.JSONDecodeError, ValueError) as e:
+            _inc_depth_proxy_errors()
+            raise HTTPException(status_code=502, detail=f"realsense_mux returned invalid JSON: {e}")
     except httpx.TimeoutException as e:
+        _inc_depth_proxy_errors()
         raise HTTPException(status_code=504, detail=f"realsense_mux timeout: {e}")
     except httpx.ConnectError as e:
+        _inc_depth_proxy_errors()
         raise HTTPException(status_code=502, detail=f"realsense_mux unreachable: {e}")
     except httpx.HTTPError as e:
+        _inc_depth_proxy_errors()
         raise HTTPException(status_code=502, detail=f"realsense_mux proxy error: {e}")
 
 
@@ -91,8 +115,9 @@ depth_description = (
     response_model=DepthResponse,
     summary="Get depth at specified coordinates",
     description=depth_description,
+    dependencies=[Depends(require_rate_limit)],
 )
-@router.get("/depth", response_model=DepthResponse, summary="Get depth at specified coordinates", description=depth_description)
+@router.get("/depth", response_model=DepthResponse, summary="Get depth at specified coordinates", description=depth_description, dependencies=[Depends(require_rate_limit)])
 async def get_depth(
     x: Optional[float] = None,
     y: Optional[float] = None,
@@ -127,10 +152,16 @@ async def get_depth(
         resp = await client.get("/depth", params={"x": x, "y": y})
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail=resp.text)
-        return DepthResponse(**resp.json())
+        try:
+            return DepthResponse(**resp.json())
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            _inc_depth_proxy_errors()
+            raise HTTPException(status_code=502, detail=f"Invalid depth response: {e}")
     except httpx.TimeoutException as e:
+        _inc_depth_proxy_errors()
         raise HTTPException(status_code=504, detail=f"Depth query timeout: {e}")
     except httpx.HTTPError as e:
+        _inc_depth_proxy_errors()
         raise HTTPException(status_code=502, detail=f"Depth query error: {e}")
 
 
@@ -165,20 +196,30 @@ async def get_depth_frame_color_overlay(format: str = "json"):
             raise HTTPException(status_code=color_resp.status_code, detail=color_resp.text)
         if depth_resp.status_code != 200:
             raise HTTPException(status_code=depth_resp.status_code, detail=depth_resp.text)
-        cj = color_resp.json()
-        dj = depth_resp.json()
-        return JSONResponse(content={
-            "width": dj["width"],
-            "height": dj["height"],
-            "timestamp": dj.get("timestamp", 0),
-            "rgb_data": cj["data"],
-            "rgb_dtype": cj.get("dtype", "uint8-rgb24"),
-            "depth_data": dj["data"],
-            "depth_dtype": dj.get("dtype", "float32"),
-        })
+        try:
+            cj = color_resp.json()
+            dj = depth_resp.json()
+        except (json.JSONDecodeError, ValueError) as e:
+            _inc_depth_proxy_errors()
+            raise HTTPException(status_code=502, detail=f"RGBD invalid JSON: {e}")
+        try:
+            return JSONResponse(content={
+                "width": dj["width"],
+                "height": dj["height"],
+                "timestamp": dj.get("timestamp", 0),
+                "rgb_data": cj["data"],
+                "rgb_dtype": cj.get("dtype", "uint8-rgb24"),
+                "depth_data": dj["data"],
+                "depth_dtype": dj.get("dtype", "float32"),
+            })
+        except KeyError as e:
+            _inc_depth_proxy_errors()
+            raise HTTPException(status_code=502, detail=f"RGBD response missing field: {e}")
     except httpx.TimeoutException as e:
+        _inc_depth_proxy_errors()
         raise HTTPException(status_code=504, detail=f"Aligned RGBD timeout: {e}")
     except httpx.HTTPError as e:
+        _inc_depth_proxy_errors()
         raise HTTPException(status_code=502, detail=f"Aligned RGBD proxy error: {e}")
 
 
@@ -209,8 +250,14 @@ async def depth_map_load(format: str = "json"):
                     "X-Timestamp": resp.headers.get("X-Timestamp", ""),
                 },
             )
-        return JSONResponse(content=resp.json())
+        try:
+            return JSONResponse(content=resp.json())
+        except (json.JSONDecodeError, ValueError) as exc:
+            _inc_depth_proxy_errors()
+            raise HTTPException(status_code=502, detail=f"Depth map invalid JSON: {exc}")
     except httpx.TimeoutException as exc:
+        _inc_depth_proxy_errors()
         raise HTTPException(status_code=504, detail=f"Depth map timeout: {exc}")
     except httpx.HTTPError as exc:
+        _inc_depth_proxy_errors()
         raise HTTPException(status_code=502, detail=f"Depth map proxy error: {exc}")

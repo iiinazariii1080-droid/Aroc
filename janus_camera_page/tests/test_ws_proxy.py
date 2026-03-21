@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import ssl
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -21,18 +21,10 @@ class TestSslCtxFor:
         assert ssl_ctx_for("ws://localhost:8188/janus-ws") is None
 
     def test_returns_context_for_wss(self):
-        with patch("app.services.ws_proxy.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(allow_insecure_tls=False)
-            ctx = ssl_ctx_for("wss://example.com/ws")
+        ctx = ssl_ctx_for("wss://example.com/ws")
         assert isinstance(ctx, ssl.SSLContext)
         assert ctx.check_hostname is True
-
-    def test_insecure_tls_disables_verification(self):
-        with patch("app.services.ws_proxy.get_settings") as mock_settings:
-            mock_settings.return_value = MagicMock(allow_insecure_tls=True)
-            ctx = ssl_ctx_for("wss://example.com/ws")
-        assert ctx.check_hostname is False
-        assert ctx.verify_mode == ssl.CERT_NONE
+        assert ctx.verify_mode == ssl.CERT_REQUIRED
 
 
 class TestPumpClientToUpstream:

@@ -63,5 +63,10 @@ Thumbs.db
 # Certificates (sensitive)
 certs/test/
 
+# WebRTC debug dumps (contain private IPs, ICE credentials, DTLS fingerprints)
+**/templates/dump
+**/webrtc-internals*
+*.sdp
+
 # Node
 node_modules/

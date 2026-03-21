@@ -10,7 +10,7 @@ Markers: security, unit
 from __future__ import annotations
 
 import os
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -21,14 +21,12 @@ _ADMIN_TOKEN = "test-secure-token-32chars-long!!"
 
 @pytest.fixture
 def app_enforced():
-    """Create app with admin enforcement ON and a known token."""
+    """Create app with a known admin token."""
     with patch("app.core.events.register_event_handlers", lambda app: None), \
          patch.dict(os.environ, {
-             "CAM_ADMIN_ENFORCE": "1",
              "CAM_ADMIN_TOKEN": _ADMIN_TOKEN,
          }):
         import app.core.admin as _admin
-        _admin._ENFORCE = True
         _admin.ADMIN_TOKEN = _ADMIN_TOKEN
         from app.core.app import create_app
         return create_app()
@@ -43,14 +41,17 @@ async def client_enforced(app_enforced):
 
 @pytest.fixture
 def app_default_token():
-    """Create app where CAM_ADMIN_TOKEN is the default placeholder."""
+    """Create app where CAM_ADMIN_TOKEN is the default placeholder.
+
+    Bypasses validate_admin_config (which now raises RuntimeError on
+    default token) to test the runtime 503 defense-in-depth check.
+    """
     with patch("app.core.events.register_event_handlers", lambda app: None), \
+         patch("app.core.admin.validate_admin_config"), \
          patch.dict(os.environ, {
-             "CAM_ADMIN_ENFORCE": "1",
              "CAM_ADMIN_TOKEN": "change-me",
          }):
         import app.core.admin as _admin
-        _admin._ENFORCE = True
         _admin.ADMIN_TOKEN = "change-me"
         from app.core.app import create_app
         return create_app()
@@ -110,6 +111,55 @@ class TestAdminAuth:
         )
         assert resp.status_code == 503
         assert "placeholder" in resp.json()["detail"].lower() or "default" in resp.json()["detail"].lower()
+
+    def test_validate_admin_config_warns_on_default_token(self):
+        """Startup warns (not crashes) if CAM_ADMIN_TOKEN is 'change-me'."""
+        import app.core.admin as _admin
+        original = _admin.ADMIN_TOKEN
+        try:
+            _admin.ADMIN_TOKEN = "change-me"
+            _admin.validate_admin_config()  # must not raise — warns only
+        finally:
+            _admin.ADMIN_TOKEN = original
+
+    @pytest.mark.parametrize("token", ["CHANGE-ME", "Change-Me", "CHANGE-me", "change-ME"])
+    def test_validate_admin_config_warns_case_insensitive_default(self, token):
+        """Startup warns for any case variation of 'change-me'."""
+        import app.core.admin as _admin
+        original = _admin.ADMIN_TOKEN
+        try:
+            _admin.ADMIN_TOKEN = token
+            _admin.validate_admin_config()  # must not raise
+        finally:
+            _admin.ADMIN_TOKEN = original
+
+    def test_validate_admin_config_warns_short_token(self):
+        """Startup warns if CAM_ADMIN_TOKEN is shorter than 16 chars."""
+        import app.core.admin as _admin
+        original = _admin.ADMIN_TOKEN
+        try:
+            _admin.ADMIN_TOKEN = "short-token"
+            _admin.validate_admin_config()  # must not raise
+        finally:
+            _admin.ADMIN_TOKEN = original
+
+    async def test_require_admin_uses_hmac_compare_digest(self, client_enforced):
+        """Token comparison must use hmac.compare_digest (timing-safe)."""
+        import hmac
+        original_compare = hmac.compare_digest
+        called = False
+
+        def tracking_compare(*args, **kwargs):
+            nonlocal called
+            called = True
+            return original_compare(*args, **kwargs)
+
+        with patch("app.core.admin.hmac.compare_digest", side_effect=tracking_compare):
+            await client_enforced.post(
+                "/janus/restart",
+                headers={"X-Admin-Token": _ADMIN_TOKEN},
+            )
+        assert called, "hmac.compare_digest was not called during token validation"
 
     async def test_public_routes_no_admin_required(self, client_enforced):
         """Public routes like /healthz don't require admin token."""
@@ -235,3 +285,73 @@ class TestCORS:
             },
         )
         assert resp.headers.get("access-control-allow-credentials") == "true"
+
+
+# ── CSP connect-src whitelist tests (DEF-01) ─────────────────────────
+
+@pytest.mark.security
+class TestCSPConnectSrc:
+    """DEF-01: connect-src must not use bare wss:/ws: schemes."""
+
+    async def test_connect_src_no_bare_ws(self, client_enforced):
+        """CSP connect-src must not contain bare 'ws:' or 'wss:' tokens."""
+        resp = await client_enforced.get("/healthz")
+        csp = resp.headers["content-security-policy"]
+        for directive in csp.split(";"):
+            if "connect-src" in directive:
+                tokens = directive.split()
+                for token in tokens:
+                    assert token not in ("ws:", "wss:"), \
+                        f"CSP connect-src contains bare scheme: {token}"
+                break
+
+    async def test_connect_src_includes_lan_hosts(self, client_enforced):
+        """CSP connect-src includes LAN node WebSocket origins."""
+        resp = await client_enforced.get("/healthz")
+        csp = resp.headers["content-security-policy"]
+        assert "ws://192.168.1.10:" in csp
+        assert "ws://192.168.1.55:" in csp
+
+    async def test_connect_src_includes_localhost(self, client_enforced):
+        """CSP connect-src includes localhost for local development."""
+        resp = await client_enforced.get("/healthz")
+        csp = resp.headers["content-security-policy"]
+        assert "ws://127.0.0.1:" in csp
+
+    async def test_connect_src_includes_techvisioncloud(self, client_enforced):
+        """CSP connect-src includes wss://*.techvisioncloud.pl."""
+        resp = await client_enforced.get("/healthz")
+        csp = resp.headers["content-security-policy"]
+        assert "wss://*.techvisioncloud.pl" in csp
+
+
+# ── Admin rate limiting tests (DEF-02) ───────────────────────────────
+
+@pytest.mark.security
+class TestAdminRateLimit:
+    """DEF-02: Admin endpoints have stricter rate limiting (5 req/min)."""
+
+    async def test_admin_rate_limit_triggers_429(self, client_enforced):
+        """Sending >5 rapid requests to admin endpoint triggers 429."""
+        # Reset admin rate limit state for clean test
+        from app.middleware.rate_limit import _admin_buckets
+        _admin_buckets.clear()
+
+        statuses = []
+        for _ in range(8):
+            resp = await client_enforced.post(
+                "/janus/restart",
+                headers={"X-Admin-Token": _ADMIN_TOKEN},
+            )
+            statuses.append(resp.status_code)
+
+        assert 429 in statuses, f"Expected 429 in responses, got: {statuses}"
+
+    async def test_public_routes_not_admin_rate_limited(self, client_enforced):
+        """Public routes like /healthz are not affected by admin rate limit."""
+        from app.middleware.rate_limit import _admin_buckets
+        _admin_buckets.clear()
+
+        for _ in range(10):
+            resp = await client_enforced.get("/healthz")
+            assert resp.status_code != 429

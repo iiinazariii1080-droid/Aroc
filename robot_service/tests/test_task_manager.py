@@ -63,19 +63,29 @@ async def test_task_start_and_finish(tm):
 
 
 @pytest.mark.asyncio
-async def test_task_busy_rejection(tm):
+async def test_task_rejects_duplicate(tm):
+    """Starting a new task while one is running raises DeviceBusyError."""
     from exceptions import DeviceBusyError
-    event = asyncio.Event()
 
-    async def _slow():
-        await event.wait()
+    event1 = asyncio.Event()
 
-    await tm.start(_slow)
+    async def _slow1():
+        await event1.wait()
 
-    with pytest.raises(DeviceBusyError):
-        await tm.start(_slow)
+    tid1 = await tm.start(_slow1)
+    await asyncio.sleep(0.01)
+    assert tm.is_busy()
 
-    event.set()
+    # Second start should be rejected (no preemption)
+    with pytest.raises(DeviceBusyError, match="already running"):
+        await tm.start(lambda: _slow1())
+
+    # Original task is still running
+    assert tm.is_busy()
+    assert tm.current_id() == tid1
+
+    # Clean up
+    event1.set()
     await asyncio.sleep(0.05)
 
 
@@ -290,7 +300,7 @@ async def test_safe_getter_malformed_result():
 
     with pytest.raises(HTTPException) as exc_info:
         await _handler()
-    assert exc_info.value.status_code == 500
+    assert exc_info.value.status_code == 503  # Malformed result → 503
 
 
 # ── tasked_getter decorator ───────────────────────────────────────
@@ -315,23 +325,79 @@ async def test_tasked_getter_starts_task():
 
 
 @pytest.mark.asyncio
-async def test_tasked_getter_busy():
+async def test_tasked_getter_rejects_duplicate():
+    """tasked_getter: second call while busy returns HTTP 202 (busy)."""
     from routes.decorators import tasked_getter, task_manager
     from models.api_types import RobotActionResponse
     from fastapi import HTTPException
 
-    event = asyncio.Event()
+    event1 = asyncio.Event()
 
     @tasked_getter(RobotActionResponse)
     async def _handler():
-        await event.wait()
+        await event1.wait()
 
     # Start first task
-    await _handler()
-    # Second should raise 202
+    resp1 = await _handler()
+    assert resp1.success is True
+
+    # Second call should be rejected with 202
     with pytest.raises(HTTPException) as exc_info:
         await _handler()
     assert exc_info.value.status_code == 202
 
+    # Clean up
+    event1.set()
+    await asyncio.sleep(0.05)
+
+
+# ── _TaskManager phase info in status ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_task_status_includes_phase_while_working(tm):
+    """While a task is WORKING, status should include phase info."""
+    from unittest.mock import patch
+
+    event = asyncio.Event()
+
+    async def _work():
+        await event.wait()
+
+    tid = await tm.start(_work)
+    await asyncio.sleep(0.01)
+
+    # Patch robot_scripts to return a known phase
+    with patch("app.robot_scripts.get_task_phase", return_value={"phase": "navigate", "task_id": tid}):
+        status = tm.status(tid)
+        assert status.status.value == "working"
+        assert status.result is not None
+        assert status.result["phase"] == "navigate"
+
     event.set()
     await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_task_runner_sets_phase_task_id(tm):
+    """_runner sets phase task_id to the TaskManager's task_id."""
+    from unittest.mock import patch
+    import app.robot_scripts as rs
+
+    captured_task_id = None
+    orig_set_phase = rs._set_phase
+
+    def _capture(phase, *, task_id=None):
+        nonlocal captured_task_id
+        if task_id is not None:
+            captured_task_id = task_id
+        orig_set_phase(phase, task_id=task_id)
+
+    async def _work():
+        return "done"
+
+    with patch.object(rs, "_set_phase", side_effect=_capture):
+        tid = await tm.start(_work)
+        await asyncio.sleep(0.05)
+
+    assert captured_task_id == tid, "TaskManager should propagate task_id to phase tracker"

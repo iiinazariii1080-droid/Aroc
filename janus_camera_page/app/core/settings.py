@@ -20,7 +20,7 @@ class Settings:
     templates_dir: Path = PROJECT_DIR / "templates"
     static_dir: Path = PROJECT_DIR / "static"
     env_path: Path = Path(os.environ.get("CAM_ENV_PATH", "/etc/robot/cam-rgb.env"))
-    lock_path: Path = Path(os.environ.get("CAM_ENV_LOCK_PATH", "/tmp/cam-rgb.env.lock"))
+    lock_path: Path = Path(os.environ.get("CAM_ENV_LOCK_PATH", "/run/camera/cam-rgb.env.lock"))
     camera_device: str = os.environ.get("CAM_DEVICE", "/dev/cam-rgb")
     camera_type: str = os.environ.get("CAM_TYPE", "color_camera")
     service_name: str = os.environ.get("CAM_SERVICE", "rtp-rgb@cam-rgb.service")
@@ -29,11 +29,13 @@ class Settings:
     janus_url: str = os.environ.get("JANUS_URL", f"http://127.0.0.1:{PORTS.JANUS_HTTP}/janus").rstrip("/")
     janus_timeout: float = float(os.environ.get("JANUS_TIMEOUT", "3"))
     janus_mount_id: int = int(os.environ.get("JANUS_MOUNT_ID", "1305"))
+    janus_color_stream_id: int = int(os.environ.get("JANUS_COLOR_STREAM_ID", "1305"))
+    janus_depth_stream_id: int = int(os.environ.get("JANUS_DEPTH_STREAM_ID", "1306"))
+    janus_ir_stream_id: int = int(os.environ.get("JANUS_IR_STREAM_ID", "1307"))
     janus_http_base: str = os.environ.get("JANUS_HTTP", f"http://127.0.0.1:{PORTS.JANUS_HTTP}")
     relay_url: str = os.environ.get("RELAY_URL", f"http://127.0.0.1:{PORTS.DEPTH_PROXY}").rstrip("/")
     depth_cam_url: str = os.environ.get("DEPTH_CAM_URL", f"http://{DEVICES.DEPTH_CAMERA_IP}:{PORTS.COLOR_CAMERA}").rstrip("/")
     realsense_mux_url: str = os.environ.get("REALSENSE_MUX_URL", "http://localhost:8000")
-    allow_insecure_tls: bool = os.environ.get("ALLOW_INSECURE_TLS", "0") == "1"
     turn_host: str = os.getenv("TURN_HOST", DEVICES.TURN_HOST)
     turn_port: int = int(os.getenv("TURN_PORT", "3478"))
     turn_user: str = os.getenv("TURN_USER", "webrtc")
@@ -60,13 +62,19 @@ class Settings:
     watchdog_grace_sec: int = int(os.environ.get("WATCHDOG_GRACE_SEC", "60"))
     watchdog_reboot_enabled: bool = os.environ.get("CAM_WATCHDOG_REBOOT_ENABLED", "1") == "1"
     max_fdir_reboots: int = int(os.environ.get("MAX_FDIR_REBOOTS", "2"))
+    fps_profile_path: Path = Path(os.environ.get("FPS_PROFILE_PATH", "/run/camera/fps_profile"))
+    mode_history_path: Path = Path(os.environ.get("MODE_HISTORY_PATH", "/run/camera/mode_history.json"))
+    ws_max_connections: int = int(os.environ.get("WS_MAX_CONNECTIONS", "10"))
+    ws_msg_rate_per_sec: float = float(os.environ.get("WS_MSG_RATE_PER_SEC", "60"))
     cors_origin_regex: str = os.environ.get(
         "CORS_ORIGIN_REGEX",
         r"^https?://"
-        r"(localhost|127\.0\.0\.1|192\.168\.1\.\d{1,3})"
+        r"(localhost|127\.0\.0\.1|192\.168\.1\.(?:[1-9]?\d|1\d\d|2[0-4]\d|25[0-5]))"
         r"(:\d+)?$"
         r"|^https://[\w-]+\.techvisioncloud\.pl$",
     )
+    # Dict keyed by backend ID — single-entry for now, structured as dict
+    # to allow future multi-backend failover (add JANUS_WS_URL_2 etc.).
     janus_ws_backends: Dict[str, str] = field(
         default_factory=lambda: {
             "1": os.getenv("JANUS_WS_URL_1", f"ws://127.0.0.1:{PORTS.JANUS_WS}/janus-ws"),

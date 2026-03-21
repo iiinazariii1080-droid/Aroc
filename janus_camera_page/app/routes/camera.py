@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from app.core.admin import require_admin
 from app.core.settings import get_settings
+from app.middleware.rate_limit import require_admin_rate_limit
 from app.services.env_store import read_env, write_env_atomic
 from app.services.system import run as run_cmd
 from app.services.v4l2 import list_v4l2_modes
@@ -18,6 +19,7 @@ router = APIRouter(tags=["camera"])
 RTP_RGB_SERVICE = os.environ.get("RTP_RGB_SERVICE", "rtp-rgb@cam-rgb.service")
 
 ADMIN_DEPENDENCY = Depends(require_admin)
+ADMIN_RATE_LIMIT = Depends(require_admin_rate_limit)
 
 
 class CameraMode(BaseModel):
@@ -75,7 +77,7 @@ def get_camera_modes() -> CameraModesResponse:
 @router.get(
     "/config",
     response_model=CameraStreamConfig,
-    dependencies=[ADMIN_DEPENDENCY],
+    dependencies=[ADMIN_DEPENDENCY, ADMIN_RATE_LIMIT],
     summary="Read applied RTP/ffmpeg configuration (admin)",
     description="Loads cam-rgb.env from disk.",
 )
@@ -109,7 +111,7 @@ async def get_camera_stream_config() -> CameraStreamConfig:
 @router.post(
     "/config",
     response_model=CameraStreamConfig,
-    dependencies=[ADMIN_DEPENDENCY],
+    dependencies=[ADMIN_DEPENDENCY, ADMIN_RATE_LIMIT],
     summary="Update cam-rgb.env and restart the RTP service (admin)",
     description=(
         "Overwrites `/etc/robot/cam-rgb.env` and executes `systemctl restart rtp-rgb@cam-rgb.service`."

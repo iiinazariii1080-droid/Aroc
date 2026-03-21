@@ -121,16 +121,16 @@
     })();
     const backoffJitterRatio = (() => {
       const raw = Number(dataset.backoffJitterRatio);
-      return Number.isFinite(raw) ? Math.min(0.8, Math.max(0.0, raw)) : 0;
+      return Number.isFinite(raw) ? Math.min(0.8, Math.max(0.0, raw)) : 0.3;
     })();
     // Reconnect attempt limit: default from AP.Core.MAX_RECONNECT_ATTEMPTS, clamped [3, 50]. Exhausted -> single transition to ERROR (L15: timers cleared).
     const maxReconnectAttempts = clampInt(dataset.maxReconnectAttempts, 3, 50, AP.Core.MAX_RECONNECT_ATTEMPTS ?? 12);
     const iceDisconnectedGraceMs = clampInt(dataset.iceDisconnectedGraceMs, 1000, 30000, 3000);
     const connectSettleMs = clampInt(dataset.connectSettleMs, 500, 20000, 6000);
-    const settleStartTimeoutMs = clampInt(dataset.settleStartTimeoutMs, 3000, 60000, 15000);
+    const settleStartTimeoutMs = clampInt(dataset.settleStartTimeoutMs, 3000, 60000, 5000);
     const reconnectAttemptTimeoutMs = clampInt(dataset.reconnectAttemptTimeoutMs, 5000, 60000, 15000);
-    const maxWatchRetries = clampInt(dataset.maxWatchRetries, 0, 20, 3);
-    const maxReattachRetries = clampInt(dataset.maxReattachRetries, 0, 20, 2);
+    const maxWatchRetries = clampInt(dataset.maxWatchRetries, 0, 20, 1);
+    const maxReattachRetries = clampInt(dataset.maxReattachRetries, 0, 20, 1);
 
     // ERROR state auto-recovery: retry after exponential delay (base * 2^count, capped at max).
     const errorAutoRetryBaseMs = clampInt(dataset.errorAutoRetryBaseMs, 5000, 60000, 10000);
@@ -144,6 +144,9 @@
     const preferStreamId = dataset.preferStreamId ? parseInt(dataset.preferStreamId, 10) : null;
     const streamName = dataset.streamName || 'RealSense Stream';
     const clientConfigPath = dataset.clientConfigPath || `/api/v1/${CAM_TYPE}/client-config`;
+    const healthCheckBeforeReconnect = resolveFeatureFlag(dataset.healthCheckBeforeReconnect, true);
+    const healthCheckUrl = joinUrl(restBase, 'janus/healthz');
+    const healthCheckTimeoutMs = clampInt(dataset.healthCheckTimeoutMs, 1000, 10000, 3000);
 
     return {
       debug: !!debugEnabled,
@@ -207,6 +210,9 @@
       errorAutoRetryMaxMs,
       visibilityAwareReconnect,
       sessionTimeoutMs,
+      healthCheckBeforeReconnect,
+      healthCheckUrl,
+      healthCheckTimeoutMs,
     };
   }
 

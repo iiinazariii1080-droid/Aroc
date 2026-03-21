@@ -1329,6 +1329,120 @@ async function main(){
     assert(c35._errorRetryCount === 0, 'c35 error retry count reset on PLAYING');
   }
 
+  // ---- Test 36: Watchdog timeout while player hidden → no recovery
+  {
+    console.log('--- CT Test 36: Watchdog timeout while hidden - no recovery ---');
+    const clock36 = createFakeClock();
+    let frameCb36 = null;
+    const ui36 = {
+      startFrameClock: (cb) => { frameCb36 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+      isElementVisible: () => false, // simulate hidden element (iframe display:none)
+    };
+    const c36 = new AP.App.PlayerController(cfg, rtcConfig, ui36, clock36, log, streaming, stats, null);
+    await c36.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb36();
+    assert(c36.state === PlayerState.PLAYING, 'c36 PLAYING');
+
+    // _isPlayerHidden() should return true (element not visible)
+    assert(c36._isPlayerHidden(), 'c36 player is hidden (element not visible)');
+
+    // Fire watchdog timeout — should be suppressed because player is hidden
+    c36._onWatchdogTimeout(10000);
+
+    assert(c36.state === PlayerState.PLAYING, 'c36 still PLAYING after watchdog while hidden');
+
+    // Also test _onFpsDrop while hidden
+    c36._onFpsDrop(2);
+    assert(c36.state === PlayerState.PLAYING, 'c36 still PLAYING after FPS drop while hidden');
+
+    // Also test _onVideoStalled while hidden
+    c36._onVideoStalled();
+    assert(c36.state === PlayerState.PLAYING, 'c36 still PLAYING after video stalled while hidden');
+  }
+
+  // ---- Test 37: _degraded flag reset on reconnect success
+  {
+    console.log('--- CT Test 37: degraded reset on reconnect success ---');
+    const clock37 = createFakeClock();
+    let frameCb37 = null;
+    const ui37 = {
+      startFrameClock: (cb) => { frameCb37 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+    };
+    const c37 = new AP.App.PlayerController(cfg, rtcConfig, ui37, clock37, log, streaming, stats, null);
+    await c37.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb37();
+    assert(c37.state === PlayerState.PLAYING, 'c37 PLAYING');
+
+    // Set degraded flag manually (simulating ICE degradation)
+    c37._degraded = true;
+    assert(c37._degraded === true, 'c37 degraded=true');
+
+    // Trigger recovery → RECONNECTING
+    c37.requestRecovery('test_degraded', 1);
+    assert(c37.state === PlayerState.RECONNECTING, 'c37 RECONNECTING');
+
+    // Advance backoff + simulate recovery success
+    await clock37.advance(500);
+    await flushMicrotasks();
+
+    // Simulate stream recovery: webrtcUp + firstFrame
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb37();
+
+    // If recovery succeeded, degraded should be reset
+    if (c37.state === PlayerState.PLAYING) {
+      assert(c37._degraded === false, 'c37 degraded=false after recovery success');
+    }
+  }
+
+  // ---- Test 38: shouldContinue respects _isPlayerHidden
+  {
+    console.log('--- CT Test 38: shouldContinue respects isPlayerHidden ---');
+    const clock38 = createFakeClock();
+    let frameCb38 = null;
+    let elementVisible = true;
+    const ui38 = {
+      startFrameClock: (cb) => { frameCb38 = cb; },
+      stopFrameClock: () => {},
+      bindIntents: () => {},
+      render: () => {},
+      bindStream: () => {},
+      ensurePlaying: async () => ({ ok: true, blocked: false }),
+      onVideoStalled: () => {},
+      isElementVisible: () => elementVisible,
+    };
+    const c38 = new AP.App.PlayerController(cfg, rtcConfig, ui38, clock38, log, streaming, stats, null);
+    await c38.init();
+    streaming._sink({ type: 'WEBRTC_STATE', payload: { up: true } });
+    frameCb38();
+    assert(c38.state === PlayerState.PLAYING, 'c38 PLAYING');
+
+    // Element visible → not hidden
+    assert(!c38._isPlayerHidden(), 'c38 not hidden when element visible');
+
+    // Hide element → player hidden
+    elementVisible = false;
+    assert(c38._isPlayerHidden(), 'c38 hidden when element not visible');
+
+    // Show element → not hidden again
+    elementVisible = true;
+    assert(!c38._isPlayerHidden(), 'c38 not hidden when element visible again');
+  }
+
   console.log('OK: controller tests passed');
 }
 

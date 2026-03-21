@@ -129,7 +129,7 @@ class TestPlayerScript:
         with patch("app.routes.templates.get_settings") as mock_s:
             mock_s.return_value = MagicMock(templates_dir=str(tmp_path), camera_type="rgb_camera")
             resp = await client.get("/player/../../../etc/passwd")
-        assert resp.status_code in (400, 403, 404)
+        assert resp.status_code == 404
 
 
 class TestFavicon:
@@ -138,7 +138,8 @@ class TestFavicon:
         with patch("app.routes.templates.get_settings") as mock_s:
             mock_s.return_value = MagicMock(templates_dir="/nonexistent", camera_type="rgb_camera")
             resp = await client.get("/favicon.ico")
-        assert resp.status_code in (404, 204)
+        # favicon() returns 204 when the file is missing
+        assert resp.status_code == 204
 
 
 class TestColorView:

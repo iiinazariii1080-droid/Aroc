@@ -23,14 +23,16 @@ def settings():
     return Settings()
 
 
+_TEST_TOKEN = "test-token-conftest-default"
+
+
 @pytest.fixture
 def app():
     """Create a test-safe app instance with mocked event handlers."""
     with patch("app.core.events.register_event_handlers", lambda app: None), \
-         patch.dict(os.environ, {"CAM_ADMIN_ENFORCE": "0"}):
-        # Reload admin module so it picks up the test override
+         patch.dict(os.environ, {"CAM_ADMIN_TOKEN": _TEST_TOKEN}):
         import app.core.admin as _admin
-        _admin._ENFORCE = False
+        _admin.ADMIN_TOKEN = _TEST_TOKEN
         from app.core.app import create_app
         return create_app()
 
@@ -39,4 +41,16 @@ def app():
 async def client(app):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+
+@pytest.fixture
+async def admin_client(app):
+    """Client that sends X-Admin-Token on every request."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-Admin-Token": _TEST_TOKEN},
+    ) as ac:
         yield ac

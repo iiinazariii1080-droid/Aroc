@@ -39,7 +39,7 @@ async def test_safety_layer_heartbeat():
         assert heartbeat_ts > initial_ts, "Heartbeat should update last_msg_ts"
 
         # Should be very recent
-        assert time.time() - heartbeat_ts < 0.01, "Heartbeat timestamp should be current"
+        assert time.monotonic() - heartbeat_ts < 0.01, "Heartbeat timestamp should be current"
 
     finally:
         await safety.stop()
@@ -130,7 +130,7 @@ async def test_safety_layer_watchdog_with_messages():
     try:
         # Send messages frequently
         for i in range(10):
-            test_msg = {"type": "report", "cmd": "status", "data": {"ts": time.time()}}
+            test_msg = {"type": "report", "cmd": "status", "data": {"ts": time.monotonic()}}
             await safety.handle_message(test_msg)
             await asyncio.sleep(0.1)  # Much less than watchdog timeout
 
@@ -162,7 +162,7 @@ async def test_safety_layer_hold_timeout():
 
     try:
         # Send move_step_over message to start hold timer
-        move_over_msg = {"type": "request", "cmd": "xarm_move_step_over", "data": {"ts": time.time()}}
+        move_over_msg = {"type": "request", "cmd": "xarm_move_step_over", "data": {"ts": time.monotonic()}}
         await safety.handle_message(move_over_msg)
 
         # Wait longer than hold timeout
@@ -201,7 +201,7 @@ async def test_safety_layer_expired_command():
             "type": "request",
             "cmd": "xarm_move_step",
             "data": {
-                "ts": time.time() - 10,  # 10 seconds ago
+                "ts": time.monotonic() - 10,  # 10 seconds ago
                 "ttl": 1.0  # 1 second TTL
             }
         }
@@ -214,5 +214,92 @@ async def test_safety_layer_expired_command():
         # Should not forward expired message
         assert len(forwarded_messages) == 0, "Expired message should not be forwarded"
 
+    finally:
+        await safety.stop()
+
+
+# ── E-stop gate tests ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_handle_message_blocks_move_step_during_estop():
+    """Motion commands blocked when estop_check returns True."""
+    stop_calls = []
+    forwarded = []
+
+    async def fake_send_stop(reason):
+        stop_calls.append(reason)
+
+    async def fake_forward(msg):
+        forwarded.append(msg)
+
+    safety = SafetyLayer(
+        send_stop=fake_send_stop,
+        forward_command=fake_forward,
+        watchdog_timeout=2.0,
+        hold_timeout=2.0,
+        estop_check=lambda: True,
+    )
+    try:
+        msg = {"type": "request", "cmd": "xarm_move_step", "data": {"ts": time.monotonic()}}
+        await safety.handle_message(msg)
+        assert "estop_active" in stop_calls, f"Expected estop_active stop, got: {stop_calls}"
+        assert len(forwarded) == 0, "Motion command should NOT be forwarded during E-stop"
+    finally:
+        await safety.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_message_allows_report_during_estop():
+    """Non-motion messages (reports) pass through even during E-stop."""
+    stop_calls = []
+    forwarded = []
+
+    async def fake_send_stop(reason):
+        stop_calls.append(reason)
+
+    async def fake_forward(msg):
+        forwarded.append(msg)
+
+    safety = SafetyLayer(
+        send_stop=fake_send_stop,
+        forward_command=fake_forward,
+        watchdog_timeout=2.0,
+        hold_timeout=2.0,
+        estop_check=lambda: True,
+    )
+    try:
+        msg = {"type": "report", "cmd": "devices_status_report", "data": {"ts": time.monotonic()}}
+        await safety.handle_message(msg)
+        assert len(forwarded) == 1, "Report should be forwarded even during E-stop"
+        assert "estop_active" not in stop_calls
+    finally:
+        await safety.stop()
+
+
+@pytest.mark.asyncio
+async def test_handle_message_passes_move_step_without_estop():
+    """Motion commands forwarded normally when estop_check returns False."""
+    stop_calls = []
+    forwarded = []
+
+    async def fake_send_stop(reason):
+        stop_calls.append(reason)
+
+    async def fake_forward(msg):
+        forwarded.append(msg)
+
+    safety = SafetyLayer(
+        send_stop=fake_send_stop,
+        forward_command=fake_forward,
+        watchdog_timeout=2.0,
+        hold_timeout=2.0,
+        estop_check=lambda: False,
+    )
+    try:
+        msg = {"type": "request", "cmd": "xarm_move_step", "data": {"ts": time.monotonic()}}
+        await safety.handle_message(msg)
+        assert len(forwarded) == 1, "Motion command should be forwarded when no E-stop"
+        assert "estop_active" not in stop_calls
     finally:
         await safety.stop()

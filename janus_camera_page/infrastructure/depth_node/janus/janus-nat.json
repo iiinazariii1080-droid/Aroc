@@ -9,8 +9,9 @@
   "nat_1_1_mapping": "",
   "ice_tcp": false,
   "full_trickle": true,
-  "ice_enforce_list": "eth0",
-  "keep_private_host": false,
+  "ice_enforce_list": "",
+  "ice_ignore_list": ["docker", "veth", "lo", "vmnet", "tailscale"],
+  "keep_private_host": true,
   "min_port": 40000,
   "max_port": 41000
 }

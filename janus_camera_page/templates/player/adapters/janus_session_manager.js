@@ -70,7 +70,7 @@
 
       const that = this;
       const initGen = this._gen;
-      const INIT_TIMEOUT_MS = 8000;
+      const INIT_TIMEOUT_MS = 25000;
 
       this._ensurePromise = (async () => {
         const cfg = that.cfg;
@@ -89,6 +89,9 @@
 
         const janusPromise = new Promise((resolve, reject) => {
           try {
+            if (typeof Janus === 'undefined') {
+              throw new Error('Janus library not loaded — check janus.js script tag or CSP');
+            }
             that.janus = new Janus({
               server,
               iceServers,
@@ -124,7 +127,9 @@
               const zombie = that.janus;
               that.janus = null;
               if (zombie) {
+                that._destroyingByUs = true;
                 try { zombie.destroy({ asyncRequest: true }); } catch (_) {}
+                that._destroyingByUs = false;
               }
             }
             reject(new Error('janus_init_timeout'));
