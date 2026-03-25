@@ -28,11 +28,13 @@ nat: {
   stun_server = "82.165.177.194"
   stun_port   = 3478
 
+  # TURN credentials MUST be ephemeral (coturn use-auth-secret).
+  # See color_node/janus/janus.jcfg for generation command.
   turn_server = "82.165.177.194"
   turn_port   = 3478
   turn_type   = "tcp"
-  turn_user   = "webrtc"
-  turn_pwd    = "__TURN_PWD__"
+  turn_user   = "__TURN_EPHEMERAL_USER__"
+  turn_pwd    = "__TURN_EPHEMERAL_PWD__"
 
   nat_1_1_mapping = ""
   min_port = 40000

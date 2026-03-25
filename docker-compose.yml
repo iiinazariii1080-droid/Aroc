@@ -24,6 +24,19 @@ x-healthcheck-defaults: &hc-defaults
   start_period: 15s
 
 services:
+  # ---------- Autoheal (restart unhealthy containers) ----------
+  autoheal:
+    image: willfarrell/autoheal
+    container_name: autoheal
+    restart: unless-stopped
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: all
+      AUTOHEAL_INTERVAL: 60
+      AUTOHEAL_START_PERIOD: 60
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    logging: *default-logging
+
   # ---------- API Gateway (reverse proxy / aggregator) ----------
   api-gateway:
     build:

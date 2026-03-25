@@ -16,18 +16,21 @@ nat: {
   full_trickle = true
   ignore_mdns = true
   keep_private_host = false
-  ice_ignore_list = [ "docker", "veth", "lo", "vmnet", "tailscale" ]
+  ice_enforce_list = "wlan0"
 
   stun_server = "82.165.177.194"
   stun_port   = 3478
 
+  # TURN credentials MUST be ephemeral (coturn use-auth-secret).
+  # Generate with: python3 -c "import time,hmac,hashlib,base64; s='<TURN_SHARED_SECRET>'; e=int(time.time())+365*86400; u=f'{e}:webrtc'; print(f'turn_user=\"{u}\"'); print(f'turn_pwd=\"{base64.b64encode(hmac.new(s.encode(),u.encode(),hashlib.sha1).digest()).decode()}\"')"
+  # Static passwords (lt-cred-mech) do NOT work with coturn use-auth-secret.
   turn_server = "82.165.177.194"
   turn_port   = 3478
   turn_type   = "tcp"
-  turn_user   = "webrtc"
-  turn_pwd    = "__TURN_PWD__"
+  turn_user   = "__TURN_EPHEMERAL_USER__"
+  turn_pwd    = "__TURN_EPHEMERAL_PWD__"
 
-  nat_1_1_mapping = "87.156.23.54"
+  nat_1_1_mapping = "87.156.29.182"
   min_port = 40000
   max_port = 41000
 }

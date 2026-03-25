@@ -1215,12 +1215,25 @@ async def _preflight_for_navigation(caller: str) -> float:
     """
     v = _get_global_velocity()
 
-    # Deactivate charging stations so AGV doesn't return to dock after navigation
-    try:
-        res = await agv.disable_all_charging_stations()
-        logger.info("%s: charging stations deactivated: %s", caller, res)
-    except Exception as e:
-        logger.warning("%s: charging station deactivation failed (continuing): %s", caller, e)
+    # Deactivate charging stations so AGV doesn't return to dock after navigation.
+    # Retry up to 3 times — if stations stay active, Symovo may autonomously
+    # drive to the charger mid-task with arm/lift deployed.
+    _CHARGING_DEACTIVATE_DELAYS = (3.0, 8.0, 13.0)
+    for _attempt, _delay in enumerate(_CHARGING_DEACTIVATE_DELAYS, 1):
+        try:
+            res = await agv.disable_all_charging_stations()
+            logger.info("%s: charging stations deactivated (attempt %d): %s", caller, _attempt, res)
+            if res.get("all_inactive"):
+                break
+            logger.warning("%s: charging stations still active after attempt %d: %s", caller, _attempt, res)
+        except Exception as e:
+            logger.warning("%s: charging station deactivation failed (attempt %d): %s", caller, _attempt, e)
+        if _attempt < len(_CHARGING_DEACTIVATE_DELAYS):
+            await asyncio.sleep(_delay)
+    else:
+        raise DeviceReadyError(
+            f"{caller}: failed to deactivate charging stations after {len(_CHARGING_DEACTIVATE_DELAYS)} attempts — aborting to prevent unsafe AGV motion"
+        )
 
     # Auto-recover devices — strict: abort if any device fails
     try:
@@ -1241,12 +1254,12 @@ async def _preflight_for_navigation(caller: str) -> float:
         logger.info("%s: PREFLIGHT → JOB_POSE", caller)
         await _move_to_job_pose(v)
 
-    # Lift down if too high for transport
+    # Lift down to 0 for transport
     pos_resp = await lift.position()
     lift_pos = pos_resp.get("position", 0) if isinstance(pos_resp, dict) else float(pos_resp or 0)
-    if lift_pos > LIFT_TRANSPORT_MAX:
-        logger.info("%s: PREFLIGHT lift too high (%s) → %d", caller, lift_pos, LIFT_TRANSPORT_MAX)
-        await igus_move_and_check(LIFT_TRANSPORT_MAX, v)
+    if lift_pos > 0:
+        logger.info("%s: PREFLIGHT lift down (%s) → 0", caller, lift_pos)
+        await igus_move_and_check(0, v)
 
     return v
 
