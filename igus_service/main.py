@@ -4,6 +4,7 @@ Composes middleware, exception handlers, routers and static files.
 Business logic lives in ``app/`` subpackages.
 """
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -28,6 +29,10 @@ from app.version import SERVER_VERSION
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    startup_delay = float(os.environ.get("STARTUP_DELAY_S", "0"))
+    if startup_delay > 0:
+        logging.getLogger(__name__).info("Waiting %.0fs for motor controller to boot...", startup_delay)
+        await asyncio.sleep(startup_delay)
     await startup(app)
     try:
         yield

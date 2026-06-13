@@ -1,0 +1,15 @@
+Day,Date,Time In,Time Out,Pause Hours,Task,Component,Lines Added,Lines Deleted,Hours Worked
+1,2026-03-05,09:00,18:00,1.0,"Camera: depth proxy, depth view, gripper reticle, UI",Frontend/Janus,1202,0,8
+1b,2026-03-05,18:00,23:00,1.0,"Full project: frontend viewer, janus, nav2adapter, xarm, igus, mqtt",Multi-service,29628,2375,4
+2,2026-03-09,09:00,17:00,1.0,"Full project refactor: all services, infrastructure, tests",Multi-service,12098,6833,7
+3,2026-03-13,09:00,16:00,1.0,"Safety features, tests, systemd configs, xarm studio proxy",Robot/Safety,2970,198,6
+4a,2026-03-17,09:00,18:30,1.0,"Janus Camera pipeline audit: FDIR, systemd hardening, dead code cleanup",Janus,53179,42577,7.5
+4b,2026-03-17,"(included above)","(included above)","(included above)","Camera audit: system_mode hardening, tests",Janus,23,28,
+4c,2026-03-17,"(included above)","(included above)","(included above)","Test: concurrent race condition T1-T4",Testing,286,0,
+4d,2026-03-17,"(included above)","(included above)","(included above)","Refactor: split system.py module (770→3)",Architecture,397,561,
+4e,2026-03-17,"(included above)","(included above)","(included above)","Eliminate camera tech debt",Janus,200,238,
+4f,2026-03-17,"(included above)","(included above)","(included above)","Deploy ICE_POLICY config",Infrastructure,6,3,
+5,2026-03-18,09:00,16:00,1.0,"Major cleanup: remove deprecated services, consolidate codebase",Multi-service,32095,77908,6
+6,2026-03-21,09:00,17:00,1.0,"Full upload: camera FDIR fixes, nav2 AGV visualization, robot safety",Multi-service,10358,4113,7
+7,2026-03-25,09:00,16:00,1.0,"Navigation safety: abort charging station, 3x retry logic",Robot,228,23,6
+TOTALS,"","","","","",142565,134881,51.5

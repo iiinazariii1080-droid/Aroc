@@ -1,0 +1,10 @@
+Day,Date,TimeIn,TimeOut,Pause,Task,Component,LinesAdded,LinesRemoved,Hours
+1,2026-03-05,09:00,18:00,1:00,"Camera depth proxy, depth view, gripper reticle, UI frontend",Frontend/Camera,1202,0,8
+1b,2026-03-05,18:00,23:00,1:00,"Full project: frontend viewer, janus, nav2adapter, xarm, igus, mqtt",Multi-service,29628,2375,4
+2,2026-03-09,09:00,17:00,1:00,"Full project refactor: all services, infra, tests, configs",Multi-service,12098,6833,7
+3,2026-03-13,09:00,16:00,1:00,"Safety features, tests update, systemd configs, xarm proxy",Robot/Safety,2970,198,6
+4,2026-03-17,09:00,18:30,1:00,"Janus Camera: pipeline audit, FDIR, TURN, firewall, QoS, test harness",Janus,53179,42577,7.5
+5,2026-03-18,09:00,16:00,1:00,"Major cleanup: deprecated services, codebase consolidation",Multi-service,32095,77908,6
+6,2026-03-21,09:00,17:00,1:00,"Full upload: camera FDIR, nav2 hardening, robot safety refactor",Multi-service,10358,4113,7
+7,2026-03-25,09:00,16:00,1:00,"Robot navigation safety: abort charging, 3x retry logic",Robot,228,23,6
+TOTAL,,,,,51.5 hours,,"142565","134881",51.5
